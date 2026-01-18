@@ -7,10 +7,7 @@ class SourceRule {
   final String url;
   final Map<String, String>? headers;
   final Map<String, dynamic>? fixedParams;
-  
-  // 🔥 新增：API Key (用于 Wallhaven 等需要密钥的图源)
   final String? apiKey;
-  
   final List<SourceFilter>? filters;
   
   final String paramPage;
@@ -30,7 +27,7 @@ class SourceRule {
     required this.url,
     this.headers,
     this.fixedParams,
-    this.apiKey, // 新增
+    this.apiKey,
     this.filters,
     this.paramPage = 'page',
     this.paramKeyword = 'q',
@@ -50,7 +47,6 @@ class SourceRule {
       url: map['url'] ?? '',
       headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
       fixedParams: map['fixed_params'],
-      // 🔥 解析 apiKey
       apiKey: map['api_key'],
       filters: map['filters'] != null 
           ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList() 
@@ -74,7 +70,7 @@ class SourceRule {
       'url': url,
       'headers': headers,
       'fixed_params': fixedParams,
-      'api_key': apiKey, // 序列化
+      'api_key': apiKey,
       'filters': filters?.map((e) => e.toJson()).toList(),
       'params': {
         'page': paramPage,
@@ -96,22 +92,30 @@ class SourceRule {
 class SourceFilter {
   final String key;
   final String name;
-  final String type;
+  final String type; // 'radio' (单选) 或 'checklist' (多选)
+  final String separator; // 🔥 新增：多选时的拼接符，默认是 ","
   final List<FilterOption> options;
 
-  SourceFilter({required this.key, required this.name, required this.type, required this.options});
+  SourceFilter({
+    required this.key, 
+    required this.name, 
+    required this.type, 
+    this.separator = ',', 
+    required this.options
+  });
 
   factory SourceFilter.fromJson(Map<String, dynamic> json) {
     return SourceFilter(
       key: json['key'],
       name: json['name'],
       type: json['type'] ?? 'radio',
+      separator: json['separator'] ?? ',', // 默认逗号
       options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
     );
   }
 
   Map<String, dynamic> toJson() => {
-    'key': key, 'name': name, 'type': type,
+    'key': key, 'name': name, 'type': type, 'separator': separator,
     'options': options.map((e) => e.toJson()).toList()
   };
 }
