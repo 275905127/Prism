@@ -1,3 +1,4 @@
+// lib/ui/pages/home_page.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
@@ -6,7 +7,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
-import '../widgets/foggy_app_bar.dart'; // 🔥 引入我们刚写的组件
+import '../widgets/foggy_app_bar.dart';
+import '../widgets/filter_sheet.dart'; // 🔥 引入筛选面板
 import 'wallpaper_detail_page.dart';
 import 'wallpaper_search_delegate.dart';
 
@@ -25,9 +27,10 @@ class _HomePageState extends State<HomePage> {
   bool _loading = false;
   int _page = 1;
   bool _hasMore = true;
-  
-  // 🔥 新增：滚动状态
   bool _isScrolled = false;
+
+  // 🔥 存储当前的筛选状态
+  Map<String, dynamic> _currentFilters = {};
 
   @override
   void initState() {
@@ -45,15 +48,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _onScroll() {
-    // 监听滚动距离，更新 AppBar 状态
     final isScrolled = _scrollController.hasClients && _scrollController.offset > 0;
-    if (isScrolled != _isScrolled) {
-      setState(() => _isScrolled = isScrolled);
-    }
+    if (isScrolled != _isScrolled) setState(() => _isScrolled = isScrolled);
 
     if (_loading || !_hasMore) return;
-    if (_scrollController.position.pixels >= 
-        _scrollController.position.maxScrollExtent - 200) {
+    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
       _fetchData(refresh: false);
     }
   }
@@ -63,6 +62,7 @@ class _HomePageState extends State<HomePage> {
     final rule = manager.activeRule;
     if (rule == null) return;
     if (_loading) return;
+    
     setState(() {
       _loading = true;
       if (refresh) {
@@ -71,8 +71,14 @@ class _HomePageState extends State<HomePage> {
         if (_wallpapers.isEmpty) _loading = true; 
       }
     });
+
     try {
-      final data = await _engine.fetch(rule, page: _page);
+      final data = await _engine.fetch(
+        rule, 
+        page: _page,
+        filterParams: _currentFilters, // 🔥 传参：带上筛选参数
+      );
+      
       if (mounted) {
         setState(() {
           if (refresh) _wallpapers = data; else _wallpapers.addAll(data);
@@ -88,8 +94,31 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // 🔥 显示筛选面板
+  void _showFilterSheet() {
+    final rule = context.read<SourceManager>().activeRule;
+    if (rule == null || rule.filters == null || rule.filters!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("当前图源不支持筛选")));
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => FilterSheet(
+        filters: rule.filters!,
+        currentValues: _currentFilters,
+        onApply: (newValues) {
+          setState(() => _currentFilters = newValues);
+          _fetchData(refresh: true); // 重新加载
+        },
+      ),
+    );
+  }
+
   void _showImportDialog(BuildContext context) {
-    final TextEditingController controller = TextEditingController();
+     final TextEditingController controller = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -114,6 +143,8 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
+                // 切换图源时清空筛选
+                setState(() => _currentFilters = {}); 
                 _fetchData(refresh: true);
               } catch (e) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
@@ -130,10 +161,12 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final manager = context.watch<SourceManager>();
     final activeRule = manager.activeRule;
+    // 只有当规则里有 filters 定义时，才显示筛选按钮
+    final hasFilters = activeRule?.filters != null && activeRule!.filters!.isNotEmpty;
 
     return Scaffold(
-      extendBodyBehindAppBar: true, // 🔥 让内容延伸到 AppBar 下方
-      appBar: FoggyAppBar( // 🔥 使用封装好的组件
+      extendBodyBehindAppBar: true,
+      appBar: FoggyAppBar(
         isScrolled: _isScrolled,
         title: Text(
           activeRule?.name ?? 'Prism',
@@ -144,6 +177,12 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.search),
             onPressed: () => showSearch(context: context, delegate: WallpaperSearchDelegate()),
           ),
+          // 🔥 筛选按钮
+          if (hasFilters) 
+            IconButton(
+              icon: Icon(Icons.tune, color: _currentFilters.isNotEmpty ? Colors.black : Colors.grey[700]), // 有筛选时变黑
+              onPressed: _showFilterSheet,
+            ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () => _fetchData(refresh: true),
@@ -184,6 +223,8 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
+                      // 切换图源，重置筛选
+                      setState(() => _currentFilters = {}); 
                       Future.delayed(const Duration(milliseconds: 200), () => _fetchData(refresh: true));
                     },
                     trailing: IconButton(
@@ -211,7 +252,6 @@ class _HomePageState extends State<HomePage> {
           ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
           : MasonryGridView.count(
               controller: _scrollController,
-              // 🔥 关键：顶部留出 100 的距离给 AppBar，否则第一排会被挡住
               padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12),
               crossAxisCount: 2,
               mainAxisSpacing: 12,
