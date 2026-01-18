@@ -203,46 +203,59 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildWallpaperItem(UniWallpaper paper) {
-    // 🔥 核心逻辑：判断等级并设置边框颜色
     Color? borderColor;
     if (paper.grade != null) {
       final g = paper.grade!.toLowerCase();
       if (g == 'nsfw') {
-        borderColor = const Color(0xFFFF0000); // 红框
+        borderColor = const Color(0xFFFF3B30); // iOS 风格红
       } else if (g == 'sketchy') {
-        borderColor = const Color(0xFFFFCC00); // 黄框 (Wallhaven 风格)
+        borderColor = const Color(0xFFFFCC00); // Wallhaven 黄
       }
-      // SFW 不设颜色，保持 null
     }
+
+    // 🔥 定义样式常量
+    const double kOuterRadius = 8.0; // 外圆角加大到 8
+    const double kBorderWidth = 1.0; // 边框变细为 1
+    // 🔥 精确计算内圆角，消除空隙
+    final double kInnerRadius = borderColor != null ? (kOuterRadius - kBorderWidth) : kOuterRadius;
 
     Widget imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
       httpHeaders: context.read<SourceManager>().activeRule?.headers,
       fit: BoxFit.fitWidth, 
       placeholder: (c, u) => Container(
-        color: Colors.grey[200],
+        color: Colors.grey[100], // 占位符颜色调浅一点
         height: paper.aspectRatio > 0 ? null : 200, 
       ),
       errorWidget: (c, u, e) => Container(
-        color: Colors.grey[100],
+        color: Colors.grey[50],
         height: 150,
-        child: const Icon(Icons.broken_image, color: Colors.grey),
+        child: const Icon(Icons.broken_image, color: Colors.grey, size: 30),
       ),
     );
 
     // 容器
     Widget content = Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).cardColor, 
-        borderRadius: BorderRadius.circular(4),
-        // 🔥 如果有等级颜色，则显示边框
+        color: Colors.white, // 强制纯白底色，确保透明图片也有底
+        borderRadius: BorderRadius.circular(kOuterRadius),
+        // 🔥 新增：质感阴影
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.06), // 极淡的阴影
+            blurRadius: 10, // 柔和扩散
+            offset: const Offset(0, 4), // 向下偏移，营造浮起感
+            spreadRadius: 0,
+          ),
+        ],
+        // 🔥 更新：细边框
         border: borderColor != null 
-            ? Border.all(color: borderColor, width: 2.0) 
+            ? Border.all(color: borderColor, width: kBorderWidth) 
             : null,
       ),
       child: ClipRRect(
-        // 如果有边框，稍微减小一点内部圆角，防止露白
-        borderRadius: BorderRadius.circular(borderColor != null ? 2 : 4),
+        // 🔥 更新：使用精确计算的内圆角
+        borderRadius: BorderRadius.circular(kInnerRadius),
         child: imageWidget,
       ),
     );
@@ -349,10 +362,11 @@ class _HomePageState extends State<HomePage> {
               ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
               : MasonryGridView.count(
                   controller: _scrollController,
-                  padding: const EdgeInsets.only(top: 100, left: 4, right: 4, bottom: 4),
+                  // 保持紧凑间距
+                  padding: const EdgeInsets.only(top: 100, left: 6, right: 6, bottom: 6),
                   crossAxisCount: 2,
-                  mainAxisSpacing: 4,
-                  crossAxisSpacing: 4,
+                  mainAxisSpacing: 6,
+                  crossAxisSpacing: 6,
                   itemCount: _wallpapers.length,
                   itemBuilder: (context, index) {
                     final paper = _wallpapers[index];
