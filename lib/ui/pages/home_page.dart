@@ -1,10 +1,10 @@
 // lib/ui/pages/home_page.dart
-import 'dart:convert'; // 🔥 新增：用于 JSON 序列化
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // 🔥 新增：本地存储
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
@@ -37,8 +37,6 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    
-    // 🔥 初始化时，先加载筛选记录，再请求数据
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initSource(); 
     });
@@ -50,13 +48,11 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  // 🔥 新增：初始化流程 (切换图源时调用)
   Future<void> _initSource() async {
-    await _loadFilters(); // 1. 先读本地缓存的筛选设置
-    _fetchData(refresh: true); // 2. 再拉取数据
+    await _loadFilters(); 
+    _fetchData(refresh: true); 
   }
 
-  // 🔥 新增：加载筛选记录
   Future<void> _loadFilters() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -64,15 +60,13 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      // Key 格式: filter_prefs_{图源ID}，确保不同图源的筛选互不干扰
       final String? jsonStr = prefs.getString('filter_prefs_${rule.id}');
-      
       if (mounted) {
         setState(() {
           if (jsonStr != null && jsonStr.isNotEmpty) {
             _currentFilters = json.decode(jsonStr);
           } else {
-            _currentFilters = {}; // 如果没有记录，重置为空
+            _currentFilters = {};
           }
         });
       }
@@ -81,7 +75,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // 🔥 新增：保存筛选记录
   Future<void> _saveFilters(Map<String, dynamic> filters) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -120,7 +113,8 @@ class _HomePageState extends State<HomePage> {
       if (refresh) {
         _page = 1;
         _hasMore = true;
-        _wallpapers.clear(); // 立即清空，提升响应速度感
+        // 🔥 核心修改：注释掉这一行！不要急着清空！
+        // _wallpapers.clear(); 
       }
     });
 
@@ -133,7 +127,17 @@ class _HomePageState extends State<HomePage> {
       
       if (mounted) {
         setState(() {
-          if (refresh) _wallpapers = data; else _wallpapers.addAll(data);
+          if (refresh) {
+            // 🔥 货到了再替换，无缝衔接
+            _wallpapers = data;
+            // 顺便滚回顶部，体验更好
+            if (_scrollController.hasClients) {
+              _scrollController.jumpTo(0);
+            }
+          } else {
+            _wallpapers.addAll(data);
+          }
+          
           if (data.isEmpty) _hasMore = false; else _page++;
           _loading = false;
         });
@@ -162,7 +166,7 @@ class _HomePageState extends State<HomePage> {
         currentValues: _currentFilters,
         onApply: (newValues) {
           setState(() => _currentFilters = newValues);
-          _saveFilters(newValues); // 🔥 点击应用时保存到本地
+          _saveFilters(newValues);
           _fetchData(refresh: true);
         },
       ),
@@ -195,7 +199,6 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
-                // 导入新规则后，重置筛选状态并重新加载
                 setState(() => _currentFilters = {}); 
                 _fetchData(refresh: true);
               } catch (e) {
@@ -273,8 +276,6 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
-                      // 🔥 切换图源时，调用 _initSource 以加载对应的筛选记录
-                      // 稍微延迟一下，让 Drawer 关闭动画流畅些
                       Future.delayed(const Duration(milliseconds: 150), () {
                         _initSource();
                       });
@@ -300,41 +301,65 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       ),
-      body: _wallpapers.isEmpty && !_loading
-          ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
-          : MasonryGridView.count(
-              controller: _scrollController,
-              padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12),
-              crossAxisCount: 2,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              itemCount: _wallpapers.length,
-              itemBuilder: (context, index) {
-                final paper = _wallpapers[index];
-                return GestureDetector(
-                  onTap: () => Navigator.push(
-                    context, 
-                    MaterialPageRoute(builder: (_) => WallpaperDetailPage(wallpaper: paper, headers: activeRule?.headers))
-                  ),
-                  child: AspectRatio(
-                    aspectRatio: paper.aspectRatio,
-                    child: Container(
-                      decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(12)),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: CachedNetworkImage(
-                          imageUrl: paper.thumbUrl, 
-                          httpHeaders: activeRule?.headers,
-                          fit: BoxFit.cover,
-                          placeholder: (c,u) => Container(color: Colors.grey[200]),
-                          errorWidget: (c,u,e) => const Icon(Icons.broken_image, color: Colors.grey),
+      body: Stack(
+        children: [
+          // 1. 底层：内容区 (如果没有数据且不加载，显示空状态)
+          _wallpapers.isEmpty && !_loading
+              ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
+              : MasonryGridView.count(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12),
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  itemCount: _wallpapers.length,
+                  itemBuilder: (context, index) {
+                    final paper = _wallpapers[index];
+                    return GestureDetector(
+                      onTap: () => Navigator.push(
+                        context, 
+                        MaterialPageRoute(builder: (_) => WallpaperDetailPage(wallpaper: paper, headers: activeRule?.headers))
+                      ),
+                      child: AspectRatio(
+                        aspectRatio: paper.aspectRatio,
+                        child: Container(
+                          decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(12)),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: CachedNetworkImage(
+                              imageUrl: paper.thumbUrl, 
+                              httpHeaders: activeRule?.headers,
+                              fit: BoxFit.cover,
+                              placeholder: (c,u) => Container(color: Colors.grey[200]),
+                              errorWidget: (c,u,e) => const Icon(Icons.broken_image, color: Colors.grey),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                );
-              },
+                    );
+                  },
+                ),
+          
+          // 2. 顶层：加载遮罩 (当加载第一页时显示)
+          // 这样旧内容还在，上面盖一层半透明白雾 + 转圈，消除白屏闪烁
+          if (_loading && _page == 1)
+            Positioned.fill(
+              child: Container(
+                color: Colors.white.withOpacity(0.6), // 半透明遮罩
+                child: const Center(
+                  child: CircularProgressIndicator(color: Colors.black),
+                ),
+              ),
             ),
+          
+          // 3. 底部加载条 (当加载更多页时显示)
+          if (_loading && _page > 1)
+             const Positioned(
+              left: 0, right: 0, bottom: 0,
+              child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: Colors.black),
+            ),
+        ],
+      ),
     );
   }
 }
