@@ -7,11 +7,14 @@ class SourceRule {
   final String url;
   final Map<String, String>? headers;
   final Map<String, dynamic>? fixedParams;
+  
+  // 🔥 新增：API Key (用于 Wallhaven 等需要密钥的图源)
+  final String? apiKey;
+  
+  final List<SourceFilter>? filters;
+  
   final String paramPage;
   final String paramKeyword;
-  
-  // 🔥 新增：筛选器列表
-  final List<SourceFilter>? filters;
   
   final String listPath;
   final String idPath;
@@ -27,7 +30,8 @@ class SourceRule {
     required this.url,
     this.headers,
     this.fixedParams,
-    this.filters, // 新增
+    this.apiKey, // 新增
+    this.filters,
     this.paramPage = 'page',
     this.paramKeyword = 'q',
     required this.listPath,
@@ -46,7 +50,8 @@ class SourceRule {
       url: map['url'] ?? '',
       headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
       fixedParams: map['fixed_params'],
-      // 🔥 解析 Filters
+      // 🔥 解析 apiKey
+      apiKey: map['api_key'],
       filters: map['filters'] != null 
           ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList() 
           : null,
@@ -69,7 +74,8 @@ class SourceRule {
       'url': url,
       'headers': headers,
       'fixed_params': fixedParams,
-      'filters': filters?.map((e) => e.toJson()).toList(), // 序列化
+      'api_key': apiKey, // 序列化
+      'filters': filters?.map((e) => e.toJson()).toList(),
       'params': {
         'page': paramPage,
         'keyword': paramKeyword,
@@ -87,11 +93,10 @@ class SourceRule {
   }
 }
 
-// 🔥 新增：筛选器模型
 class SourceFilter {
-  final String key;   // 参数名 (如 sorting)
-  final String name;  // 显示名 (如 "排序")
-  final String type;  // 类型 (目前只做 radio)
+  final String key;
+  final String name;
+  final String type;
   final List<FilterOption> options;
 
   SourceFilter({required this.key, required this.name, required this.type, required this.options});
@@ -111,10 +116,9 @@ class SourceFilter {
   };
 }
 
-// 🔥 新增：选项模型
 class FilterOption {
-  final String name;  // 显示名 (如 "热门")
-  final String value; // 参数值 (如 "toplist")
+  final String name;
+  final String value;
 
   FilterOption({required this.name, required this.value});
 
