@@ -7,24 +7,30 @@ import '../models/uni_wallpaper.dart';
 class RuleEngine {
   final Dio _dio = Dio();
 
-  Future<List<UniWallpaper>> fetch(SourceRule rule, {int page = 1, String? query}) async {
+  // 🔥 增加 filterParams 参数
+  Future<List<UniWallpaper>> fetch(SourceRule rule, {
+    int page = 1, 
+    String? query,
+    Map<String, dynamic>? filterParams, 
+  }) async {
     try {
-      // 1. 构造参数
       final Map<String, dynamic> params = {
         rule.paramPage: page,
       };
       
-      // 🔥 合并固定参数 (比如 apikey, purity, sorting)
       if (rule.fixedParams != null) {
         params.addAll(rule.fixedParams!);
       }
 
-      // 如果有搜索词，加入搜索参数
+      // 🔥 合并用户选择的筛选参数
+      if (filterParams != null) {
+        params.addAll(filterParams);
+      }
+
       if (query != null && query.isNotEmpty) {
         params[rule.paramKeyword] = query;
       }
 
-      // 2. 发起请求
       final response = await _dio.get(
         rule.url,
         queryParameters: params,
@@ -38,7 +44,6 @@ class RuleEngine {
         ),
       );
 
-      // 3. 解析数据
       final jsonMap = response.data;
       final listPath = JsonPath(rule.listPath);
       final match = listPath.read(jsonMap).firstOrNull;
@@ -49,7 +54,6 @@ class RuleEngine {
 
       final List list = match.value as List;
       
-      // 4. 映射为对象
       return list.map((item) {
         T? getValue<T>(String path, dynamic source) {
           try {
@@ -66,7 +70,6 @@ class RuleEngine {
         String thumb = getValue<String>(rule.thumbPath, item) ?? "";
         String full = getValue<String>(rule.fullPath, item) ?? thumb;
         
-        // 🔥 处理 URL 前缀 (适配 Bing 等相对路径网站)
         if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
           if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
           if (!full.startsWith('http')) full = rule.imagePrefix! + full;
