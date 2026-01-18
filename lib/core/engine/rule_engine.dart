@@ -9,18 +9,26 @@ class RuleEngine {
 
   Future<List<UniWallpaper>> fetch(SourceRule rule, {int page = 1, String? query}) async {
     try {
+      // 1. 构造参数
       final Map<String, dynamic> params = {
         rule.paramPage: page,
       };
+      
+      // 🔥 合并固定参数 (比如 apikey, purity, sorting)
+      if (rule.fixedParams != null) {
+        params.addAll(rule.fixedParams!);
+      }
+
+      // 如果有搜索词，加入搜索参数
       if (query != null && query.isNotEmpty) {
         params[rule.paramKeyword] = query;
       }
 
+      // 2. 发起请求
       final response = await _dio.get(
         rule.url,
         queryParameters: params,
         options: Options(
-          // 伪装头
           headers: rule.headers ?? {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           },
@@ -30,6 +38,7 @@ class RuleEngine {
         ),
       );
 
+      // 3. 解析数据
       final jsonMap = response.data;
       final listPath = JsonPath(rule.listPath);
       final match = listPath.read(jsonMap).firstOrNull;
@@ -40,6 +49,7 @@ class RuleEngine {
 
       final List list = match.value as List;
       
+      // 4. 映射为对象
       return list.map((item) {
         T? getValue<T>(String path, dynamic source) {
           try {
@@ -53,14 +63,21 @@ class RuleEngine {
         }
 
         final id = getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
-        final thumb = getValue<String>(rule.thumbPath, item) ?? "";
-        final full = getValue<String>(rule.fullPath, item) ?? thumb;
+        String thumb = getValue<String>(rule.thumbPath, item) ?? "";
+        String full = getValue<String>(rule.fullPath, item) ?? thumb;
+        
+        // 🔥 处理 URL 前缀 (适配 Bing 等相对路径网站)
+        if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
+          if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
+          if (!full.startsWith('http')) full = rule.imagePrefix! + full;
+        }
+
         final width = getValue<int>(rule.widthPath ?? '', item) ?? 1080;
         final height = getValue<int>(rule.heightPath ?? '', item) ?? 1920;
 
         return UniWallpaper(
           id: id.toString(),
-          sourceId: rule.id, // 🔥 修复：补上了这个必填参数
+          sourceId: rule.id,
           thumbUrl: thumb,
           fullUrl: full,
           width: width.toDouble(),
