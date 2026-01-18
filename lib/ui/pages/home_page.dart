@@ -1,3 +1,4 @@
+// lib/ui/pages/home_page.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
@@ -7,7 +8,7 @@ import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
 import 'wallpaper_detail_page.dart';
-import 'wallpaper_search_delegate.dart'; // 🔥 必须加上这一行！
+import 'wallpaper_search_delegate.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -99,19 +100,32 @@ class _HomePageState extends State<HomePage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white, // 弹窗背景白
+        surfaceTintColor: Colors.white, // 去掉 Material3 的混色
         title: const Text('导入图源规则'),
         content: TextField(
           controller: controller,
           maxLines: 10,
+          cursorColor: Colors.black, // 光标黑
           decoration: const InputDecoration(
             hintText: '在此粘贴 JSON 内容...',
             border: OutlineInputBorder(),
+            focusedBorder: OutlineInputBorder(
+              borderSide: BorderSide(color: Colors.black), // 选中框黑
+            ),
           ),
           style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx), 
+            child: const Text('取消', style: TextStyle(color: Colors.grey))
+          ),
           FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.black, // 按钮黑
+              foregroundColor: Colors.white, // 文字白
+            ),
             onPressed: () {
               if (controller.text.isEmpty) return;
               try {
@@ -140,10 +154,14 @@ class _HomePageState extends State<HomePage> {
     final activeRule = manager.activeRule;
 
     return Scaffold(
+      // 背景色已经在 main.dart 全局设置，这里不用重复设
       appBar: AppBar(
-        title: Text(activeRule?.name ?? 'Prism'),
+        title: Text(
+          activeRule?.name ?? 'Prism',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
         actions: [
-          // 🔥 新增：搜索按钮
           IconButton(
             icon: const Icon(Icons.search),
             tooltip: '搜索',
@@ -154,7 +172,6 @@ class _HomePageState extends State<HomePage> {
               );
             },
           ),
-          // 刷新按钮
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () => _fetchData(refresh: true),
@@ -164,11 +181,27 @@ class _HomePageState extends State<HomePage> {
       drawer: Drawer(
         child: Column(
           children: [
+            // 🔥 Drawer 头部改为纯白
             DrawerHeader(
-              decoration: BoxDecoration(color: Theme.of(context).primaryColor),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(bottom: BorderSide(color: Colors.black12)), // 底部细灰线
+              ),
               child: const Center(
-                child: Text('Prism 棱镜', 
-                  style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.auto_awesome, size: 48, color: Colors.black),
+                    SizedBox(height: 10),
+                    Text('Prism 棱镜', 
+                      style: TextStyle(
+                        color: Colors.black, 
+                        fontSize: 24, 
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 2,
+                      )),
+                  ],
+                ),
               ),
             ),
             Expanded(
@@ -178,12 +211,19 @@ class _HomePageState extends State<HomePage> {
                 itemBuilder: (context, index) {
                   final rule = manager.rules[index];
                   final isSelected = rule.id == activeRule?.id;
+                  
                   return ListTile(
-                    title: Text(rule.name),
+                    title: Text(
+                      rule.name,
+                      style: TextStyle(
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        color: Colors.black, // 字体始终为黑
+                      ),
+                    ),
                     subtitle: Text(rule.id, style: const TextStyle(fontSize: 10, color: Colors.grey)),
                     leading: isSelected 
-                        ? const Icon(Icons.radio_button_checked, color: Colors.purple)
-                        : const Icon(Icons.radio_button_unchecked),
+                        ? const Icon(Icons.circle, color: Colors.black, size: 10) // 选中实心黑点
+                        : const Icon(Icons.circle_outlined, color: Colors.grey, size: 10),
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
@@ -192,17 +232,17 @@ class _HomePageState extends State<HomePage> {
                       });
                     },
                     trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
+                      icon: const Icon(Icons.close, size: 16, color: Colors.grey),
                       onPressed: () => manager.deleteRule(rule.id),
                     ),
                   );
                 },
               ),
             ),
-            const Divider(),
+            const Divider(height: 1, color: Colors.black12),
             ListTile(
-              leading: const Icon(Icons.add_circle_outline),
-              title: const Text('导入规则 (JSON)'),
+              leading: const Icon(Icons.add_circle_outline, color: Colors.black),
+              title: const Text('导入规则 (JSON)', style: TextStyle(color: Colors.black)),
               onTap: () {
                 Navigator.pop(context);
                 _showImportDialog(context);
@@ -221,7 +261,10 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       const Icon(Icons.image_not_supported_outlined, size: 64, color: Colors.grey),
                       const SizedBox(height: 16),
-                      Text(activeRule == null ? "请先导入图源" : "暂无数据"),
+                      Text(
+                        activeRule == null ? "请先导入图源" : "暂无数据",
+                        style: const TextStyle(color: Colors.grey),
+                      ),
                     ],
                   ),
                 )
@@ -235,8 +278,9 @@ class _HomePageState extends State<HomePage> {
                   itemBuilder: (context, index) {
                     final paper = _wallpapers[index];
                     return Card(
-                      elevation: 0,
-                      color: Theme.of(context).cardColor,
+                      elevation: 0, // 去掉阴影
+                      // 使用极淡的灰，或者你可以改成 Colors.white
+                      color: Theme.of(context).cardColor, 
                       clipBehavior: Clip.antiAlias,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -248,7 +292,6 @@ class _HomePageState extends State<HomePage> {
                             MaterialPageRoute(
                               builder: (_) => WallpaperDetailPage(
                                 wallpaper: paper,
-                                // 🔥 关键：跳转时传递 headers
                                 headers: activeRule?.headers,
                               ),
                             ),
@@ -263,11 +306,10 @@ class _HomePageState extends State<HomePage> {
                                 tag: paper.id,
                                 child: CachedNetworkImage(
                                   imageUrl: paper.thumbUrl,
-                                  // 🔥 关键：列表图也需要 headers
                                   httpHeaders: activeRule?.headers,
                                   fit: BoxFit.cover,
                                   placeholder: (context, url) => Container(color: Colors.grey[200]),
-                                  errorWidget: (context, url, error) => const Icon(Icons.broken_image),
+                                  errorWidget: (context, url, error) => const Icon(Icons.broken_image, color: Colors.grey),
                                 ),
                               ),
                             ),
@@ -277,18 +319,22 @@ class _HomePageState extends State<HomePage> {
                     );
                   },
                 ),
+          
+          // 底部加载条 (黑色)
           if (_loading && _wallpapers.isNotEmpty)
-            Positioned(
+            const Positioned(
               left: 0,
               right: 0,
               bottom: 0,
               child: LinearProgressIndicator(
                 backgroundColor: Colors.transparent,
-                color: Theme.of(context).primaryColor,
+                color: Colors.black, // 🔥 加载条变黑
               ),
             ),
+            
+          // 中心加载圈 (黑色)
           if (_loading && _wallpapers.isEmpty)
-            const Center(child: CircularProgressIndicator()),
+            const Center(child: CircularProgressIndicator(color: Colors.black)),
         ],
       ),
     );
