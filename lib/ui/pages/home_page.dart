@@ -202,17 +202,25 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 核心逻辑：智能构建图片项
   Widget _buildWallpaperItem(UniWallpaper paper) {
-    // 基础图片组件
+    // 🔥 核心逻辑：判断等级并设置边框颜色
+    Color? borderColor;
+    if (paper.grade != null) {
+      final g = paper.grade!.toLowerCase();
+      if (g == 'nsfw') {
+        borderColor = const Color(0xFFFF0000); // 红框
+      } else if (g == 'sketchy') {
+        borderColor = const Color(0xFFFFCC00); // 黄框 (Wallhaven 风格)
+      }
+      // SFW 不设颜色，保持 null
+    }
+
     Widget imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
       httpHeaders: context.read<SourceManager>().activeRule?.headers,
-      // 关键点：用 fitWidth 撑满宽度，高度自然延伸，不裁剪！
       fit: BoxFit.fitWidth, 
       placeholder: (c, u) => Container(
         color: Colors.grey[200],
-        // 如果有比例，预设一个高度防止抖动；如果没有，给个最小高度
         height: paper.aspectRatio > 0 ? null : 200, 
       ),
       errorWidget: (c, u, e) => Container(
@@ -222,29 +230,26 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    // 容器装饰
+    // 容器
     Widget content = Container(
       decoration: BoxDecoration(
         color: Theme.of(context).cardColor, 
-        borderRadius: BorderRadius.circular(4)
+        borderRadius: BorderRadius.circular(4),
+        // 🔥 如果有等级颜色，则显示边框
+        border: borderColor != null 
+            ? Border.all(color: borderColor, width: 2.0) 
+            : null,
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(4),
+        // 如果有边框，稍微减小一点内部圆角，防止露白
+        borderRadius: BorderRadius.circular(borderColor != null ? 2 : 4),
         child: imageWidget,
       ),
     );
 
-    // 智能分支：
-    // 1. 如果有比例，使用 AspectRatio 锁住高度 (最稳)
     if (paper.aspectRatio > 0) {
-      return AspectRatio(
-        aspectRatio: paper.aspectRatio,
-        child: content,
-      );
-    } 
-    // 2. 如果没有比例 (aspectRatio == 0)，直接返回容器 (最真)
-    // 这样图片加载完多高，格子就多高，彻底解决“假瀑布流”
-    else {
+      return AspectRatio(aspectRatio: paper.aspectRatio, child: content);
+    } else {
       return content;
     }
   }
@@ -356,7 +361,6 @@ class _HomePageState extends State<HomePage> {
                         context, 
                         MaterialPageRoute(builder: (_) => WallpaperDetailPage(wallpaper: paper, headers: activeRule?.headers))
                       ),
-                      // 🔥 使用提取出来的智能构建方法
                       child: _buildWallpaperItem(paper),
                     );
                   },
