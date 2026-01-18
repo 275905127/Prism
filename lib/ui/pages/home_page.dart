@@ -203,28 +203,27 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildWallpaperItem(UniWallpaper paper) {
+    // 1. 确定边框颜色
     Color? borderColor;
     if (paper.grade != null) {
       final g = paper.grade!.toLowerCase();
       if (g == 'nsfw') {
-        borderColor = const Color(0xFFFF3B30); // iOS 风格红
+        borderColor = const Color(0xFFFF453A); // 鲜艳红 (参考图风格)
       } else if (g == 'sketchy') {
-        borderColor = const Color(0xFFFFCC00); // Wallhaven 黄
+        borderColor = const Color(0xFFFFD60A); // 鲜艳黄 (参考图风格)
       }
     }
 
-    // 🔥 定义样式常量
-    const double kOuterRadius = 8.0; // 外圆角加大到 8
-    const double kBorderWidth = 1.0; // 边框变细为 1
-    // 🔥 精确计算内圆角，消除空隙
-    final double kInnerRadius = borderColor != null ? (kOuterRadius - kBorderWidth) : kOuterRadius;
+    // 2. 样式常量 (参考图风格)
+    const double kRadius = 6.0; // 圆角 6px，小巧精致
+    const double kBorderWidth = 1.5; // 边框 1.5px，清晰可见但不过分
 
     Widget imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
       httpHeaders: context.read<SourceManager>().activeRule?.headers,
       fit: BoxFit.fitWidth, 
       placeholder: (c, u) => Container(
-        color: Colors.grey[100], // 占位符颜色调浅一点
+        color: Colors.grey[200],
         height: paper.aspectRatio > 0 ? null : 200, 
       ),
       errorWidget: (c, u, e) => Container(
@@ -234,29 +233,48 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    // 容器
+    // 🔥 核心重构：使用 Stack 消除空隙
     Widget content = Container(
       decoration: BoxDecoration(
-        color: Colors.white, // 强制纯白底色，确保透明图片也有底
-        borderRadius: BorderRadius.circular(kOuterRadius),
-        // 🔥 新增：质感阴影
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(kRadius),
+        // 🔥 质感阴影：轻微的弥散阴影
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06), // 极淡的阴影
-            blurRadius: 10, // 柔和扩散
-            offset: const Offset(0, 4), // 向下偏移，营造浮起感
-            spreadRadius: 0,
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 8,
+            offset: const Offset(0, 3), 
           ),
         ],
-        // 🔥 更新：细边框
-        border: borderColor != null 
-            ? Border.all(color: borderColor, width: kBorderWidth) 
-            : null,
       ),
+      // ClipRRect 裁剪整个内容（图片+边框）
       child: ClipRRect(
-        // 🔥 更新：使用精确计算的内圆角
-        borderRadius: BorderRadius.circular(kInnerRadius),
-        child: imageWidget,
+        borderRadius: BorderRadius.circular(kRadius),
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: [
+            // 层级1：图片在最下面
+            imageWidget,
+
+            // 层级2：边框层 (透明背景，只画边框，压在图片上)
+            if (borderColor != null)
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.transparent, // 内部透明，露出图片
+                    border: Border.all(
+                      color: borderColor, 
+                      width: kBorderWidth, 
+                      strokeAlign: BorderSide.strokeAlignInside // 关键：边框向内画
+                    ),
+                    borderRadius: BorderRadius.circular(kRadius),
+                  ),
+                ),
+              ),
+              
+            // (可选) 层级3：你如果以后想加分辨率标签，可以加在这里
+          ],
+        ),
       ),
     );
 
@@ -362,7 +380,7 @@ class _HomePageState extends State<HomePage> {
               ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
               : MasonryGridView.count(
                   controller: _scrollController,
-                  // 保持紧凑间距
+                  // 🔥 紧凑间距，参考图风格
                   padding: const EdgeInsets.only(top: 100, left: 6, right: 6, bottom: 6),
                   crossAxisCount: 2,
                   mainAxisSpacing: 6,
