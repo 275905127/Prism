@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:image_gallery_saver/image_gallery_saver.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:async_wallpaper/async_wallpaper.dart';
+// 🔥 已删除: import 'package:async_wallpaper/async_wallpaper.dart';
 import '../../core/models/uni_wallpaper.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
@@ -26,7 +26,7 @@ class WallpaperDetailPage extends StatefulWidget {
 
 class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
   bool _showInfo = true;
-  bool _isDownloading = false; // 下载时的转圈状态
+  bool _isDownloading = false;
 
   @override
   void initState() {
@@ -44,7 +44,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
   Future<void> _saveImage() async {
     if (_isDownloading) return;
     
-    // 简单权限检查 (Android 10+ 其实不需要这个，为了兼容旧版)
     if (await Permission.storage.request().isDenied) {
       _showSnack("请授予存储权限");
       return;
@@ -54,16 +53,14 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
     _showSnack("开始下载...", isError: false);
 
     try {
-      // 使用 Dio 下载图片二进制数据
       var response = await Dio().get(
         widget.wallpaper.fullUrl,
         options: Options(
           responseType: ResponseType.bytes,
-          headers: widget.headers, // 🔥 关键：带上防盗链 Headers
+          headers: widget.headers,
         ),
       );
       
-      // 保存到相册
       final result = await ImageGallerySaver.saveImage(
         Uint8List.fromList(response.data),
         quality: 100,
@@ -82,37 +79,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
     }
   }
 
-  // 2. 设为壁纸
-  Future<void> _setWallpaper() async {
-    setState(() => _isDownloading = true);
-    _showSnack("正在设置壁纸...", isError: false);
-
-    try {
-      // async_wallpaper 会自己处理下载和设置
-      // 注意：它可能不支持所有复杂的 Headers，如果失败，通常是因为图源防盗链太强
-      // 对于 Bing/Wallhaven 这种通常没问题
-      bool result = await AsyncWallpaper.setWallpaper(
-        url: widget.wallpaper.fullUrl,
-        wallpaperLocation: AsyncWallpaper.HOME_SCREEN,
-        goToHome: false,
-        toastDetails: ToastDetails.success(),
-        errorToastDetails: ToastDetails.error(),
-      );
-
-      if (result) {
-        _showSnack("✅ 壁纸设置成功");
-      } else {
-        _showSnack("❌ 设置失败");
-      }
-    } catch (e) {
-       // 如果直接设置失败，引导用户先下载
-       _showSnack("建议先下载图片，然后在相册中设置");
-    } finally {
-      setState(() => _isDownloading = false);
-    }
-  }
-
-  // 3. 系统分享
+  // 2. 系统分享
   void _shareImage() {
     Share.share('Check out this wallpaper: ${widget.wallpaper.fullUrl}');
   }
@@ -207,24 +174,17 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
                   Text("${widget.wallpaper.width.toInt()} x ${widget.wallpaper.height.toInt()}", style: const TextStyle(color: Colors.white70)),
                   const SizedBox(height: 20),
                   
-                  // 🔥 功能按钮区域
+                  // 🔥 修改后的按钮区域：只剩下载和分享
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      // 下载按钮
                       _buildFuncBtn(
                         Icons.download, 
-                        "下载", 
+                        "下载保存", 
                         _isDownloading ? null : _saveImage
                       ),
-                      // 设为壁纸按钮
-                      _buildFuncBtn(
-                        Icons.wallpaper, 
-                        "设为壁纸", 
-                        _isDownloading ? null : _setWallpaper
-                      ),
-                      // 分享按钮
-                      _buildFuncBtn(Icons.share, "分享", _shareImage),
+                      // 🔥 "设为壁纸" 按钮已移除
+                      _buildFuncBtn(Icons.share, "分享图片", _shareImage),
                     ],
                   ),
                 ],
@@ -232,7 +192,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
           
-          // 如果正在处理，显示全屏 Loading 遮罩
           if (_isDownloading)
             Container(
               color: Colors.black45,
