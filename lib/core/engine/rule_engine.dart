@@ -4,127 +4,82 @@ import 'package:json_path/json_path.dart';
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
 
-// ignore_for_file: avoid_print
-
 class RuleEngine {
   final Dio _dio = Dio();
 
-  RuleEngine() {
-    _dio.options.connectTimeout = const Duration(seconds: 15);
-    _dio.options.receiveTimeout = const Duration(seconds: 15);
-  }
-
   Future<List<UniWallpaper>> fetch(SourceRule rule, {int page = 1, String? query}) async {
     try {
-      // 1. 处理 URL 变量替换
-      String safeQuery = query ?? '';
-      // 如果是首页（query为空），且 URL 里强制要求 query，我们可以给个默认值，或者依靠服务端宽容处理
-      // 这里我们简单处理：直接替换
-      String path = rule.search.url
-          .replaceAll('{page}', page.toString())
-          .replaceAll('{query}', safeQuery);
-      
-      // 2. 拼接 BaseURL (处理斜杠堆叠问题)
-      String fullUrl = rule.baseUrl;
-      if (!fullUrl.endsWith('/') && !path.startsWith('/')) {
-        fullUrl += '/$path';
-      } else {
-        fullUrl += path;
+      // 1. 构造参数
+      final Map<String, dynamic> params = {
+        rule.paramPage: page,
+      };
+      if (query != null && query.isNotEmpty) {
+        params[rule.paramKeyword] = query;
       }
 
-      // 3. 准备请求头 (Headers)
-      // 如果规则里没配 User-Agent，给它一个默认的，防止被服务器当成爬虫拒接
-      final Map<String, dynamic> headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        ...?rule.headers, // 合并规则里的 Headers
-      };
-
-      print('🔮 Engine: GET $fullUrl');
-      print('   Headers: ${rule.headers}');
-      print('   Params: ${rule.search.params}');
-
-      // 4. 发起请求
+      // 2. 发起请求 (🔥 带上 Headers)
       final response = await _dio.get(
-        fullUrl,
-        queryParameters: rule.search.params, // Dio 会自动处理 ?key=value
+        rule.url,
+        queryParameters: params,
         options: Options(
-          headers: headers,
+          headers: rule.headers ?? {
+            // 默认伪装成 Chrome，防止被直接拦截
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          },
           responseType: ResponseType.json,
+          sendTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
         ),
       );
 
-      // 5. 解析数据
-      final listPath = JsonPath(rule.parser.listNode);
-      final rawList = listPath.read(response.data);
+      // 3. 解析数据
+      final jsonMap = response.data;
+      
+      // 使用 JSONPath 提取列表
+      final listPath = JsonPath(rule.listPath);
+      final match = listPath.read(jsonMap).firstOrNull;
+      
+      if (match == null || match.value is! List) {
+        return [];
+      }
 
-      List<UniWallpaper> results = [];
-
-      for (var match in rawList) {
-        final item = match.value;
-        if (item is! Map) continue;
-
-        String id = _extractString(item, rule.parser.id);
-        String thumb = _extractString(item, rule.parser.thumb);
-        String full = _extractString(item, rule.parser.full);
-
-        // 处理 URL 前缀
-        if (rule.parser.thumbPrefix != null && thumb.isNotEmpty && !thumb.startsWith('http')) {
-          thumb = rule.parser.thumbPrefix! + thumb;
+      final List list = match.value as List;
+      
+      // 4. 映射为对象
+      return list.map((item) {
+        // 辅助函数：根据路径提取值
+        T? getValue<T>(String path, dynamic source) {
+          try {
+            // 如果路径是 "."，直接返回自身
+            if (path == '.') return source as T;
+            // 简单路径直接取 (性能优化)
+            if (!path.contains(r'$')) return source[path] as T?;
+            // 复杂路径用 JsonPath
+            final p = JsonPath(path);
+            return p.read(source).firstOrNull?.value as T?;
+          } catch (e) {
+            return null;
+          }
         }
-        if (rule.parser.fullPrefix != null && full.isNotEmpty && !full.startsWith('http')) {
-          full = rule.parser.fullPrefix! + full;
-        }
 
-        double w = _extractDouble(item, rule.parser.width);
-        double h = _extractDouble(item, rule.parser.height);
+        final id = getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
+        final thumb = getValue<String>(rule.thumbPath, item) ?? "";
+        final full = getValue<String>(rule.fullPath, item) ?? thumb;
+        final width = getValue<int>(rule.widthPath ?? '', item) ?? 1080;
+        final height = getValue<int>(rule.heightPath ?? '', item) ?? 1920;
 
-        if (thumb.isEmpty) continue;
-
-        results.add(UniWallpaper(
-          id: id,
+        return UniWallpaper(
+          id: id.toString(),
           thumbUrl: thumb,
           fullUrl: full,
-          width: w,
-          height: h,
-          sourceId: rule.id,
-          // 🔥 关键：把 headers 传给图片，否则图片加载组件不知道用什么 Referer
-          metadata: {
-             if (rule.headers != null) 'headers': rule.headers.toString()
-          },
-        ));
-      }
-
-      print('✅ Parsed ${results.length} items.');
-      return results;
+          width: width.toDouble(),
+          height: height.toDouble(),
+        );
+      }).toList();
 
     } catch (e) {
-      print('❌ Engine Error: $e');
+      print("Engine Error: $e");
       rethrow;
     }
-  }
-
-  String _extractString(Map data, String path) {
-    final val = _resolvePath(data, path);
-    return val?.toString() ?? '';
-  }
-
-  double _extractDouble(Map data, String path) {
-    final val = _resolvePath(data, path);
-    if (val is num) return val.toDouble();
-    if (val is String) return double.tryParse(val) ?? 0;
-    return 0;
-  }
-
-  dynamic _resolvePath(Map data, String path) {
-    final keys = path.split('.');
-    dynamic current = data;
-    for (var key in keys) {
-      if (current is Map && current.containsKey(key)) {
-        current = current[key];
-      } else {
-        return null;
-      }
-    }
-    return current;
   }
 }
