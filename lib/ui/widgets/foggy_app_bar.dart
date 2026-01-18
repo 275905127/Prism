@@ -1,20 +1,18 @@
-// lib/ui/widgets/foggy_app_bar.dart
 import 'package:flutter/material.dart';
 
 /// 统一的雾化渐变工具类
 class FoggyHelper {
-  // 定义基础颜色，方便以后统一修改
+  // 定义基础颜色
   static const Color baseColor = Colors.white;
 
-  // 获取雾化渐变 Decoration (给详情页用)
+  // 获取雾化渐变 Decoration
   static BoxDecoration getDecoration({bool isBottom = false}) {
-    // 你的那段经典渐变逻辑
     return BoxDecoration(
       gradient: LinearGradient(
         begin: isBottom ? Alignment.bottomCenter : Alignment.topCenter,
         end: isBottom ? Alignment.topCenter : Alignment.bottomCenter,
         colors: [
-          baseColor.withOpacity(0.94),
+          baseColor.withOpacity(0.94), // 稍微不透明一点，防眩光
           baseColor.withOpacity(0.94),
           baseColor.withOpacity(0.90),
           baseColor.withOpacity(0.75),
@@ -22,7 +20,7 @@ class FoggyHelper {
           baseColor.withOpacity(0.20),
           baseColor.withOpacity(0.0),
         ],
-        stops: const [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        stops: const [0.0, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0],
       ),
     );
   }
