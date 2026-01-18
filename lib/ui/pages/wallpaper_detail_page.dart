@@ -6,7 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:gal/gal.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/models/uni_wallpaper.dart';
-import '../widgets/foggy_app_bar.dart'; // 顶部依然可以用雾化，或者保留引用以防万一
+import '../widgets/foggy_app_bar.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
@@ -32,16 +32,46 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("开始下载..."), duration: Duration(milliseconds: 500)));
     
     try {
-      var response = await Dio().get(
+      final response = await Dio().get(
         widget.wallpaper.fullUrl,
-        options: Options(responseType: ResponseType.bytes, headers: widget.headers),
+        options: Options(
+          responseType: ResponseType.bytes, 
+          headers: widget.headers,
+          // 增加超时，防止网络卡死
+          sendTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 15),
+        ),
       );
-      await Gal.putImageBytes(Uint8List.fromList(response.data), album: 'Prism');
+      
+      // 🔥 校验 1: 确保下载的是图片，而不是 403 Forbidden 的 HTML 页面
+      final contentType = response.headers.value('content-type');
+      if (contentType != null && !contentType.startsWith('image/')) {
+         throw "服务器返回了非图片内容 ($contentType)，可能是防盗链拦截";
+      }
+
+      // 🔥 校验 2: 智能解析后缀名 (解决直链保存报错的核心！)
+      String extension = "jpg"; // 默认后缀
+      if (contentType != null) {
+        if (contentType.contains("png")) extension = "png";
+        else if (contentType.contains("gif")) extension = "gif";
+        else if (contentType.contains("webp")) extension = "webp";
+        else if (contentType.contains("jpeg")) extension = "jpg";
+      }
+      
+      // 构造带后缀的文件名，Gal 就能识别了
+      final String fileName = "prism_${DateTime.now().millisecondsSinceEpoch}.$extension";
+
+      await Gal.putImageBytes(
+        Uint8List.fromList(response.data), 
+        album: 'Prism',
+        name: fileName, // 🔥 显式传入文件名
+      );
+
       if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 已保存到相册 (Prism)")));
     } on GalException catch (e) {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 权限或保存错误: ${e.type.message}")));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 保存失败: ${e.type.message}")));
     } catch (e) {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 网络错误: $e")));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 下载错误: $e")));
     } finally {
       if(mounted) setState(() => _isDownloading = false);
     }
@@ -69,13 +99,23 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
                     httpHeaders: widget.headers,
                     fit: BoxFit.contain,
                     progressIndicatorBuilder: (_,__,p) => Center(child: CircularProgressIndicator(value: p.progress, color: Colors.black)),
+                    errorWidget: (context, url, error) => const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.broken_image, size: 50, color: Colors.grey),
+                          SizedBox(height: 10),
+                          Text("图片加载失败", style: TextStyle(color: Colors.grey))
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
 
-          // 2. 顶部栏 (保留雾化或改为纯白看你喜好，这里暂时保留雾化以维持顶部通透感)
+          // 2. 顶部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             top: _showInfo ? 0 : -100,
@@ -95,19 +135,18 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
 
-          // 3. 底部栏 (🔥 已修改：纯白不透明 + 顶部细线)
+          // 3. 底部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             bottom: _showInfo ? 0 : -180,
             left: 0,
             right: 0,
             child: Container(
-              // 调整 Padding：不需要再为渐变留出超大的 top padding 了
               padding: const EdgeInsets.all(24), 
               decoration: const BoxDecoration(
-                color: Colors.white, // 🔥 纯白背景，遮挡住下面的图片
+                color: Colors.white, 
                 border: Border(
-                  top: BorderSide(color: Colors.black12, width: 0.5), // 加一条极细的分割线，提升精致感
+                  top: BorderSide(color: Colors.black12, width: 0.5), 
                 ),
               ),
               child: Column(
@@ -115,14 +154,15 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
                 children: [
                   Text("ID: ${widget.wallpaper.id}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                   const SizedBox(height: 4),
-                  // 显示尺寸信息
                   Text(
-                    "${widget.wallpaper.width.toInt()} x ${widget.wallpaper.height.toInt()}", 
+                    // 只有当宽高有效时才显示，否则显示 "Auto Size"
+                    (widget.wallpaper.width > 0 && widget.wallpaper.height > 0)
+                        ? "${widget.wallpaper.width.toInt()} x ${widget.wallpaper.height.toInt()}"
+                        : "Auto Size (Random Source)", 
                     style: TextStyle(color: Colors.grey[600], fontSize: 13)
                   ),
                   const SizedBox(height: 20),
                   
-                  // 按钮区域
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -147,9 +187,9 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12), //稍微加宽一点触控区
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12), 
         decoration: BoxDecoration(
-          color: Colors.grey[100], // 浅灰按钮底色
+          color: Colors.grey[100], 
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
