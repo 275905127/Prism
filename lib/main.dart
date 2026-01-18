@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -41,8 +40,8 @@ class MyApp extends StatelessWidget {
           canvasColor: Colors.white, // 侧边栏背景
           primaryColor: Colors.black, // 主要元素颜色（如加载圈）
           
-          // 卡片颜色 (极淡的灰，在纯白背景上通过微弱对比显示层级，或者你也可以改成 Colors.white)
-          cardColor: const Color(0xFFF5F5F5), 
+          // 卡片颜色 (极淡的灰，在纯白背景上通过微弱对比显示层级)
+          cardColor: const Color(0xFFF8F9FA), 
 
           // AppBar 主题
           appBarTheme: const AppBarTheme(
