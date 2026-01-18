@@ -1,152 +1,52 @@
-name: Flutter CI
+name: Build Flutter APK
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: ["main"]
+    branches: [ "main", "master" ]
+  # 允许手动在 Actions 页面触发构建
   workflow_dispatch:
-    inputs:
-      build_apk:
-        description: "Also build release APK"
-        required: false
-        default: "true"
-      build_aab:
-        description: "Also build release AAB"
-        required: false
-        default: "false"
-      target_platform:
-        description: "APK target platform (android-arm64 / android-arm / android-x64)"
-        required: false
-        default: "android-arm64"
-      strict_analyze:
-        description: "Fail workflow on flutter analyze (true/false)"
-        required: false
-        default: "false"
-
-concurrency:
-  group: flutter-ci-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
-  flutter_ci:
+  build:
+    name: Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    # 给 push/pr 提供默认值（因为它们没有 inputs）
-    env:
-      BUILD_APK: ${{ github.event_name == 'workflow_dispatch' && inputs.build_apk || 'false' }}
-      BUILD_AAB: ${{ github.event_name == 'workflow_dispatch' && inputs.build_aab || 'false' }}
-      TARGET_PLATFORM: ${{ github.event_name == 'workflow_dispatch' && inputs.target_platform || 'android-arm64' }}
-      STRICT_ANALYZE: ${{ github.event_name == 'workflow_dispatch' && inputs.strict_analyze || 'false' }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # 1. 拉取代码
+      - uses: actions/checkout@v3
 
-      - name: Setup Java (Temurin 17)
-        uses: actions/setup-java@v4
+      # 2. 设置 Java 环境 (Gradle 需要)
+      - uses: actions/setup-java@v3
         with:
-          distribution: "temurin"
-          java-version: "17"
-          cache: "gradle"
+          distribution: 'zulu'
+          java-version: '17' # 对应较新的 Gradle 版本
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      # 3. 设置 Flutter 环境
+      - uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
-          cache: true
+          channel: 'stable'
+          # flutter-version: '3.19.0' # 你也可以指定具体版本，默认是用最新稳定版
 
-      - name: Flutter version
-        run: flutter --version
-
-      - name: Cache pub
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pub-
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-${{ hashFiles('**/*.gradle*', '**/gradle.properties', '**/settings.gradle*') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Debug inputs
-        run: |
-          echo "event='${{ github.event_name }}'"
-          echo "BUILD_APK='${{ env.BUILD_APK }}'"
-          echo "BUILD_AAB='${{ env.BUILD_AAB }}'"
-          echo "TARGET_PLATFORM='${{ env.TARGET_PLATFORM }}'"
-          echo "STRICT_ANALYZE='${{ env.STRICT_ANALYZE }}'"
-
-      - name: Pub get
+      # 4. 下载项目依赖
+      - name: Get Dependencies
         run: flutter pub get
 
-      - name: Check format (non-blocking)
-        run: dart format . || true
+      # 5. 生成代码 (如果有用到 build_runner，比如 json_serializable)
+      # 如果你的项目没有用到 build_runner，这步会自动跳过或不做任何事，但保留着是个好习惯
+      # - name: Run Build Runner
+      #   run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Analyze (non-blocking by default)
-        if: ${{ env.STRICT_ANALYZE != 'true' }}
-        run: flutter analyze || true
+      # 6. 打包 Debug APK
+      # 注意：为了简单起见，这里打的是 Debug 包，不需要签名配置，可以直接安装
+      # 如果你需要 Release 包，后续需要配置 Keystore 密钥
+      - name: Build APK
+        run: flutter build apk --debug
 
-      - name: Analyze (strict)
-        if: ${{ env.STRICT_ANALYZE == 'true' }}
-        run: flutter analyze
-
-      - name: Run tests
-        run: flutter test
-
-      # 只有在 workflow_dispatch 且需要构建 release（apk 或 aab）时才准备签名文件
-      - name: Decode keystore & write key.properties
-        if: ${{ github.event_name == 'workflow_dispatch' && (env.BUILD_AAB == 'true' || env.BUILD_APK == 'true') }}
-        shell: bash
-        run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > android/upload-keystore.jks
-          cat > android/key.properties <<'EOF'
-          storePassword=${{ secrets.KEYSTORE_STORE_PASSWORD }}
-          keyPassword=${{ secrets.KEYSTORE_KEY_PASSWORD }}
-          keyAlias=${{ secrets.KEYSTORE_KEY_ALIAS }}
-          storeFile=upload-keystore.jks
-          EOF
-
-      - name: Debug signing files
-        if: ${{ github.event_name == 'workflow_dispatch' && (env.BUILD_AAB == 'true' || env.BUILD_APK == 'true') }}
-        shell: bash
-        run: |
-          ls -la android || true
-          ls -la android/app || true
-          echo "---- android/key.properties ----"
-          cat android/key.properties || true
-
-      - name: Build APK (release)
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_APK == 'true' }}
-        run: flutter build apk --release --target-platform="${{ env.TARGET_PLATFORM }}"
-
-      - name: Build AAB (release)
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_AAB == 'true' }}
-        run: flutter build appbundle --release
-
-      - name: Upload AAB artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_AAB == 'true' }}
+      # 7. 上传构建产物 (APK) 到 GitHub Actions 页面
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-aab
-          path: build/app/outputs/bundle/release/*.aab
-
-      - name: Upload APK artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_APK == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: build/app/outputs/flutter-apk/*.apk
+          name: prism-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
