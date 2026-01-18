@@ -33,14 +33,13 @@ class _HomePageState extends State<HomePage> {
 
   Map<String, dynamic> _currentFilters = {};
 
-  // 🔥 新增：用来记录当前正在展示的图源ID，用于检测变化
+  // 用来记录当前正在展示的图源ID
   String? _currentRuleId;
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    // 注意：这里不再手动调用 _initSource，全部交给 build 里的监听逻辑
   }
 
   @override
@@ -50,8 +49,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _initSource() async {
-    await _loadFilters(); // 先读缓存
-    _fetchData(refresh: true); // 再拉数据
+    await _loadFilters(); 
+    _fetchData(refresh: true); 
   }
 
   Future<void> _loadFilters() async {
@@ -80,7 +79,6 @@ class _HomePageState extends State<HomePage> {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
-
     try {
       final prefs = await SharedPreferences.getInstance();
       if (filters.isEmpty) {
@@ -128,11 +126,28 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           if (refresh) {
             _wallpapers = data;
+            // 刷新时，如果有数据则重置 hasMore，否则说明是空源
+            _hasMore = data.isNotEmpty; 
             if (_scrollController.hasClients) _scrollController.jumpTo(0);
           } else {
-            _wallpapers.addAll(data);
+            // 🔥 核心修复：去重逻辑
+            // 筛选出 _wallpapers 里不存在的新图片
+            final newItems = data.where((newItem) {
+              return !_wallpapers.any((existing) => existing.id == newItem.id);
+            }).toList();
+
+            if (newItems.isEmpty) {
+              // 🔥 如果接口返回了数据，但全是重复的，说明到底了，停止加载
+              _hasMore = false;
+            } else {
+              _wallpapers.addAll(newItems);
+            }
           }
-          if (data.isEmpty) _hasMore = false; else _page++;
+          
+          // 如果本次返回的数据本身就很少（比如小于一页），也说明没更多了
+          if (data.isEmpty) _hasMore = false; 
+          else _page++;
+          
           _loading = false;
         });
       }
@@ -191,7 +206,7 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
-                // 导入成功后，不需要手动刷新，下面的 build 监听会自动处理
+                // 导入成功不需手动刷新，build监听器会处理
               } catch (e) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
               }
@@ -282,11 +297,8 @@ class _HomePageState extends State<HomePage> {
     final activeRule = manager.activeRule;
     final hasFilters = activeRule?.filters != null && activeRule!.filters!.isNotEmpty;
 
-    // 🔥 核心修复逻辑：自动检测图源变化并初始化
-    // 如果 activeRule 变成了非空，且和上次不一样（或者刚启动是 null），就触发初始化
     if (activeRule != null && activeRule.id != _currentRuleId) {
       _currentRuleId = activeRule.id;
-      // 必须用 addPostFrameCallback，因为不能在 build 过程中直接 setState
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _initSource();
       });
@@ -350,7 +362,6 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
-                      // 🔥 简化：切换图源后什么都不用做，Build 方法里的监听器会自动检测到 ID 变化并刷新
                     },
                     trailing: IconButton(
                       icon: const Icon(Icons.close, size: 16, color: Colors.grey),
@@ -375,16 +386,38 @@ class _HomePageState extends State<HomePage> {
       ),
       body: Stack(
         children: [
+          // 空状态
           _wallpapers.isEmpty && !_loading
-              ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.photo_library_outlined, size: 60, color: Colors.grey[300]),
+                      const SizedBox(height: 10),
+                      Text(
+                        activeRule == null ? "请先导入图源" : (_hasMore ? "暂无数据" : "没有更多图片了"), 
+                        style: TextStyle(color: Colors.grey[400])
+                      ),
+                    ],
+                  ),
+                )
               : MasonryGridView.count(
                   controller: _scrollController,
                   padding: const EdgeInsets.only(top: 100, left: 6, right: 6, bottom: 6),
                   crossAxisCount: 2,
                   mainAxisSpacing: 6,
                   crossAxisSpacing: 6,
-                  itemCount: _wallpapers.length,
+                  itemCount: _wallpapers.length + (_hasMore ? 0 : 1), // 如果到底了，多留一个位置给底栏
                   itemBuilder: (context, index) {
+                    // 底部文字提示
+                    if (index == _wallpapers.length) {
+                      return Container(
+                        padding: const EdgeInsets.all(20),
+                        alignment: Alignment.center,
+                        child: Text("— End —", style: TextStyle(color: Colors.grey[300], fontSize: 12)),
+                      );
+                    }
+                    
                     final paper = _wallpapers[index];
                     return GestureDetector(
                       onTap: () => Navigator.push(
