@@ -79,7 +79,6 @@ class _HomePageState extends State<HomePage> {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
-
     try {
       final prefs = await SharedPreferences.getInstance();
       if (filters.isEmpty) {
@@ -113,7 +112,6 @@ class _HomePageState extends State<HomePage> {
       if (refresh) {
         _page = 1;
         _hasMore = true;
-        // _wallpapers.clear(); // 保持无感刷新
       }
     });
 
@@ -128,13 +126,10 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           if (refresh) {
             _wallpapers = data;
-            if (_scrollController.hasClients) {
-              _scrollController.jumpTo(0);
-            }
+            if (_scrollController.hasClients) _scrollController.jumpTo(0);
           } else {
             _wallpapers.addAll(data);
           }
-          
           if (data.isEmpty) _hasMore = false; else _page++;
           _loading = false;
         });
@@ -153,7 +148,6 @@ class _HomePageState extends State<HomePage> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("当前图源不支持筛选")));
       return;
     }
-
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -183,7 +177,6 @@ class _HomePageState extends State<HomePage> {
           decoration: const InputDecoration(
             hintText: '在此粘贴 JSON 内容...',
             border: OutlineInputBorder(),
-            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.black)),
           ),
           style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
         ),
@@ -207,6 +200,53 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  // 🔥 核心逻辑：智能构建图片项
+  Widget _buildWallpaperItem(UniWallpaper paper) {
+    // 基础图片组件
+    Widget imageWidget = CachedNetworkImage(
+      imageUrl: paper.thumbUrl,
+      httpHeaders: context.read<SourceManager>().activeRule?.headers,
+      // 关键点：用 fitWidth 撑满宽度，高度自然延伸，不裁剪！
+      fit: BoxFit.fitWidth, 
+      placeholder: (c, u) => Container(
+        color: Colors.grey[200],
+        // 如果有比例，预设一个高度防止抖动；如果没有，给个最小高度
+        height: paper.aspectRatio > 0 ? null : 200, 
+      ),
+      errorWidget: (c, u, e) => Container(
+        color: Colors.grey[100],
+        height: 150,
+        child: const Icon(Icons.broken_image, color: Colors.grey),
+      ),
+    );
+
+    // 容器装饰
+    Widget content = Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor, 
+        borderRadius: BorderRadius.circular(4)
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: imageWidget,
+      ),
+    );
+
+    // 智能分支：
+    // 1. 如果有比例，使用 AspectRatio 锁住高度 (最稳)
+    if (paper.aspectRatio > 0) {
+      return AspectRatio(
+        aspectRatio: paper.aspectRatio,
+        child: content,
+      );
+    } 
+    // 2. 如果没有比例 (aspectRatio == 0)，直接返回容器 (最真)
+    // 这样图片加载完多高，格子就多高，彻底解决“假瀑布流”
+    else {
+      return content;
+    }
   }
 
   @override
@@ -304,7 +344,6 @@ class _HomePageState extends State<HomePage> {
               ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
               : MasonryGridView.count(
                   controller: _scrollController,
-                  // 🔥 修改：padding 和 spacing 都改为 4
                   padding: const EdgeInsets.only(top: 100, left: 4, right: 4, bottom: 4),
                   crossAxisCount: 2,
                   mainAxisSpacing: 4,
@@ -317,24 +356,8 @@ class _HomePageState extends State<HomePage> {
                         context, 
                         MaterialPageRoute(builder: (_) => WallpaperDetailPage(wallpaper: paper, headers: activeRule?.headers))
                       ),
-                      child: AspectRatio(
-                        aspectRatio: paper.aspectRatio,
-                        child: Container(
-                          // 🔥 修改：圆角改为 4
-                          decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(4)),
-                          child: ClipRRect(
-                            // 🔥 修改：圆角改为 4
-                            borderRadius: BorderRadius.circular(4),
-                            child: CachedNetworkImage(
-                              imageUrl: paper.thumbUrl, 
-                              httpHeaders: activeRule?.headers,
-                              fit: BoxFit.cover,
-                              placeholder: (c,u) => Container(color: Colors.grey[200]),
-                              errorWidget: (c,u,e) => const Icon(Icons.broken_image, color: Colors.grey),
-                            ),
-                          ),
-                        ),
-                      ),
+                      // 🔥 使用提取出来的智能构建方法
+                      child: _buildWallpaperItem(paper),
                     );
                   },
                 ),
