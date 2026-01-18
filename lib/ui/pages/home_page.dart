@@ -1,8 +1,10 @@
 // lib/ui/pages/home_page.dart
+import 'dart:convert'; // 🔥 新增：用于 JSON 序列化
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // 🔥 新增：本地存储
 
 import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
@@ -28,14 +30,17 @@ class _HomePageState extends State<HomePage> {
   int _page = 1;
   bool _hasMore = true;
   bool _isScrolled = false;
+
   Map<String, dynamic> _currentFilters = {};
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
+    
+    // 🔥 初始化时，先加载筛选记录，再请求数据
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _fetchData(refresh: true);
+      _initSource(); 
     });
   }
 
@@ -43,6 +48,55 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  // 🔥 新增：初始化流程 (切换图源时调用)
+  Future<void> _initSource() async {
+    await _loadFilters(); // 1. 先读本地缓存的筛选设置
+    _fetchData(refresh: true); // 2. 再拉取数据
+  }
+
+  // 🔥 新增：加载筛选记录
+  Future<void> _loadFilters() async {
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+    if (rule == null) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // Key 格式: filter_prefs_{图源ID}，确保不同图源的筛选互不干扰
+      final String? jsonStr = prefs.getString('filter_prefs_${rule.id}');
+      
+      if (mounted) {
+        setState(() {
+          if (jsonStr != null && jsonStr.isNotEmpty) {
+            _currentFilters = json.decode(jsonStr);
+          } else {
+            _currentFilters = {}; // 如果没有记录，重置为空
+          }
+        });
+      }
+    } catch (e) {
+      print("加载筛选记录失败: $e");
+    }
+  }
+
+  // 🔥 新增：保存筛选记录
+  Future<void> _saveFilters(Map<String, dynamic> filters) async {
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+    if (rule == null) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (filters.isEmpty) {
+        await prefs.remove('filter_prefs_${rule.id}');
+      } else {
+        await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
+      }
+    } catch (e) {
+      print("保存筛选记录失败: $e");
+    }
   }
 
   void _onScroll() {
@@ -66,9 +120,7 @@ class _HomePageState extends State<HomePage> {
       if (refresh) {
         _page = 1;
         _hasMore = true;
-        // 🔥 关键优化：如果是刷新（包括应用筛选），立刻清空列表
-        // 这样界面会瞬间变成 Loading 状态，解决“迟钝感”
-        _wallpapers.clear(); 
+        _wallpapers.clear(); // 立即清空，提升响应速度感
       }
     });
 
@@ -110,7 +162,7 @@ class _HomePageState extends State<HomePage> {
         currentValues: _currentFilters,
         onApply: (newValues) {
           setState(() => _currentFilters = newValues);
-          // 应用筛选时，触发刷新
+          _saveFilters(newValues); // 🔥 点击应用时保存到本地
           _fetchData(refresh: true);
         },
       ),
@@ -143,6 +195,7 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
+                // 导入新规则后，重置筛选状态并重新加载
                 setState(() => _currentFilters = {}); 
                 _fetchData(refresh: true);
               } catch (e) {
@@ -220,8 +273,11 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
-                      setState(() => _currentFilters = {}); 
-                      Future.delayed(const Duration(milliseconds: 200), () => _fetchData(refresh: true));
+                      // 🔥 切换图源时，调用 _initSource 以加载对应的筛选记录
+                      // 稍微延迟一下，让 Drawer 关闭动画流畅些
+                      Future.delayed(const Duration(milliseconds: 150), () {
+                        _initSource();
+                      });
                     },
                     trailing: IconButton(
                       icon: const Icon(Icons.close, size: 16, color: Colors.grey),
