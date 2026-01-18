@@ -6,6 +6,8 @@ class UniWallpaper {
   final String fullUrl;
   final double width;
   final double height;
+  // 🔥 新增：图片等级 (如 "nsfw", "sketchy", "sfw")
+  final String? grade;
 
   const UniWallpaper({
     required this.id,
@@ -14,9 +16,9 @@ class UniWallpaper {
     required this.fullUrl,
     this.width = 0,
     this.height = 0,
+    this.grade, // 新增
   });
 
-  // 🔥 核心修改：如果宽或高是 0，返回 0，代表“未知比例”
   double get aspectRatio {
     if (width <= 0 || height <= 0) return 0.0;
     return width / height;
