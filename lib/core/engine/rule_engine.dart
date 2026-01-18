@@ -9,7 +9,6 @@ class RuleEngine {
 
   Future<List<UniWallpaper>> fetch(SourceRule rule, {int page = 1, String? query}) async {
     try {
-      // 1. 构造参数
       final Map<String, dynamic> params = {
         rule.paramPage: page,
       };
@@ -17,13 +16,12 @@ class RuleEngine {
         params[rule.paramKeyword] = query;
       }
 
-      // 2. 发起请求 (🔥 带上 Headers)
       final response = await _dio.get(
         rule.url,
         queryParameters: params,
         options: Options(
+          // 伪装头
           headers: rule.headers ?? {
-            // 默认伪装成 Chrome，防止被直接拦截
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           },
           responseType: ResponseType.json,
@@ -32,10 +30,7 @@ class RuleEngine {
         ),
       );
 
-      // 3. 解析数据
       final jsonMap = response.data;
-      
-      // 使用 JSONPath 提取列表
       final listPath = JsonPath(rule.listPath);
       final match = listPath.read(jsonMap).firstOrNull;
       
@@ -45,16 +40,11 @@ class RuleEngine {
 
       final List list = match.value as List;
       
-      // 4. 映射为对象
       return list.map((item) {
-        // 辅助函数：根据路径提取值
         T? getValue<T>(String path, dynamic source) {
           try {
-            // 如果路径是 "."，直接返回自身
             if (path == '.') return source as T;
-            // 简单路径直接取 (性能优化)
             if (!path.contains(r'$')) return source[path] as T?;
-            // 复杂路径用 JsonPath
             final p = JsonPath(path);
             return p.read(source).firstOrNull?.value as T?;
           } catch (e) {
@@ -70,6 +60,7 @@ class RuleEngine {
 
         return UniWallpaper(
           id: id.toString(),
+          sourceId: rule.id, // 🔥 修复：补上了这个必填参数
           thumbUrl: thumb,
           fullUrl: full,
           width: width.toDouble(),
