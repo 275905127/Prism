@@ -33,13 +33,14 @@ class _HomePageState extends State<HomePage> {
 
   Map<String, dynamic> _currentFilters = {};
 
+  // 🔥 新增：用来记录当前正在展示的图源ID，用于检测变化
+  String? _currentRuleId;
+
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initSource(); 
-    });
+    // 注意：这里不再手动调用 _initSource，全部交给 build 里的监听逻辑
   }
 
   @override
@@ -49,8 +50,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _initSource() async {
-    await _loadFilters(); 
-    _fetchData(refresh: true); 
+    await _loadFilters(); // 先读缓存
+    _fetchData(refresh: true); // 再拉数据
   }
 
   Future<void> _loadFilters() async {
@@ -79,6 +80,7 @@ class _HomePageState extends State<HomePage> {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
+
     try {
       final prefs = await SharedPreferences.getInstance();
       if (filters.isEmpty) {
@@ -189,8 +191,7 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
-                setState(() => _currentFilters = {}); 
-                _fetchData(refresh: true);
+                // 导入成功后，不需要手动刷新，下面的 build 监听会自动处理
               } catch (e) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
               }
@@ -203,15 +204,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildWallpaperItem(UniWallpaper paper) {
-    // 🔥 颜色调整：使用 .withOpacity 变淡
     Color? borderColor;
     if (paper.grade != null) {
       final g = paper.grade!.toLowerCase();
       if (g == 'nsfw') {
-        // 原红色 -> 30% 透明度 (粉红果冻感)
         borderColor = const Color(0xFFFF453A).withOpacity(0.3); 
       } else if (g == 'sketchy') {
-        // 原黄色 -> 40% 透明度 (奶黄果冻感，黄色需要稍微深一点点才看得清)
         borderColor = const Color(0xFFFFD60A).withOpacity(0.4); 
       }
     }
@@ -238,7 +236,6 @@ class _HomePageState extends State<HomePage> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(kRadius),
-        // 阴影保持极淡
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.06), 
@@ -284,6 +281,16 @@ class _HomePageState extends State<HomePage> {
     final manager = context.watch<SourceManager>();
     final activeRule = manager.activeRule;
     final hasFilters = activeRule?.filters != null && activeRule!.filters!.isNotEmpty;
+
+    // 🔥 核心修复逻辑：自动检测图源变化并初始化
+    // 如果 activeRule 变成了非空，且和上次不一样（或者刚启动是 null），就触发初始化
+    if (activeRule != null && activeRule.id != _currentRuleId) {
+      _currentRuleId = activeRule.id;
+      // 必须用 addPostFrameCallback，因为不能在 build 过程中直接 setState
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _initSource();
+      });
+    }
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -343,9 +350,7 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
-                      Future.delayed(const Duration(milliseconds: 150), () {
-                        _initSource();
-                      });
+                      // 🔥 简化：切换图源后什么都不用做，Build 方法里的监听器会自动检测到 ID 变化并刷新
                     },
                     trailing: IconButton(
                       icon: const Icon(Icons.close, size: 16, color: Colors.grey),
