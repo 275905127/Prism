@@ -17,10 +17,34 @@ class RuleEngine {
         rule.paramPage: page,
       };
       
-      if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
-      if (rule.apiKey != null && rule.apiKey!.isNotEmpty) params['apikey'] = rule.apiKey;
-      if (filterParams != null) params.addAll(filterParams);
-      if (query != null && query.isNotEmpty) params[rule.paramKeyword] = query;
+      // 1. 合并固定参数
+      if (rule.fixedParams != null) {
+        params.addAll(rule.fixedParams!);
+      }
+
+      // 2. 合并 API Key
+      if (rule.apiKey != null && rule.apiKey!.isNotEmpty) {
+        params['apikey'] = rule.apiKey;
+      }
+
+      // 3. 🔥 核心修改：合并筛选参数 (支持多选拼接)
+      if (filterParams != null) {
+        filterParams.forEach((key, value) {
+          if (value is List) {
+            // 如果是列表，找到对应的规则 separator 进行拼接
+            final filterRule = rule.filters?.firstWhere((f) => f.key == key, orElse: () => SourceFilter(key: '', name: '', type: '', options: []));
+            final separator = filterRule?.separator ?? ',';
+            params[key] = value.join(separator);
+          } else {
+            params[key] = value;
+          }
+        });
+      }
+
+      // 4. 合并搜索词
+      if (query != null && query.isNotEmpty) {
+        params[rule.paramKeyword] = query;
+      }
 
       final response = await _dio.get(
         rule.url,
@@ -39,7 +63,9 @@ class RuleEngine {
       final listPath = JsonPath(rule.listPath);
       final match = listPath.read(jsonMap).firstOrNull;
       
-      if (match == null || match.value is! List) return [];
+      if (match == null || match.value is! List) {
+        return [];
+      }
 
       final List list = match.value as List;
       
@@ -64,7 +90,6 @@ class RuleEngine {
           if (!full.startsWith('http')) full = rule.imagePrefix! + full;
         }
 
-        // 🔥 核心修改：解析不到尺寸就给 0，不要给默认值
         final width = getValue<int>(rule.widthPath ?? '', item) ?? 0;
         final height = getValue<int>(rule.heightPath ?? '', item) ?? 0;
 
