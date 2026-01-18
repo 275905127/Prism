@@ -1,109 +1,75 @@
 // lib/core/models/source_rule.dart
+import 'dart:convert';
+
 class SourceRule {
   final String id;
   final String name;
-  final String baseUrl;
-  final SearchConfig search;
-  final ParseConfig parser;
-  // 🔥 新增：全局请求头 (用于伪装浏览器，解决 403 Forbidden)
-  final Map<String, String>? headers;
+  final String url; // API 地址
+  final Map<String, String>? headers; // 🔥 新增: 请求头 (User-Agent, Cookie 等)
+  final String paramPage; // 分页参数名 (如 "page" 或 "p")
+  final String paramKeyword; // 搜索参数名 (如 "q" 或 "query")
+  
+  // JSONPath 规则
+  final String listPath;   // 列表路径 (如 "data")
+  final String idPath;     // ID 路径
+  final String thumbPath;  // 缩略图路径
+  final String fullPath;   // 原图路径
+  final String? widthPath; // 宽度路径 (可选)
+  final String? heightPath;// 高度路径 (可选)
 
   SourceRule({
     required this.id,
     required this.name,
-    required this.baseUrl,
-    required this.search,
-    required this.parser,
+    required this.url,
     this.headers,
+    this.paramPage = 'page',
+    this.paramKeyword = 'q',
+    required this.listPath,
+    required this.idPath,
+    required this.thumbPath,
+    required this.fullPath,
+    this.widthPath,
+    this.heightPath,
   });
 
-  factory SourceRule.fromJson(Map<String, dynamic> json) {
+  factory SourceRule.fromJson(String jsonStr) {
+    final Map<String, dynamic> map = json.decode(jsonStr);
     return SourceRule(
-      id: json['id'],
-      name: json['name'],
-      baseUrl: json['base_url'],
-      search: SearchConfig.fromJson(json['search']),
-      parser: ParseConfig.fromJson(json['parser']),
-      headers: json['headers'] != null 
-          ? Map<String, String>.from(json['headers']) 
-          : null,
+      id: map['id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      name: map['name'] ?? '未命名图源',
+      url: map['url'] ?? '',
+      // 🔥 解析 Headers
+      headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
+      paramPage: map['params']?['page'] ?? 'page',
+      paramKeyword: map['params']?['keyword'] ?? 'q',
+      listPath: map['parser']?['list'] ?? r'$',
+      idPath: map['parser']?['id'] ?? 'id',
+      thumbPath: map['parser']?['thumb'] ?? 'url',
+      fullPath: map['parser']?['full'] ?? 'url',
+      widthPath: map['parser']?['width'],
+      heightPath: map['parser']?['height'],
     );
   }
 
+  // 序列化回 JSON (方便调试或保存)
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'name': name,
-      'base_url': baseUrl,
-      'search': search.toJson(),
-      'parser': parser.toJson(),
-      if (headers != null) 'headers': headers,
-    };
-  }
-}
-
-class SearchConfig {
-  final String url;
-  // 🔥 新增：固定参数 (例如 apikey=123, safe_mode=true)
-  final Map<String, dynamic>? params;
-  
-  SearchConfig({required this.url, this.params});
-
-  factory SearchConfig.fromJson(Map<String, dynamic> json) => SearchConfig(
-    url: json['url'],
-    params: json['params'],
-  );
-
-  Map<String, dynamic> toJson() => {
-    'url': url,
-    if (params != null) 'params': params,
-  };
-}
-
-class ParseConfig {
-  final String listNode;
-  final String id;
-  final String thumb;
-  final String full;
-  final String width;
-  final String height;
-  final String? thumbPrefix;
-  final String? fullPrefix;
-
-  ParseConfig({
-    required this.listNode,
-    required this.id,
-    required this.thumb,
-    required this.full,
-    required this.width,
-    required this.height,
-    this.thumbPrefix,
-    this.fullPrefix,
-  });
-
-  factory ParseConfig.fromJson(Map<String, dynamic> json) {
-    return ParseConfig(
-      listNode: json['list_node'],
-      id: json['id'],
-      thumb: json['thumb'],
-      full: json['full'],
-      width: json['width'],
-      height: json['height'],
-      thumbPrefix: json['thumb_prefix'],
-      fullPrefix: json['full_prefix'],
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'list_node': listNode,
-      'id': id,
-      'thumb': thumb,
-      'full': full,
-      'width': width,
-      'height': height,
-      'thumb_prefix': thumbPrefix,
-      'full_prefix': fullPrefix,
+      'url': url,
+      'headers': headers,
+      'params': {
+        'page': paramPage,
+        'keyword': paramKeyword,
+      },
+      'parser': {
+        'list': listPath,
+        'id': idPath,
+        'thumb': thumbPath,
+        'full': fullPath,
+        'width': widthPath,
+        'height': heightPath,
+      }
     };
   }
 }
