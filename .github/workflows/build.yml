@@ -3,50 +3,40 @@ name: Build Flutter APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  # 允许手动在 Actions 页面触发构建
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
       # 1. 拉取代码
       - uses: actions/checkout@v3
 
-      # 2. 设置 Java 环境 (Gradle 需要)
+      # 2. 设置 Java 环境 (开启 Gradle 缓存)
       - uses: actions/setup-java@v3
         with:
           distribution: 'zulu'
-          java-version: '17' # 对应较新的 Gradle 版本
+          java-version: '17'
+          cache: 'gradle' # 🔥 关键优化：缓存 Gradle 依赖，下次不用重新下
 
-      # 3. 设置 Flutter 环境
+      # 3. 设置 Flutter 环境 (开启 SDK 和 Pub 缓存)
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          # flutter-version: '3.19.0' # 你也可以指定具体版本，默认是用最新稳定版
+          cache: true # 🔥 关键优化：缓存 Flutter SDK 和所有 pub 包
 
-      # 4. 下载项目依赖
+      # 4. 下载依赖 (有缓存时会飞快)
       - name: Get Dependencies
         run: flutter pub get
 
-      # 5. 生成代码 (如果有用到 build_runner，比如 json_serializable)
-      # 如果你的项目没有用到 build_runner，这步会自动跳过或不做任何事，但保留着是个好习惯
-      # - name: Run Build Runner
-      #   run: dart run build_runner build --delete-conflicting-outputs
-
-      # 6. 打包 Debug APK
-      # 注意：为了简单起见，这里打的是 Debug 包，不需要签名配置，可以直接安装
-      # 如果你需要 Release 包，后续需要配置 Keystore 密钥
+      # 5. 打包 APK
       - name: Build APK
         run: flutter build apk --debug
 
-      # 7. 上传构建产物 (APK) 到 GitHub Actions 页面
+      # 6. 上传产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: prism-debug-apk
+          name: prism-app-debug
           path: build/app/outputs/flutter-apk/app-debug.apk
