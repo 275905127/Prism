@@ -1,12 +1,11 @@
-// lib/ui/pages/wallpaper_detail_page.dart
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/models/uni_wallpaper.dart';
+import '../widgets/foggy_app_bar.dart'; // 🔥 引入 Helper
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
@@ -27,18 +26,21 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
   bool _isDownloading = false;
 
   Future<void> _saveImage() async {
-    // ... 保存逻辑保持不变 ...
     if (_isDownloading) return;
     setState(() => _isDownloading = true);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("开始下载..."), duration: Duration(milliseconds: 500)));
+    
     try {
       var response = await Dio().get(
         widget.wallpaper.fullUrl,
         options: Options(responseType: ResponseType.bytes, headers: widget.headers),
       );
       await Gal.putImageBytes(Uint8List.fromList(response.data), album: 'Prism');
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 已保存")));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 已保存到相册 (Prism)")));
+    } on GalException catch (e) {
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 权限或保存错误: ${e.type.message}")));
     } catch (e) {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 错误: $e")));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 网络错误: $e")));
     } finally {
       if(mounted) setState(() => _isDownloading = false);
     }
@@ -46,30 +48,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
 
   void _shareImage() {
     Share.share(widget.wallpaper.fullUrl);
-  }
-
-  // 🔥 提取雾化渐变逻辑 (复用)
-  BoxDecoration _buildFogDecoration({bool isBottom = false}) {
-    final baseColor = Colors.white;
-    final colors = [
-      baseColor.withOpacity(0.94),
-      baseColor.withOpacity(0.94),
-      baseColor.withOpacity(0.90),
-      baseColor.withOpacity(0.75),
-      baseColor.withOpacity(0.50),
-      baseColor.withOpacity(0.20),
-      baseColor.withOpacity(0.0),
-    ];
-    
-    // 如果是底部栏，渐变方向要反过来 (从下往上白)
-    return BoxDecoration(
-      gradient: LinearGradient(
-        begin: isBottom ? Alignment.bottomCenter : Alignment.topCenter,
-        end: isBottom ? Alignment.topCenter : Alignment.bottomCenter,
-        colors: colors,
-        stops: const [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-      ),
-    );
   }
 
   @override
@@ -96,16 +74,17 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
 
-          // 顶部栏 (雾化)
+          // 顶部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             top: _showInfo ? 0 : -100,
             left: 0, 
             right: 0,
             child: Container(
-              height: 100, // 高度足够容纳渐变
+              height: 100,
               padding: const EdgeInsets.only(top: 40, left: 10),
-              decoration: _buildFogDecoration(isBottom: false), // 🔥 应用顶部雾化
+              // 🔥 调用 Helper
+              decoration: FoggyHelper.getDecoration(isBottom: false),
               child: Align(
                 alignment: Alignment.topLeft,
                 child: IconButton(
@@ -116,15 +95,16 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
 
-          // 底部栏 (雾化)
+          // 底部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             bottom: _showInfo ? 0 : -180,
             left: 0,
             right: 0,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(24, 40, 24, 24), // Top padding 留给渐变过渡
-              decoration: _buildFogDecoration(isBottom: true), // 🔥 应用底部雾化
+              padding: const EdgeInsets.fromLTRB(24, 40, 24, 24),
+              // 🔥 调用 Helper
+              decoration: FoggyHelper.getDecoration(isBottom: true),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
