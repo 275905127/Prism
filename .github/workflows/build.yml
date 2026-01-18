@@ -10,33 +10,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 拉取代码
       - uses: actions/checkout@v3
 
-      # 2. 设置 Java 环境 (开启 Gradle 缓存)
       - uses: actions/setup-java@v3
         with:
           distribution: 'zulu'
           java-version: '17'
-          cache: 'gradle' # 🔥 关键优化：缓存 Gradle 依赖，下次不用重新下
+          cache: 'gradle'
 
-      # 3. 设置 Flutter 环境 (开启 SDK 和 Pub 缓存)
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true # 🔥 关键优化：缓存 Flutter SDK 和所有 pub 包
+          cache: true
 
-      # 4. 下载依赖 (有缓存时会飞快)
       - name: Get Dependencies
         run: flutter pub get
 
-      # 5. 打包 APK
-      - name: Build APK
-        run: flutter build apk --debug
+      # 🔥 核心修改：增加 --target-platform android-arm64
+      # 这将只编译 64 位版本，速度飞快，且打出来的包更小
+      - name: Build APK (Arm64 only)
+        run: flutter build apk --debug --target-platform android-arm64
 
-      # 6. 上传产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: prism-app-debug
+          name: prism-app-arm64-debug
           path: build/app/outputs/flutter-apk/app-debug.apk
