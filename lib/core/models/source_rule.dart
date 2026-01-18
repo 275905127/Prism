@@ -20,6 +20,8 @@ class SourceRule {
   final String? widthPath;
   final String? heightPath;
   final String? imagePrefix;
+  // 🔥 新增：等级路径 (例如 "purity")
+  final String? gradePath;
 
   SourceRule({
     required this.id,
@@ -38,6 +40,7 @@ class SourceRule {
     this.widthPath,
     this.heightPath,
     this.imagePrefix,
+    this.gradePath, // 新增
   });
 
   factory SourceRule.fromJson(Map<String, dynamic> map) {
@@ -60,6 +63,8 @@ class SourceRule {
       widthPath: map['parser']?['width'],
       heightPath: map['parser']?['height'],
       imagePrefix: map['parser']?['image_prefix'],
+      // 🔥 解析 gradePath
+      gradePath: map['parser']?['grade'],
     );
   }
 
@@ -84,6 +89,7 @@ class SourceRule {
         'width': widthPath,
         'height': heightPath,
         'image_prefix': imagePrefix,
+        'grade': gradePath, // 序列化
       }
     };
   }
@@ -92,8 +98,8 @@ class SourceRule {
 class SourceFilter {
   final String key;
   final String name;
-  final String type; // 'radio' (单选) 或 'checklist' (多选)
-  final String separator; // 🔥 新增：多选时的拼接符，默认是 ","
+  final String type; 
+  final String separator; 
   final List<FilterOption> options;
 
   SourceFilter({
@@ -109,7 +115,7 @@ class SourceFilter {
       key: json['key'],
       name: json['name'],
       type: json['type'] ?? 'radio',
-      separator: json['separator'] ?? ',', // 默认逗号
+      separator: json['separator'] ?? ',', 
       options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
     );
   }
