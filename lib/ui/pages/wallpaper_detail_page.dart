@@ -26,45 +26,62 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
   bool _showInfo = true;
   bool _isDownloading = false;
 
+  // 🔥 核心修复：通过文件头魔数 (Magic Bytes) 精准识别格式
+  String _detectExtension(Uint8List bytes) {
+    if (bytes.length < 12) return 'jpg'; // 默认保底
+    
+    // JPEG: FF D8 FF
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return 'jpg';
+    
+    // PNG: 89 50 4E 47
+    if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) return 'png';
+    
+    // GIF: 47 49 46
+    if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) return 'gif';
+    
+    // WEBP: ... WEBP (第8-11字节)
+    if (bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return 'webp';
+    
+    return 'jpg';
+  }
+
   Future<void> _saveImage() async {
     if (_isDownloading) return;
     setState(() => _isDownloading = true);
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("开始下载..."), duration: Duration(milliseconds: 500)));
     
     try {
+      // 1. 强制构造一个浏览器 User-Agent，防止部分直链(LuvBree)拦截非浏览器请求
+      final Map<String, String> finalHeaders = Map.from(widget.headers ?? {});
+      if (!finalHeaders.containsKey('User-Agent')) {
+        finalHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      }
+
       final response = await Dio().get(
         widget.wallpaper.fullUrl,
         options: Options(
           responseType: ResponseType.bytes, 
-          headers: widget.headers,
-          // 增加超时，防止网络卡死
-          sendTimeout: const Duration(seconds: 15),
-          receiveTimeout: const Duration(seconds: 15),
+          headers: finalHeaders,
+          sendTimeout: const Duration(seconds: 20),
+          receiveTimeout: const Duration(seconds: 20),
         ),
       );
       
-      // 🔥 校验 1: 确保下载的是图片，而不是 403 Forbidden 的 HTML 页面
-      final contentType = response.headers.value('content-type');
-      if (contentType != null && !contentType.startsWith('image/')) {
-         throw "服务器返回了非图片内容 ($contentType)，可能是防盗链拦截";
+      final Uint8List imageBytes = Uint8List.fromList(response.data);
+      
+      // 2. 校验文件大小 (防止下载到几KB的错误页面)
+      if (imageBytes.lengthInBytes < 100) {
+        throw "文件过小，可能是错误页面";
       }
 
-      // 🔥 校验 2: 智能解析后缀名 (解决直链保存报错的核心！)
-      String extension = "jpg"; // 默认后缀
-      if (contentType != null) {
-        if (contentType.contains("png")) extension = "png";
-        else if (contentType.contains("gif")) extension = "gif";
-        else if (contentType.contains("webp")) extension = "webp";
-        else if (contentType.contains("jpeg")) extension = "jpg";
-      }
-      
-      // 构造带后缀的文件名，Gal 就能识别了
+      // 3. 智能识别后缀 (不再依赖 content-type)
+      final String extension = _detectExtension(imageBytes);
       final String fileName = "prism_${DateTime.now().millisecondsSinceEpoch}.$extension";
 
       await Gal.putImageBytes(
-        Uint8List.fromList(response.data), 
+        imageBytes, 
         album: 'Prism',
-        name: fileName, // 🔥 显式传入文件名
+        name: fileName, 
       );
 
       if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 已保存到相册 (Prism)")));
@@ -87,7 +104,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
       backgroundColor: Colors.white,
       body: Stack(
         children: [
-          // 1. 图片层
           GestureDetector(
             onTap: () => setState(() => _showInfo = !_showInfo),
             child: SizedBox.expand(
@@ -115,7 +131,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
 
-          // 2. 顶部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             top: _showInfo ? 0 : -100,
@@ -135,7 +150,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
             ),
           ),
 
-          // 3. 底部栏
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             bottom: _showInfo ? 0 : -180,
@@ -155,14 +169,12 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
                   Text("ID: ${widget.wallpaper.id}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                   const SizedBox(height: 4),
                   Text(
-                    // 只有当宽高有效时才显示，否则显示 "Auto Size"
                     (widget.wallpaper.width > 0 && widget.wallpaper.height > 0)
                         ? "${widget.wallpaper.width.toInt()} x ${widget.wallpaper.height.toInt()}"
                         : "Auto Size (Random Source)", 
                     style: TextStyle(color: Colors.grey[600], fontSize: 13)
                   ),
                   const SizedBox(height: 20),
-                  
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
