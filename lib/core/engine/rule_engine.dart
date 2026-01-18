@@ -1,5 +1,5 @@
 // lib/core/engine/rule_engine.dart
-import 'dart:math'; // 引入随机数
+import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
 import '../models/source_rule.dart';
@@ -46,41 +46,84 @@ class RuleEngine {
     }
   }
 
-  // 🔥 核心修改：温和的随机图获取策略
+  // 🔥 核心逻辑：直链嗅探与锁定
   Future<List<UniWallpaper>> _fetchRandomMode(SourceRule rule, Map<String, dynamic> params) async {
-    // 1. 降低并发数：从 12 降为 6 (避免瞬间高频，保护 IP)
     const int batchSize = 6; 
-    
-    // 2. 错峰延迟：每张图之间间隔 300ms (模仿人类点击频率)
     const int delayMs = 300; 
 
     final futures = List.generate(batchSize, (index) async {
-      // 关键点：根据索引计算延迟时间 (0ms, 300ms, 600ms, 900ms...)
       await Future.delayed(Duration(milliseconds: index * delayMs));
 
       try {
-        // 3. 防缓存/防重复：添加随机数或时间戳
-        // 很多 API 如果发现请求参数完全一样，会直接返回缓存的同一张图
-        // 或者认为你是脚本重放，从而拒绝服务。
+        // 构造防缓存参数
         final requestParams = Map<String, dynamic>.from(params);
         requestParams['_t'] = DateTime.now().millisecondsSinceEpoch + index;
         requestParams['_r'] = Random().nextInt(10000); 
 
-        final response = await _dio.head(
-          rule.url,
-          queryParameters: requestParams, // 带上随机参数
-          options: Options(
-            headers: rule.headers,
-            followRedirects: true,
-            sendTimeout: const Duration(seconds: 8), // 稍微放宽超时
-            receiveTimeout: const Duration(seconds: 8),
-            validateStatus: (status) => status != null && status < 400, // 遇到 404/429 视为错误
-          ),
-        );
-        return response.realUri.toString();
+        String? finalUrl;
+        
+        // 1. 优先尝试 HEAD 请求 (省流量，速度快)
+        try {
+          final response = await _dio.head(
+            rule.url,
+            queryParameters: requestParams,
+            options: Options(
+              headers: rule.headers,
+              followRedirects: true, // 关键：自动跟随重定向
+              sendTimeout: const Duration(seconds: 5),
+              receiveTimeout: const Duration(seconds: 5),
+              validateStatus: (status) => status != null && status < 400,
+            ),
+          );
+          finalUrl = response.realUri.toString();
+        } catch (e) {
+          // 2. 如果 HEAD 失败 (有些服务器禁止 HEAD)，回退尝试 GET
+          // 这里的 trick 是：我们并不需要 body，只要 header 里的 URL
+          // 但 Dio 的 GET 会下载 body，所以这只是个保底方案
+          // 对于大文件这可能会浪费一点流量，但在 API 兼容性上更好
+          print("HEAD failed, retrying with GET: $e");
+          try {
+             final response = await _dio.get(
+              rule.url,
+              queryParameters: requestParams,
+              options: Options(
+                headers: rule.headers,
+                followRedirects: true,
+                responseType: ResponseType.stream, // 关键：用流模式，不下载具体内容
+                sendTimeout: const Duration(seconds: 5),
+                receiveTimeout: const Duration(seconds: 5),
+              ),
+            );
+            finalUrl = response.realUri.toString();
+            // 拿到 URL 后立即关闭流，不下载图片数据，省流量
+            (response.data as ResponseBody).close(); 
+          } catch (e2) {
+            return null;
+          }
+        }
+
+        if (finalUrl == null) return null;
+
+        // 3. 参数净化 (Clean Up)
+        // 如果最终 URL 里居然还带着我们传的 _t 参数，说明服务器把参数透传回来了
+        // 这会导致缓存失效，所以我们要把它洗掉
+        final uri = Uri.parse(finalUrl);
+        if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
+           final newQueryParams = Map<String, String>.from(uri.queryParameters);
+           newQueryParams.remove('_t');
+           newQueryParams.remove('_r');
+           finalUrl = uri.replace(queryParameters: newQueryParams).toString();
+        }
+
+        // 4. 死循环防御
+        // 如果最终 URL 和原始请求 URL (去掉随机参数后) 一模一样
+        // 说明服务器根本没重定向，而是直接返回了图片 (Status 200)
+        // 这种图源无法做到“锁定”，每次请求都会变，我们在 ID 上做个标记
+        // 但对于 LuvBree 这种 API，它是会重定向的，所以 finalUrl 会变成 .../xxx.jpg
+        
+        return finalUrl;
+
       } catch (e) {
-        // 如果遇到 429 Too Many Requests，建议可以在这里做一个标记，停止后续请求
-        // 目前简单处理：返回 null，跳过这一张
         return null;
       }
     });
@@ -90,13 +133,16 @@ class RuleEngine {
     final List<UniWallpaper> wallpapers = [];
     for (var url in results) {
       if (url != null && url.startsWith('http')) {
-        // 简单的去重逻辑 (防止万一 API 还是返回了重复图)
+        // 简单去重
         if (!wallpapers.any((w) => w.fullUrl == url)) {
+          // 🔥 关键：用最终锁定的 URL 作为 ID
+          // 只要 URL 没变，Flutter 的 CachedNetworkImage 就会用缓存
+          // 详情页和下载也会用这个 URL，保证是同一张图
           wallpapers.add(UniWallpaper(
-            id: url.hashCode.toString(),
+            id: url.hashCode.toString(), 
             sourceId: rule.id,
-            thumbUrl: url,
-            fullUrl: url,
+            thumbUrl: url, // 锁定后的 URL
+            fullUrl: url,  // 锁定后的 URL
             width: 0, 
             height: 0,
           ));
