@@ -8,7 +8,7 @@ import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../widgets/foggy_app_bar.dart';
-import '../widgets/filter_sheet.dart'; // 🔥 引入筛选面板
+import '../widgets/filter_sheet.dart';
 import 'wallpaper_detail_page.dart';
 import 'wallpaper_search_delegate.dart';
 
@@ -28,8 +28,6 @@ class _HomePageState extends State<HomePage> {
   int _page = 1;
   bool _hasMore = true;
   bool _isScrolled = false;
-
-  // 🔥 存储当前的筛选状态
   Map<String, dynamic> _currentFilters = {};
 
   @override
@@ -68,7 +66,9 @@ class _HomePageState extends State<HomePage> {
       if (refresh) {
         _page = 1;
         _hasMore = true;
-        if (_wallpapers.isEmpty) _loading = true; 
+        // 🔥 关键优化：如果是刷新（包括应用筛选），立刻清空列表
+        // 这样界面会瞬间变成 Loading 状态，解决“迟钝感”
+        _wallpapers.clear(); 
       }
     });
 
@@ -76,7 +76,7 @@ class _HomePageState extends State<HomePage> {
       final data = await _engine.fetch(
         rule, 
         page: _page,
-        filterParams: _currentFilters, // 🔥 传参：带上筛选参数
+        filterParams: _currentFilters,
       );
       
       if (mounted) {
@@ -89,12 +89,11 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       if (mounted) {
         setState(() => _loading = false);
-        if (refresh) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        if (refresh) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载失败: $e')));
       }
     }
   }
 
-  // 🔥 显示筛选面板
   void _showFilterSheet() {
     final rule = context.read<SourceManager>().activeRule;
     if (rule == null || rule.filters == null || rule.filters!.isEmpty) {
@@ -111,7 +110,8 @@ class _HomePageState extends State<HomePage> {
         currentValues: _currentFilters,
         onApply: (newValues) {
           setState(() => _currentFilters = newValues);
-          _fetchData(refresh: true); // 重新加载
+          // 应用筛选时，触发刷新
+          _fetchData(refresh: true);
         },
       ),
     );
@@ -143,7 +143,6 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
-                // 切换图源时清空筛选
                 setState(() => _currentFilters = {}); 
                 _fetchData(refresh: true);
               } catch (e) {
@@ -161,7 +160,6 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final manager = context.watch<SourceManager>();
     final activeRule = manager.activeRule;
-    // 只有当规则里有 filters 定义时，才显示筛选按钮
     final hasFilters = activeRule?.filters != null && activeRule!.filters!.isNotEmpty;
 
     return Scaffold(
@@ -177,10 +175,9 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.search),
             onPressed: () => showSearch(context: context, delegate: WallpaperSearchDelegate()),
           ),
-          // 🔥 筛选按钮
           if (hasFilters) 
             IconButton(
-              icon: Icon(Icons.tune, color: _currentFilters.isNotEmpty ? Colors.black : Colors.grey[700]), // 有筛选时变黑
+              icon: Icon(Icons.tune, color: _currentFilters.isNotEmpty ? Colors.black : Colors.grey[700]),
               onPressed: _showFilterSheet,
             ),
           IconButton(
@@ -223,7 +220,6 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       manager.setActive(rule.id);
                       Navigator.pop(context);
-                      // 切换图源，重置筛选
                       setState(() => _currentFilters = {}); 
                       Future.delayed(const Duration(milliseconds: 200), () => _fetchData(refresh: true));
                     },
