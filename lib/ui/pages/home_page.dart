@@ -113,8 +113,7 @@ class _HomePageState extends State<HomePage> {
       if (refresh) {
         _page = 1;
         _hasMore = true;
-        // 🔥 核心修改：注释掉这一行！不要急着清空！
-        // _wallpapers.clear(); 
+        // _wallpapers.clear(); // 保持无感刷新
       }
     });
 
@@ -128,9 +127,7 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           if (refresh) {
-            // 🔥 货到了再替换，无缝衔接
             _wallpapers = data;
-            // 顺便滚回顶部，体验更好
             if (_scrollController.hasClients) {
               _scrollController.jumpTo(0);
             }
@@ -303,15 +300,15 @@ class _HomePageState extends State<HomePage> {
       ),
       body: Stack(
         children: [
-          // 1. 底层：内容区 (如果没有数据且不加载，显示空状态)
           _wallpapers.isEmpty && !_loading
               ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
               : MasonryGridView.count(
                   controller: _scrollController,
-                  padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12),
+                  // 🔥 修改：padding 和 spacing 都改为 4
+                  padding: const EdgeInsets.only(top: 100, left: 4, right: 4, bottom: 4),
                   crossAxisCount: 2,
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 4,
+                  crossAxisSpacing: 4,
                   itemCount: _wallpapers.length,
                   itemBuilder: (context, index) {
                     final paper = _wallpapers[index];
@@ -323,9 +320,11 @@ class _HomePageState extends State<HomePage> {
                       child: AspectRatio(
                         aspectRatio: paper.aspectRatio,
                         child: Container(
-                          decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(12)),
+                          // 🔥 修改：圆角改为 4
+                          decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(4)),
                           child: ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
+                            // 🔥 修改：圆角改为 4
+                            borderRadius: BorderRadius.circular(4),
                             child: CachedNetworkImage(
                               imageUrl: paper.thumbUrl, 
                               httpHeaders: activeRule?.headers,
@@ -340,19 +339,16 @@ class _HomePageState extends State<HomePage> {
                   },
                 ),
           
-          // 2. 顶层：加载遮罩 (当加载第一页时显示)
-          // 这样旧内容还在，上面盖一层半透明白雾 + 转圈，消除白屏闪烁
           if (_loading && _page == 1)
             Positioned.fill(
               child: Container(
-                color: Colors.white.withOpacity(0.6), // 半透明遮罩
+                color: Colors.white.withOpacity(0.6),
                 child: const Center(
                   child: CircularProgressIndicator(color: Colors.black),
                 ),
               ),
             ),
           
-          // 3. 底部加载条 (当加载更多页时显示)
           if (_loading && _page > 1)
              const Positioned(
               left: 0, right: 0, bottom: 0,
