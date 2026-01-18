@@ -7,7 +7,6 @@ import '../models/uni_wallpaper.dart';
 class RuleEngine {
   final Dio _dio = Dio();
 
-  // 🔥 增加 filterParams 参数
   Future<List<UniWallpaper>> fetch(SourceRule rule, {
     int page = 1, 
     String? query,
@@ -18,15 +17,22 @@ class RuleEngine {
         rule.paramPage: page,
       };
       
+      // 1. 合并固定参数
       if (rule.fixedParams != null) {
         params.addAll(rule.fixedParams!);
       }
 
-      // 🔥 合并用户选择的筛选参数
+      // 2. 🔥 合并 API Key (如果存在)
+      if (rule.apiKey != null && rule.apiKey!.isNotEmpty) {
+        params['apikey'] = rule.apiKey;
+      }
+
+      // 3. 合并筛选参数
       if (filterParams != null) {
         params.addAll(filterParams);
       }
 
+      // 4. 合并搜索词
       if (query != null && query.isNotEmpty) {
         params[rule.paramKeyword] = query;
       }
