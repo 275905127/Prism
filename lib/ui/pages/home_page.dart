@@ -126,25 +126,25 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           if (refresh) {
             _wallpapers = data;
-            // 刷新时，如果有数据则重置 hasMore，否则说明是空源
+            // 刷新时：如果有数据，则认为还有更多；如果是空的，直接到底
             _hasMore = data.isNotEmpty; 
             if (_scrollController.hasClients) _scrollController.jumpTo(0);
           } else {
-            // 🔥 核心修复：去重逻辑
-            // 筛选出 _wallpapers 里不存在的新图片
+            // 🔥 核心修复：加载更多时的“去重逻辑”
+            // 1. 过滤掉已经在列表里的图片 (通过 ID 判断)
             final newItems = data.where((newItem) {
               return !_wallpapers.any((existing) => existing.id == newItem.id);
             }).toList();
 
             if (newItems.isEmpty) {
-              // 🔥 如果接口返回了数据，但全是重复的，说明到底了，停止加载
+              // 2. 如果接口返回了数据，但全是重复的 -> 说明到底了，停止加载
               _hasMore = false;
             } else {
               _wallpapers.addAll(newItems);
             }
           }
           
-          // 如果本次返回的数据本身就很少（比如小于一页），也说明没更多了
+          // 双重保险：如果本次返回的数据量很少（说明是尾页），也停止加载
           if (data.isEmpty) _hasMore = false; 
           else _page++;
           
@@ -297,6 +297,7 @@ class _HomePageState extends State<HomePage> {
     final activeRule = manager.activeRule;
     final hasFilters = activeRule?.filters != null && activeRule!.filters!.isNotEmpty;
 
+    // 自动检测图源 ID 变化并初始化
     if (activeRule != null && activeRule.id != _currentRuleId) {
       _currentRuleId = activeRule.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -386,7 +387,6 @@ class _HomePageState extends State<HomePage> {
       ),
       body: Stack(
         children: [
-          // 空状态
           _wallpapers.isEmpty && !_loading
               ? Center(
                   child: Column(
@@ -407,9 +407,8 @@ class _HomePageState extends State<HomePage> {
                   crossAxisCount: 2,
                   mainAxisSpacing: 6,
                   crossAxisSpacing: 6,
-                  itemCount: _wallpapers.length + (_hasMore ? 0 : 1), // 如果到底了，多留一个位置给底栏
+                  itemCount: _wallpapers.length + (_hasMore ? 0 : 1), 
                   itemBuilder: (context, index) {
-                    // 底部文字提示
                     if (index == _wallpapers.length) {
                       return Container(
                         padding: const EdgeInsets.all(20),
