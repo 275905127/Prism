@@ -10,9 +10,9 @@ class FoggyHelper {
         begin: isBottom ? Alignment.bottomCenter : Alignment.topCenter,
         end: isBottom ? Alignment.topCenter : Alignment.bottomCenter,
         colors: [
-          baseColor.withOpacity(0.93),
-          baseColor.withOpacity(0.93),
-          baseColor.withOpacity(0.86),
+          baseColor.withOpacity(0.90),
+          baseColor.withOpacity(0.90),
+          baseColor.withOpacity(0.80),
           baseColor.withOpacity(0.75),
           baseColor.withOpacity(0.50),
           baseColor.withOpacity(0.20),
