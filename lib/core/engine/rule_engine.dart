@@ -1,4 +1,5 @@
 // lib/core/engine/rule_engine.dart
+import 'dart:math'; // 引入随机数
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
 import '../models/source_rule.dart';
@@ -12,10 +13,10 @@ class RuleEngine {
     String? query,
     Map<String, dynamic>? filterParams, 
   }) async {
-    // 构造基础参数
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
     if (rule.apiKey != null && rule.apiKey!.isNotEmpty) params['apikey'] = rule.apiKey;
+    
     if (filterParams != null) {
       filterParams.forEach((key, value) {
         if (value is List) {
@@ -27,19 +28,15 @@ class RuleEngine {
         }
       });
     }
-    // 搜索词只在非 Random 模式或 Random 接口支持参数时才加
+
     if (query != null && query.isNotEmpty) {
       params[rule.paramKeyword] = query;
     }
 
     try {
-      // 🔥 分支 1: 直链随机模式 (Random Direct Link)
       if (rule.responseType == 'random') {
         return await _fetchRandomMode(rule, params);
-      } 
-      // 🔥 分支 2: 标准 JSON 模式
-      else {
-        // 对于 JSON 模式，才需要分页参数
+      } else {
         params[rule.paramPage] = page;
         return await _fetchJsonMode(rule, params);
       }
@@ -49,53 +46,66 @@ class RuleEngine {
     }
   }
 
-  // 🔥 新增：处理直链随机图源
+  // 🔥 核心修改：温和的随机图获取策略
   Future<List<UniWallpaper>> _fetchRandomMode(SourceRule rule, Map<String, dynamic> params) async {
-    // 并发数：一次请求 12 张，凑满一页
-    const int batchSize = 12;
+    // 1. 降低并发数：从 12 降为 6 (避免瞬间高频，保护 IP)
+    const int batchSize = 6; 
     
-    // 创建 12 个并发任务
-    final futures = List.generate(batchSize, (_) async {
+    // 2. 错峰延迟：每张图之间间隔 300ms (模仿人类点击频率)
+    const int delayMs = 300; 
+
+    final futures = List.generate(batchSize, (index) async {
+      // 关键点：根据索引计算延迟时间 (0ms, 300ms, 600ms, 900ms...)
+      await Future.delayed(Duration(milliseconds: index * delayMs));
+
       try {
-        final response = await _dio.head( // 使用 HEAD 请求，只拿 Header 不下载图片，速度极快
+        // 3. 防缓存/防重复：添加随机数或时间戳
+        // 很多 API 如果发现请求参数完全一样，会直接返回缓存的同一张图
+        // 或者认为你是脚本重放，从而拒绝服务。
+        final requestParams = Map<String, dynamic>.from(params);
+        requestParams['_t'] = DateTime.now().millisecondsSinceEpoch + index;
+        requestParams['_r'] = Random().nextInt(10000); 
+
+        final response = await _dio.head(
           rule.url,
-          queryParameters: params,
+          queryParameters: requestParams, // 带上随机参数
           options: Options(
             headers: rule.headers,
-            followRedirects: true, // 跟随重定向，拿到最终 URL
-            sendTimeout: const Duration(seconds: 5),
-            receiveTimeout: const Duration(seconds: 5),
+            followRedirects: true,
+            sendTimeout: const Duration(seconds: 8), // 稍微放宽超时
+            receiveTimeout: const Duration(seconds: 8),
+            validateStatus: (status) => status != null && status < 400, // 遇到 404/429 视为错误
           ),
         );
-        // 获取最终的真实 URL
         return response.realUri.toString();
       } catch (e) {
+        // 如果遇到 429 Too Many Requests，建议可以在这里做一个标记，停止后续请求
+        // 目前简单处理：返回 null，跳过这一张
         return null;
       }
     });
 
-    // 等待所有请求完成
     final results = await Future.wait(futures);
     
-    // 过滤掉失败的，并转换为 UniWallpaper
     final List<UniWallpaper> wallpapers = [];
     for (var url in results) {
       if (url != null && url.startsWith('http')) {
-        // 随机图源通常不知道宽高，设为 0 让 UI 自己适配
-        wallpapers.add(UniWallpaper(
-          id: url.hashCode.toString(), // 用 URL 的 Hash 做临时 ID
-          sourceId: rule.id,
-          thumbUrl: url,
-          fullUrl: url,
-          width: 0, 
-          height: 0,
-        ));
+        // 简单的去重逻辑 (防止万一 API 还是返回了重复图)
+        if (!wallpapers.any((w) => w.fullUrl == url)) {
+          wallpapers.add(UniWallpaper(
+            id: url.hashCode.toString(),
+            sourceId: rule.id,
+            thumbUrl: url,
+            fullUrl: url,
+            width: 0, 
+            height: 0,
+          ));
+        }
       }
     }
     return wallpapers;
   }
 
-  // 处理标准 JSON 模式 (原来的逻辑)
   Future<List<UniWallpaper>> _fetchJsonMode(SourceRule rule, Map<String, dynamic> params) async {
     final response = await _dio.get(
       rule.url,
