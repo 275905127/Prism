@@ -1,6 +1,4 @@
 // lib/core/models/source_rule.dart
-import 'dart:convert';
-
 class SourceRule {
   final String id;
   final String name;
@@ -9,6 +7,9 @@ class SourceRule {
   final Map<String, dynamic>? fixedParams;
   final String? apiKey;
   final List<SourceFilter>? filters;
+  
+  // 🔥 新增：响应类型 ('json' 或 'random')
+  final String responseType; 
   
   final String paramPage;
   final String paramKeyword;
@@ -20,7 +21,6 @@ class SourceRule {
   final String? widthPath;
   final String? heightPath;
   final String? imagePrefix;
-  // 🔥 新增：等级路径 (例如 "purity")
   final String? gradePath;
 
   SourceRule({
@@ -31,6 +31,7 @@ class SourceRule {
     this.fixedParams,
     this.apiKey,
     this.filters,
+    this.responseType = 'json', // 默认为 JSON
     this.paramPage = 'page',
     this.paramKeyword = 'q',
     required this.listPath,
@@ -40,7 +41,7 @@ class SourceRule {
     this.widthPath,
     this.heightPath,
     this.imagePrefix,
-    this.gradePath, // 新增
+    this.gradePath,
   });
 
   factory SourceRule.fromJson(Map<String, dynamic> map) {
@@ -54,6 +55,9 @@ class SourceRule {
       filters: map['filters'] != null 
           ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList() 
           : null,
+      // 🔥 解析类型，默认 json
+      responseType: map['type'] ?? 'json',
+      
       paramPage: map['params']?['page'] ?? 'page',
       paramKeyword: map['params']?['keyword'] ?? 'q',
       listPath: map['parser']?['list'] ?? r'$',
@@ -63,7 +67,6 @@ class SourceRule {
       widthPath: map['parser']?['width'],
       heightPath: map['parser']?['height'],
       imagePrefix: map['parser']?['image_prefix'],
-      // 🔥 解析 gradePath
       gradePath: map['parser']?['grade'],
     );
   }
@@ -73,6 +76,7 @@ class SourceRule {
       'id': id,
       'name': name,
       'url': url,
+      'type': responseType, // 序列化
       'headers': headers,
       'fixed_params': fixedParams,
       'api_key': apiKey,
@@ -89,7 +93,7 @@ class SourceRule {
         'width': widthPath,
         'height': heightPath,
         'image_prefix': imagePrefix,
-        'grade': gradePath, // 序列化
+        'grade': gradePath,
       }
     };
   }
