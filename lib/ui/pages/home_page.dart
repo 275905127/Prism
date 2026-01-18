@@ -1,4 +1,3 @@
-// lib/ui/pages/home_page.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
@@ -7,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
+import '../widgets/foggy_app_bar.dart'; // 🔥 引入我们刚写的组件
 import 'wallpaper_detail_page.dart';
 import 'wallpaper_search_delegate.dart';
 
@@ -45,7 +45,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _onScroll() {
-    // 🔥 监听滚动距离，更新 AppBar 状态
+    // 监听滚动距离，更新 AppBar 状态
     final isScrolled = _scrollController.hasClients && _scrollController.offset > 0;
     if (isScrolled != _isScrolled) {
       setState(() => _isScrolled = isScrolled);
@@ -58,7 +58,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ... _fetchData 和 _showImportDialog 代码保持不变 ...
   Future<void> _fetchData({bool refresh = false}) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -82,13 +81,14 @@ class _HomePageState extends State<HomePage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+        if (refresh) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     }
   }
 
   void _showImportDialog(BuildContext context) {
-    // ... (这里代码太长省略，保持原样即可，如果你需要我可以补全) ...
-    // 为了节省篇幅，假设你保留了之前的 import dialog 逻辑
     final TextEditingController controller = TextEditingController();
     showDialog(
       context: context,
@@ -98,10 +98,15 @@ class _HomePageState extends State<HomePage> {
         content: TextField(
           controller: controller,
           maxLines: 10,
-          decoration: const InputDecoration(hintText: '在此粘贴 JSON...'),
+          decoration: const InputDecoration(
+            hintText: '在此粘贴 JSON 内容...',
+            border: OutlineInputBorder(),
+            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.black)),
+          ),
+          style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消', style: TextStyle(color: Colors.grey))),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Colors.black),
             onPressed: () {
@@ -110,33 +115,13 @@ class _HomePageState extends State<HomePage> {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
                 _fetchData(refresh: true);
-              } catch (e) {}
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
+              }
             },
             child: const Text('导入'),
           ),
         ],
-      ),
-    );
-  }
-
-  // 🔥 核心：构建雾化渐变背景
-  Widget _buildFogBackground(Color baseColor) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            baseColor.withOpacity(0.94),
-            baseColor.withOpacity(0.94),
-            baseColor.withOpacity(0.90),
-            baseColor.withOpacity(0.75),
-            baseColor.withOpacity(0.50),
-            baseColor.withOpacity(0.20),
-            baseColor.withOpacity(0.0),
-          ],
-          stops: const [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        ),
       ),
     );
   }
@@ -148,21 +133,11 @@ class _HomePageState extends State<HomePage> {
 
     return Scaffold(
       extendBodyBehindAppBar: true, // 🔥 让内容延伸到 AppBar 下方
-      appBar: AppBar(
+      appBar: FoggyAppBar( // 🔥 使用封装好的组件
+        isScrolled: _isScrolled,
         title: Text(
           activeRule?.name ?? 'Prism',
           style: const TextStyle(fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        // 🔥 使用你要求的参数
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        flexibleSpace: AnimatedOpacity(
-          opacity: _isScrolled ? 1.0 : 0.0, // 滚动时显示雾化，不滚动透明
-          duration: const Duration(milliseconds: 200),
-          child: _buildFogBackground(Colors.white), // 基色为白
         ),
         actions: [
           IconButton(
@@ -176,31 +151,68 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       drawer: Drawer(
-        // ... Drawer 代码保持不变 ...
-        child: Column(children: [
-           const DrawerHeader(child: Center(child: Text("Prism", style: TextStyle(fontSize: 24)))),
-           Expanded(child: ListView.builder(
-             itemCount: manager.rules.length,
-             itemBuilder: (ctx, i) => ListTile(
-               title: Text(manager.rules[i].name),
-               onTap: () {
-                 manager.setActive(manager.rules[i].id);
-                 Navigator.pop(context);
-                 _fetchData(refresh: true);
-               },
-             )
-           )),
-           ListTile(
-             title: const Text("导入规则"),
-             onTap: () => _showImportDialog(context),
-           )
-        ]),
+        child: Column(
+          children: [
+            DrawerHeader(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(bottom: BorderSide(color: Colors.black12)),
+              ),
+              child: const Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.auto_awesome, size: 48, color: Colors.black),
+                    SizedBox(height: 10),
+                    Text('Prism', style: TextStyle(color: Colors.black, fontSize: 24, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                itemCount: manager.rules.length,
+                itemBuilder: (context, index) {
+                  final rule = manager.rules[index];
+                  final isSelected = rule.id == activeRule?.id;
+                  return ListTile(
+                    title: Text(rule.name, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                    leading: isSelected 
+                        ? const Icon(Icons.circle, color: Colors.black, size: 10)
+                        : const Icon(Icons.circle_outlined, color: Colors.grey, size: 10),
+                    onTap: () {
+                      manager.setActive(rule.id);
+                      Navigator.pop(context);
+                      Future.delayed(const Duration(milliseconds: 200), () => _fetchData(refresh: true));
+                    },
+                    trailing: IconButton(
+                      icon: const Icon(Icons.close, size: 16, color: Colors.grey),
+                      onPressed: () => manager.deleteRule(rule.id),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(height: 1, color: Colors.black12),
+            ListTile(
+              leading: const Icon(Icons.add, color: Colors.black),
+              title: const Text('导入规则', style: TextStyle(color: Colors.black)),
+              onTap: () {
+                Navigator.pop(context);
+                _showImportDialog(context);
+              },
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
       ),
       body: _wallpapers.isEmpty && !_loading
-          ? const Center(child: Text("暂无数据")) // 简化占位
+          ? Center(child: Text(activeRule == null ? "请先导入图源" : "暂无数据"))
           : MasonryGridView.count(
               controller: _scrollController,
-              padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12), // 🔥 Top padding 让出 AppBar 高度
+              // 🔥 关键：顶部留出 100 的距离给 AppBar，否则第一排会被挡住
+              padding: const EdgeInsets.only(top: 100, left: 12, right: 12, bottom: 12),
               crossAxisCount: 2,
               mainAxisSpacing: 12,
               crossAxisSpacing: 12,
@@ -215,13 +227,15 @@ class _HomePageState extends State<HomePage> {
                   child: AspectRatio(
                     aspectRatio: paper.aspectRatio,
                     child: Container(
-                      decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(12)),
+                      decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(12)),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(12),
                         child: CachedNetworkImage(
                           imageUrl: paper.thumbUrl, 
                           httpHeaders: activeRule?.headers,
-                          fit: BoxFit.cover
+                          fit: BoxFit.cover,
+                          placeholder: (c,u) => Container(color: Colors.grey[200]),
+                          errorWidget: (c,u,e) => const Icon(Icons.broken_image, color: Colors.grey),
                         ),
                       ),
                     ),
