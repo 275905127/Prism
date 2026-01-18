@@ -17,25 +17,10 @@ class RuleEngine {
         rule.paramPage: page,
       };
       
-      // 1. 合并固定参数
-      if (rule.fixedParams != null) {
-        params.addAll(rule.fixedParams!);
-      }
-
-      // 2. 🔥 合并 API Key (如果存在)
-      if (rule.apiKey != null && rule.apiKey!.isNotEmpty) {
-        params['apikey'] = rule.apiKey;
-      }
-
-      // 3. 合并筛选参数
-      if (filterParams != null) {
-        params.addAll(filterParams);
-      }
-
-      // 4. 合并搜索词
-      if (query != null && query.isNotEmpty) {
-        params[rule.paramKeyword] = query;
-      }
+      if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
+      if (rule.apiKey != null && rule.apiKey!.isNotEmpty) params['apikey'] = rule.apiKey;
+      if (filterParams != null) params.addAll(filterParams);
+      if (query != null && query.isNotEmpty) params[rule.paramKeyword] = query;
 
       final response = await _dio.get(
         rule.url,
@@ -54,9 +39,7 @@ class RuleEngine {
       final listPath = JsonPath(rule.listPath);
       final match = listPath.read(jsonMap).firstOrNull;
       
-      if (match == null || match.value is! List) {
-        return [];
-      }
+      if (match == null || match.value is! List) return [];
 
       final List list = match.value as List;
       
@@ -81,8 +64,9 @@ class RuleEngine {
           if (!full.startsWith('http')) full = rule.imagePrefix! + full;
         }
 
-        final width = getValue<int>(rule.widthPath ?? '', item) ?? 1080;
-        final height = getValue<int>(rule.heightPath ?? '', item) ?? 1920;
+        // 🔥 核心修改：解析不到尺寸就给 0，不要给默认值
+        final width = getValue<int>(rule.widthPath ?? '', item) ?? 0;
+        final height = getValue<int>(rule.heightPath ?? '', item) ?? 0;
 
         return UniWallpaper(
           id: id.toString(),
