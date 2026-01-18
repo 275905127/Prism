@@ -4,18 +4,18 @@ import 'dart:convert';
 class SourceRule {
   final String id;
   final String name;
-  final String url; // API 地址
-  final Map<String, String>? headers; // 🔥 新增: 请求头 (User-Agent, Cookie 等)
-  final String paramPage; // 分页参数名 (如 "page" 或 "p")
-  final String paramKeyword; // 搜索参数名 (如 "q" 或 "query")
+  final String url;
+  final Map<String, String>? headers; // 请求头
+  final String paramPage;
+  final String paramKeyword;
   
-  // JSONPath 规则
-  final String listPath;   // 列表路径 (如 "data")
-  final String idPath;     // ID 路径
-  final String thumbPath;  // 缩略图路径
-  final String fullPath;   // 原图路径
-  final String? widthPath; // 宽度路径 (可选)
-  final String? heightPath;// 高度路径 (可选)
+  // JSONPath 字段
+  final String listPath;
+  final String idPath;
+  final String thumbPath;
+  final String fullPath;
+  final String? widthPath;
+  final String? heightPath;
 
   SourceRule({
     required this.id,
@@ -32,13 +32,12 @@ class SourceRule {
     this.heightPath,
   });
 
-  factory SourceRule.fromJson(String jsonStr) {
-    final Map<String, dynamic> map = json.decode(jsonStr);
+  // 🔥 修复：这里改回接收 Map<String, dynamic>
+  factory SourceRule.fromJson(Map<String, dynamic> map) {
     return SourceRule(
       id: map['id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
       name: map['name'] ?? '未命名图源',
       url: map['url'] ?? '',
-      // 🔥 解析 Headers
       headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
       paramPage: map['params']?['page'] ?? 'page',
       paramKeyword: map['params']?['keyword'] ?? 'q',
@@ -51,7 +50,6 @@ class SourceRule {
     );
   }
 
-  // 序列化回 JSON (方便调试或保存)
   Map<String, dynamic> toJson() {
     return {
       'id': id,
