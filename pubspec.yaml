@@ -23,7 +23,6 @@ dependencies:
   permission_handler: ^10.2.0  # 申请权限
   image_gallery_saver: ^2.0.3  # 保存图片到相册
   share_plus: ^7.0.2           # 系统分享
-  async_wallpaper: ^2.0.0      # 设为壁纸
 
 dev_dependencies:
   flutter_test:
