@@ -29,7 +29,7 @@ jobs:
       # 🔥 核心修改：增加 --target-platform android-arm64
       # 这将只编译 64 位版本，速度飞快，且打出来的包更小
       - name: Build APK (Arm64 only)
-        run: flutter build apk --debug --target-platform android-arm64
+        run: flutter build apk --release --target-platform android-arm64
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
