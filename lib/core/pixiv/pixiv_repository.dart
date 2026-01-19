@@ -1,6 +1,5 @@
+// lib/core/pixiv/pixiv_repository.dart
 import 'dart:async';
-
-import 'package:dio/dio.dart';
 
 import '../models/uni_wallpaper.dart';
 import '../utils/app_log.dart';
@@ -10,30 +9,18 @@ import 'pixiv_client.dart';
 ///
 /// UI 只需要：
 /// - if (_pixivRepo.supports(rule)) => _pixivRepo.fetch(...)
+/// - 图片加载用：_pixivRepo.buildImageHeaders()
+///
+/// 说明：
+/// - 搜索接口给的是缩略图 url（square1200）
+/// - 详情/下载要拿 /ajax/illust/{id}/pages 才有 regular/original
+/// - i.pximg.net 图片一般需要 Referer: https://www.pixiv.net/
 class PixivRepository {
   PixivRepository({
-    Dio? dio,
     String? cookie,
     PixivClient? client,
-  })  : _dio = dio ??
-            Dio(
-              BaseOptions(
-                baseUrl: 'https://www.pixiv.net',
-                headers: const {
-                  'User-Agent':
-                      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Referer': 'https://www.pixiv.net/',
-                  'Accept': 'application/json',
-                },
-                responseType: ResponseType.json,
-                validateStatus: (s) => s != null && s < 500,
-                sendTimeout: const Duration(seconds: 10),
-                receiveTimeout: const Duration(seconds: 15),
-              ),
-            ),
-        _client = client ?? PixivClient(dio: dio, cookie: cookie);
+  }) : _client = client ?? PixivClient(cookie: cookie);
 
-  final Dio _dio;
   final PixivClient _client;
 
   static const String kRuleId = 'pixiv_search_ajax';
@@ -47,13 +34,17 @@ class PixivRepository {
     return false;
   }
 
+  /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
 
+  /// Pixiv：
+  /// - 首页没关键词没意义（会空）
+  /// - 搜索页：query 必填
   Future<List<UniWallpaper>> fetch(
     dynamic rule, {
     int page = 1,
     String? query,
-    Map<String, dynamic>? filterParams,
+    Map<String, dynamic>? filterParams, // 预留
   }) async {
     final q = (query ?? '').trim();
     if (q.isEmpty) return const [];
@@ -65,19 +56,25 @@ class PixivRepository {
 
     if (briefs.isEmpty) return const [];
 
-    // 2) 再补 fullUrl（regular/original），避免“全是缩略图”
-    //    不要傻逼到每张都串行：用并发池。
-    final enriched = await _enrichWithPages(briefs, concurrency: 4);
+    // 2) 并发补全 pages（拿 regular/original），避免全是缩略图
+    final enriched = await _enrichWithPages(
+      briefs,
+      concurrency: 4,
+      timeoutPerItem: const Duration(seconds: 8),
+    );
 
     // 3) 转 UniWallpaper
     final out = <UniWallpaper>[];
     for (final e in enriched) {
+      if (e.id.isEmpty) continue;
+
       out.add(
         UniWallpaper(
           id: e.id,
           sourceId: 'pixiv',
           thumbUrl: e.thumbUrl,
-          fullUrl: e.fullUrl,
+          // ✅ fullUrl 用 regular（最稳），original 留作未来下载/高清开关
+          fullUrl: e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl,
           width: e.width.toDouble(),
           height: e.height.toDouble(),
           grade: e.grade,
@@ -90,42 +87,57 @@ class PixivRepository {
   Future<List<_PixivEnriched>> _enrichWithPages(
     List<PixivIllustBrief> briefs, {
     int concurrency = 4,
+    Duration timeoutPerItem = const Duration(seconds: 8),
   }) async {
-    final results = List<_PixivEnriched>.filled(briefs.length, _PixivEnriched.empty(), growable: false);
+    if (briefs.isEmpty) return const [];
+    if (concurrency < 1) concurrency = 1;
 
-    int i = 0;
+    final results = <_PixivEnriched>[];
+    results.length = briefs.length;
+
+    // ✅ 线程安全的“任务游标”
+    var nextIndex = 0;
+    int takeIndex() {
+      final v = nextIndex;
+      nextIndex++;
+      return v;
+    }
+
     Future<void> worker() async {
       while (true) {
-        final idx = i;
-        i++;
+        final idx = takeIndex();
         if (idx >= briefs.length) return;
 
         final b = briefs[idx];
 
-        // 默认：先用 thumb 推一个 full（兜底）
-        var full = _deriveOriginalFromThumb(b.thumbUrl) ?? b.thumbUrl;
-        var grade = _gradeFromRestrict(b.xRestrict);
+        // 默认：先兜底（thumb 推导 original 仅作 fallback，不保证可用）
+        String regular = '';
+        String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
+        final grade = _gradeFromRestrict(b.xRestrict);
 
         try {
-          final pages = await _client.getIllustPages(b.id);
-          if (pages.isNotEmpty) {
-            // 优先 regular（更稳定），original 更可能格式/权限坑
-            final p0 = pages.first;
-            final regular = p0.regular.trim();
-            final original = p0.original.trim();
+          final pages = await _client
+              .getIllustPages(b.id)
+              .timeout(timeoutPerItem);
 
-            if (regular.isNotEmpty) full = regular;
-            else if (original.isNotEmpty) full = original;
+          if (pages.isNotEmpty) {
+            final p0 = pages.first;
+            final r = p0.regular.trim();
+            final o = p0.original.trim();
+
+            if (r.isNotEmpty) regular = r;
+            if (o.isNotEmpty) original = o;
           }
         } catch (e) {
-          // 不要炸主流程，记录一下就行
+          // 不要炸主流程：能显示 thumb 就够了
           AppLog.I.add('pixiv pages fail id=${b.id} err=$e');
         }
 
         results[idx] = _PixivEnriched(
           id: b.id,
           thumbUrl: b.thumbUrl,
-          fullUrl: full,
+          regularUrl: regular,
+          originalUrl: original,
           width: b.width,
           height: b.height,
           grade: grade,
@@ -135,12 +147,14 @@ class PixivRepository {
 
     final workers = List.generate(concurrency, (_) => worker());
     await Future.wait(workers);
-    return results.where((e) => e.id.isNotEmpty).toList();
+
+    // 去掉空占位
+    return results.where((e) => e.id.isNotEmpty).toList(growable: false);
   }
 
   String? _gradeFromRestrict(int xRestrict) {
     if (xRestrict <= 0) return null;
-    // 粗暴点：>0 就当 sketchy/nsfw
+    // 粗暴但可用：>0 即敏感分级
     return xRestrict >= 2 ? 'nsfw' : 'sketchy';
   }
 
@@ -176,7 +190,13 @@ class PixivRepository {
 class _PixivEnriched {
   final String id;
   final String thumbUrl;
-  final String fullUrl;
+
+  /// Pixiv pages 接口给的 regular（推荐用于详情展示）
+  final String regularUrl;
+
+  /// Pixiv pages 接口给的 original（用于下载/高清模式）
+  final String originalUrl;
+
   final int width;
   final int height;
   final String? grade;
@@ -184,18 +204,10 @@ class _PixivEnriched {
   const _PixivEnriched({
     required this.id,
     required this.thumbUrl,
-    required this.fullUrl,
+    required this.regularUrl,
+    required this.originalUrl,
     required this.width,
     required this.height,
     required this.grade,
   });
-
-  factory _PixivEnriched.empty() => const _PixivEnriched(
-        id: '',
-        thumbUrl: '',
-        fullUrl: '',
-        width: 0,
-        height: 0,
-        grade: null,
-      );
 }
