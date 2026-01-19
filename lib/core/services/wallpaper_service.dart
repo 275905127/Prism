@@ -38,12 +38,19 @@ class WallpaperService {
   /// ✅ Pixiv Cookie（来自 UI 持久化/内存注入）
   String? _pixivCookie;
 
+  bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
+
   /// ✅ UI 化入口：设置/清除 Pixiv Cookie（会立即影响 Ajax + i.pximg.net 图片）
   void setPixivCookie(String? cookie) {
     final c = cookie?.trim() ?? '';
     _pixivCookie = c.isEmpty ? null : c;
     _pixivRepo.setCookie(_pixivCookie);
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
+  }
+
+  bool isPixivRule(SourceRule? rule) {
+    if (rule == null) return false;
+    return _pixivRepo.supports(rule);
   }
 
   /// 核心方法：获取壁纸列表
@@ -56,7 +63,12 @@ class WallpaperService {
     // Pixiv 特殊源
     if (_pixivRepo.supports(rule)) {
       _syncPixivCookieFromRule(rule);
-      return _fetchFromPixiv(rule, page, query);
+      return _fetchFromPixiv(
+        rule,
+        page,
+        query,
+        filterParams: filterParams,
+      );
     }
 
     // 通用源
@@ -100,8 +112,9 @@ class WallpaperService {
   Future<List<UniWallpaper>> _fetchFromPixiv(
     SourceRule rule,
     int page,
-    String? query,
-  ) async {
+    String? query, {
+    Map<String, dynamic>? filterParams,
+  }) async {
     final String q = (query != null && query.trim().isNotEmpty)
         ? query
         : (rule.defaultKeyword ?? 'illustration').trim();
@@ -110,6 +123,7 @@ class WallpaperService {
       rule,
       page: page,
       query: q,
+      filterParams: filterParams,
     );
   }
 
