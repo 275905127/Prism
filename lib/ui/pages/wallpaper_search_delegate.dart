@@ -5,12 +5,12 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/manager/source_manager.dart';
-import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
-import '../../core/pixiv/pixiv_repository.dart';
+import '../../core/services/wallpaper_service.dart'; // 引入 Service
 import 'wallpaper_detail_page.dart';
 
 class WallpaperSearchDelegate extends SearchDelegate {
+  // ... (appBarTheme, buildActions, buildLeading 保持不变)
   @override
   ThemeData appBarTheme(BuildContext context) {
     final theme = Theme.of(context);
@@ -66,8 +66,9 @@ class _SearchResults extends StatefulWidget {
 }
 
 class _SearchResultsState extends State<_SearchResults> {
-  final RuleEngine _engine = RuleEngine();
-  final PixivRepository _pixivRepo = PixivRepository();
+  // 🔥 删除：不再直接持有 Engine/Repo
+  // final RuleEngine _engine = RuleEngine();
+  // final PixivRepository _pixivRepo = PixivRepository();
 
   final ScrollController _scrollController = ScrollController();
   List<UniWallpaper> _wallpapers = [];
@@ -122,9 +123,12 @@ class _SearchResultsState extends State<_SearchResults> {
         return;
       }
 
-      final List<UniWallpaper> data = _pixivRepo.supports(rule)
-          ? await _pixivRepo.fetch(rule, page: _page, query: q)
-          : await _engine.fetch(rule, page: _page, query: q);
+      // 🔥 核心修改：统一走 Service 调用
+      final List<UniWallpaper> data = await context.read<WallpaperService>().fetch(
+        rule,
+        page: _page,
+        query: q,
+      );
 
       if (!mounted) return;
 
@@ -157,10 +161,8 @@ class _SearchResultsState extends State<_SearchResults> {
     final manager = context.watch<SourceManager>();
     final rule = manager.activeRule;
 
-    // ✅ headers：Pixiv 必须 Referer；其它图源走 buildRequestHeaders()
-    final headers = (rule != null && _pixivRepo.supports(rule))
-        ? _pixivRepo.buildImageHeaders()
-        : rule?.buildRequestHeaders();
+    // 🔥 核心修改：统一走 Service 获取 Headers
+    final headers = context.read<WallpaperService>().getImageHeaders(rule);
 
     return Stack(
       children: [
