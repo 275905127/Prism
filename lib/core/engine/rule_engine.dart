@@ -1,6 +1,7 @@
 // lib/core/engine/rule_engine.dart
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
 
@@ -11,7 +12,7 @@ import '../utils/app_log.dart';
 class RuleEngine {
   final Dio _dio = Dio();
 
-  // ✅ cursor 分页缓存：不同 query / filters 必须隔离
+  /// ✅ cursor 分页缓存：不同 query / filters 必须隔离
   final Map<String, dynamic> _cursorCache = {};
 
   // ---------- 基础工具 ----------
@@ -156,8 +157,7 @@ class RuleEngine {
     // apiKey
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
-      final keyName =
-          (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
+      final keyName = (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
       if (rule.apiKeyIn == 'header') {
         reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
       } else {
@@ -189,6 +189,8 @@ class RuleEngine {
             params[key] = value.join(separator);
           }
         } else {
+          // ✅ 关键：空字符串参数不该发（waifu.im included_tags= 会 400）
+          if (value is String && value.trim().isEmpty) return;
           params[key] = value;
         }
       });
@@ -227,15 +229,9 @@ class RuleEngine {
             final cursor = _cursorCache[ck];
             if (cursor != null) {
               params[rule.paramPage] = cursor;
-            } else {
-              // 没 cursor 说明第一页都没成功过/缓存丢了，直接回到第一页行为
-              // 不塞 paramPage，让接口按默认第一页走
             }
-          } else {
-            // page==1：不塞 cursor
           }
         } else {
-          // 默认 page
           params[rule.paramPage] = page;
         }
       }
@@ -399,7 +395,7 @@ class RuleEngine {
     return out;
   }
 
-  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆） ----------
+  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆 + Smithsonian 定点 debug） ----------
 
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
@@ -409,6 +405,20 @@ class RuleEngine {
     required Map<String, dynamic>? filterParams,
   }) async {
     _logReq(rule, rule.url, params, headers);
+
+    // ✅ 只对这个图源打印 Smithsonian 的结构（避免“乱码式刷屏”）
+    const String kDebugRuleId = 'smithsonian_open_access_images';
+    final bool dbg = rule.id == kDebugRuleId;
+
+    String safeJson(dynamic v, {int max = 600}) {
+      try {
+        final s = jsonEncode(v);
+        return s.length > max ? '${s.substring(0, max)}...' : s;
+      } catch (_) {
+        final s = v?.toString() ?? '';
+        return s.length > max ? '${s.substring(0, max)}...' : s;
+      }
+    }
 
     try {
       final response = await _dio.get(
@@ -435,6 +445,36 @@ class RuleEngine {
         );
       }
 
+      // ✅ 定点 debug：只打印第一条的 media 结构（帮你写配置用）
+      if (dbg) {
+        try {
+          final media0 = JsonPath(
+            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]'
+          ).read(response.data).firstOrNull?.value;
+          AppLog.I.add('DBG ${rule.id} media0=${safeJson(media0)}');
+        } catch (e) {
+          AppLog.I.add('DBG ${rule.id} media0 ERR=$e');
+        }
+
+        try {
+          final content0 = JsonPath(
+            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content'
+          ).read(response.data).firstOrNull?.value;
+          AppLog.I.add('DBG ${rule.id} media0.content=${safeJson(content0)}');
+        } catch (e) {
+          AppLog.I.add('DBG ${rule.id} media0.content ERR=$e');
+        }
+
+        try {
+          final thumb0 = JsonPath(
+            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail'
+          ).read(response.data).firstOrNull?.value;
+          AppLog.I.add('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
+        } catch (e) {
+          AppLog.I.add('DBG ${rule.id} media0.thumbnail ERR=$e');
+        }
+      }
+
       // ✅ cursor 分页：成功后写回 next cursor
       if (rule.pageMode == 'cursor' && rule.cursorPath != null && rule.cursorPath!.trim().isNotEmpty) {
         final nextCursor = _getValue(rule.cursorPath!, response.data);
@@ -458,7 +498,7 @@ class RuleEngine {
   }
 
   // ---------- json merge 多请求（加日志 + 4xx body） ----------
-  // merge 多请求一般不适合 cursor；你要 cursor + merge 先别搞，需求爆炸。
+  // merge 多请求一般不适合 cursor；cursor + merge 先别做，复杂度直接爆炸。
 
   Future<List<UniWallpaper>> _fetchJsonModeMerge(
     SourceRule rule,
