@@ -24,10 +24,6 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  // 🔥 删除：不再直接持有 Engine 和 Repo
-  // final RuleEngine _engine = RuleEngine();
-  // final PixivRepository _pixivRepo = PixivRepository();
-
   final ScrollController _scrollController = ScrollController();
 
   List<UniWallpaper> _wallpapers = [];
@@ -74,6 +70,7 @@ class _HomePageState extends State<HomePage> {
         }
       });
     } catch (e) {
+      // ignore: avoid_print
       print("加载筛选记录失败: $e");
     }
   }
@@ -91,6 +88,7 @@ class _HomePageState extends State<HomePage> {
         await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
       }
     } catch (e) {
+      // ignore: avoid_print
       print("保存筛选记录失败: $e");
     }
   }
@@ -120,12 +118,10 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      // 🔥 核心修改：通过 Service 调用，UI 甚至不知道底层用了什么引擎
       final data = await context.read<WallpaperService>().fetch(
         rule,
         page: _page,
         filterParams: _currentFilters,
-        // query: 首页一般没有搜索词，除非你需要支持默认搜索
       );
 
       if (!mounted) return;
@@ -161,7 +157,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ... _showFilterSheet, _showImportDialog 保持不变 ...
   void _showFilterSheet() {
     final rule = context.read<SourceManager>().activeRule;
     if (rule == null || rule.filters.isEmpty) {
@@ -224,6 +219,31 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Map<String, String>? _buildSafeImageHeaders({
+    required UniWallpaper paper,
+    required dynamic activeRule,
+  }) {
+    final service = context.read<WallpaperService>();
+
+    // 1) 先用 Service 的规则级 headers
+    final base = service.getImageHeaders(activeRule);
+    final headers = <String, String>{...?(base ?? const <String, String>{})};
+
+    // 2) 针对 Pixiv 图片域名做兜底（避免 supports 判定失误导致缺 Referer -> 403）
+    final u = paper.thumbUrl.trim();
+    final isPximg = u.contains('pximg.net');
+    if (isPximg) {
+      headers.putIfAbsent('Referer', () => 'https://www.pixiv.net/');
+      headers.putIfAbsent(
+        'User-Agent',
+        () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      );
+    }
+
+    if (headers.isEmpty) return null;
+    return headers;
+  }
+
   Widget _buildWallpaperItem(UniWallpaper paper) {
     Color? borderColor;
     if (paper.grade != null) {
@@ -239,9 +259,7 @@ class _HomePageState extends State<HomePage> {
     const double kBorderWidth = 1.5;
 
     final activeRule = context.read<SourceManager>().activeRule;
-
-    // 🔥 核心修改：使用 Service 获取 Headers，不再手动判断 if-else
-    final headers = context.read<WallpaperService>().getImageHeaders(activeRule);
+    final headers = _buildSafeImageHeaders(paper: paper, activeRule: activeRule);
 
     final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
@@ -249,12 +267,33 @@ class _HomePageState extends State<HomePage> {
       fit: BoxFit.fitWidth,
       placeholder: (c, u) => Container(
         color: Colors.grey[100],
-        height: paper.aspectRatio > 0 ? null : 200,
+        alignment: Alignment.center,
+        child: const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+        ),
       ),
       errorWidget: (c, u, e) => Container(
         color: Colors.grey[50],
-        height: 150,
-        child: const Icon(Icons.broken_image, color: Colors.grey, size: 30),
+        padding: const EdgeInsets.all(12),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.broken_image, color: Colors.grey, size: 30),
+            const SizedBox(height: 6),
+            const Text('图片加载失败', style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const SizedBox(height: 2),
+            Text(
+              e.toString(),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: Colors.grey[400], fontSize: 10),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
 
@@ -314,7 +353,6 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    // 🔥 核心修改：使用 Service 获取 Headers
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
 
     return Scaffold(
@@ -341,7 +379,6 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      // ... Drawer 和 Body 几乎保持不变 ...
       drawer: Drawer(
         child: Column(
           children: [
