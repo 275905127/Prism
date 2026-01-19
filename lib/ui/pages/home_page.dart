@@ -35,6 +35,14 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic> _currentFilters = {};
   String? _currentRuleId;
 
+  static bool _isPixivRuleId(String? id) {
+    if (id == null) return false;
+    if (id == 'pixiv_search_ajax') return true;
+    return id.startsWith('pixiv');
+  }
+
+  static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
+
   @override
   void initState() {
     super.initState();
@@ -49,7 +57,24 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
+    await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
+  }
+
+  Future<void> _applyPixivCookieIfNeeded() async {
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+    if (rule == null) return;
+
+    if (!_isPixivRuleId(rule.id)) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final c = prefs.getString(_pixivCookiePrefsKey(rule.id))?.trim() ?? '';
+      context.read<WallpaperService>().setPixivCookie(c.isEmpty ? null : c);
+    } catch (_) {
+      // 不影响主流程
+    }
   }
 
   Future<void> _loadFilters() async {
@@ -219,6 +244,93 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _showPixivCookieDialog() async {
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+    if (rule == null) return;
+    if (!_isPixivRuleId(rule.id)) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final key = _pixivCookiePrefsKey(rule.id);
+    final initCookie = prefs.getString(key) ?? '';
+
+    final controller = TextEditingController(text: initCookie);
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        title: const Text('Pixiv Cookie'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '用于加载 i.pximg.net 原图/大图（部分内容需要登录）。\n留空并保存可清除 Cookie。',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                hintText: '粘贴 Cookie（PHPSESSID=...; device_token=...; ...）',
+                border: OutlineInputBorder(),
+              ),
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () async {
+              await prefs.remove(key);
+              if (!mounted) return;
+
+              context.read<WallpaperService>().setPixivCookie(null);
+              Navigator.pop(ctx);
+
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已清除 Pixiv Cookie')));
+                _fetchData(refresh: true);
+              }
+            },
+            child: const Text('清除', style: TextStyle(color: Colors.redAccent)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.black),
+            onPressed: () async {
+              final c = controller.text.trim();
+              if (c.isEmpty) {
+                await prefs.remove(key);
+                context.read<WallpaperService>().setPixivCookie(null);
+              } else {
+                await prefs.setString(key, c);
+                context.read<WallpaperService>().setPixivCookie(c);
+              }
+
+              if (!mounted) return;
+              Navigator.pop(ctx);
+
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(c.isEmpty ? 'Pixiv Cookie 已清除' : 'Pixiv Cookie 已保存')),
+                );
+                _fetchData(refresh: true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Map<String, String>? _buildSafeImageHeaders({
     required UniWallpaper paper,
     required dynamic activeRule,
@@ -354,6 +466,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
+    final showPixivCookieEntry = _isPixivRuleId(activeRule?.id);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -423,6 +536,18 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const Divider(height: 1, color: Colors.black12),
+
+            if (showPixivCookieEntry)
+              ListTile(
+                leading: const Icon(Icons.cookie_outlined, color: Colors.black),
+                title: const Text('Pixiv Cookie', style: TextStyle(color: Colors.black)),
+                subtitle: const Text('用于原图/大图加载（可选）', style: TextStyle(fontSize: 12)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showPixivCookieDialog();
+                },
+              ),
+
             ListTile(
               leading: const Icon(Icons.add, color: Colors.black),
               title: const Text('导入规则', style: TextStyle(color: Colors.black)),
