@@ -32,7 +32,7 @@ class WallpaperService {
   /// ✅ 通用引擎
   late final RuleEngine _standardEngine = RuleEngine(dio: _dio, logger: _logger);
 
-  /// ✅ Pixiv 仓库
+  /// ✅ Pixiv 仓库（支持 pages 超时重试配置）
   late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio, logger: _logger);
 
   /// ✅ Pixiv Cookie（来自 UI 持久化/内存注入）
@@ -47,6 +47,27 @@ class WallpaperService {
     _pixivRepo.setCookie(_pixivCookie);
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
   }
+
+  /// ✅ UI 化入口：配置 pages 补全策略（并发/超时/重试）
+  /// - 适合放在“设置页 / 调试页”
+  /// - 不传则保持当前值
+  void setPixivPagesConfig({
+    int? concurrency,
+    Duration? timeoutPerItem,
+    int? retryCount,
+    Duration? retryDelay,
+  }) {
+    final current = _pixivRepo.pagesConfig;
+    final next = current.copyWith(
+      concurrency: concurrency,
+      timeoutPerItem: timeoutPerItem,
+      retryCount: retryCount,
+      retryDelay: retryDelay,
+    );
+    _pixivRepo.updatePagesConfig(next);
+  }
+
+  PixivPagesConfig get pixivPagesConfig => _pixivRepo.pagesConfig;
 
   bool isPixivRule(SourceRule? rule) {
     if (rule == null) return false;
