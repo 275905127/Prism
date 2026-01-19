@@ -82,10 +82,9 @@ class RuleEngine {
       filterParams.forEach((key, value) {
         if (value is List) {
           // 找不到 filter 也会降级用 ',' 拼
-          final filterRule = rule.filters?.firstWhere(
-            (f) => f.key == key,
-            orElse: () => null,
-          );
+          final SourceFilter? filterRule =
+           rule.filters?.where((f) => f.key == key).cast<SourceFilter?>().firstOrNull;
+
           final separator = filterRule?.separator ?? ',';
           params[key] = value.join(separator);
         } else {
