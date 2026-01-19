@@ -1,4 +1,5 @@
 // lib/ui/pages/home_page.dart
+import 'log_page.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -373,14 +374,28 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const Divider(height: 1, color: Colors.black12),
+
             ListTile(
-              leading: const Icon(Icons.add, color: Colors.black),
-              title: const Text('导入规则', style: TextStyle(color: Colors.black)),
-              onTap: () {
-                Navigator.pop(context);
-                _showImportDialog(context);
-              },
+             leading: const Icon(Icons.add, color: Colors.black),
+             title: const Text('导入规则', style: TextStyle(color: Colors.black)),
+             onTap: () {
+              Navigator.pop(context);
+              _showImportDialog(context);
+             },
             ),
+
+            ListTile(
+             leading: const Icon(Icons.article_outlined, color: Colors.black),
+             title: const Text('日志', style: TextStyle(color: Colors.black)),
+             onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+               context,
+               MaterialPageRoute(builder: (_) => const LogPage()),
+              );
+             },
+            ),
+
             const SizedBox(height: 20),
           ],
         ),
