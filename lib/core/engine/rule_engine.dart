@@ -1,4 +1,5 @@
 // lib/core/engine/rule_engine.dart
+import 'dart:convert';
 import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
@@ -9,6 +10,9 @@ import '../utils/app_log.dart';
 
 class RuleEngine {
   final Dio _dio = Dio();
+
+  // ✅ cursor 分页缓存：不同 query / filters 必须隔离
+  final Map<String, dynamic> _cursorCache = {};
 
   // ---------- 基础工具 ----------
 
@@ -74,14 +78,8 @@ class RuleEngine {
 
   Map<String, String> _maskHeaders(Map<String, String> headers) {
     final m = Map<String, String>.from(headers);
-
-    // Authorization / apikey 之类的都给你打码，别在手机上裸奔
-    if (m.containsKey('Authorization')) {
-      m['Authorization'] = _mask(m['Authorization']!);
-    }
-    if (m.containsKey('apikey')) {
-      m['apikey'] = _mask(m['apikey']!);
-    }
+    if (m.containsKey('Authorization')) m['Authorization'] = _mask(m['Authorization']!);
+    if (m.containsKey('apikey')) m['apikey'] = _mask(m['apikey']!);
     return m;
   }
 
@@ -106,16 +104,29 @@ class RuleEngine {
     }
   }
 
-  // ---------- 稳定 ID 兜底（关键） ----------
-  // 你的分页去重、到底判断都靠 id。id 不稳定就是必炸。
+  // ---------- cursor key ----------
+  String _cursorKey(SourceRule r, String? q, Map<String, dynamic>? f) {
+    return '${r.id}|${q ?? ''}|${jsonEncode(f ?? {})}';
+  }
+
+  // offset 模式：猜测 pageSize（你不填 page_size 也能跑）
+  int _guessPageSize(SourceRule rule, Map<String, dynamic> params) {
+    for (final k in ['per_page', 'limit', 'rows', 'count', 'page_size']) {
+      final v = params[k];
+      if (v is num && v > 0) return v.toInt();
+      final vi = int.tryParse(v?.toString() ?? '');
+      if (vi != null && vi > 0) return vi;
+    }
+    return 20;
+  }
+
+  // ---------- 稳定 ID 兜底 ----------
   String _stableId(SourceRule rule, dynamic item, String thumb, String full) {
     try {
       final raw = _getValue(rule.idPath, item);
       final s = raw?.toString().trim();
       if (s != null && s.isNotEmpty) return s;
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
 
     final f = full.trim();
     if (f.isNotEmpty) return f;
@@ -156,12 +167,10 @@ class RuleEngine {
 
     // merge 多选参数
     final Map<String, List<String>> mergeMulti = {};
-
     if (filterParams != null) {
       filterParams.forEach((key, value) {
         if (value is List) {
           SourceFilter? filterRule;
-          // ✅ 你模型里 filters 是 List 非空，别再写 rule.filters != null 这种废话
           for (final f in rule.filters) {
             if (f.key == key) {
               filterRule = f;
@@ -185,7 +194,7 @@ class RuleEngine {
       });
     }
 
-    // ✅✅✅ 关键字策略：用户不搜 -> defaultKeyword；keywordRequired 则强制
+    // ✅✅✅ 关键字策略
     String? finalQuery = query;
 
     if ((finalQuery == null || finalQuery.trim().isEmpty) &&
@@ -199,24 +208,52 @@ class RuleEngine {
     }
 
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
-      // paramKeyword 可以是 '' 来禁用
       if (rule.paramKeyword.isNotEmpty) {
         params[rule.paramKeyword] = finalQuery.trim();
       }
     }
-    // ✅✅✅ 关键字策略结束 ✅✅✅
+    // ✅✅✅ 关键字策略结束
+
+    // ✅✅✅ 分页策略（page / offset / cursor）
+    if (rule.responseType != 'random') {
+      if (rule.paramPage.isNotEmpty) {
+        if (rule.pageMode == 'offset') {
+          final size = (rule.pageSize > 0) ? rule.pageSize : _guessPageSize(rule, params);
+          final offset = (page - 1) * size;
+          params[rule.paramPage] = offset;
+        } else if (rule.pageMode == 'cursor') {
+          if (page > 1) {
+            final ck = _cursorKey(rule, finalQuery, filterParams);
+            final cursor = _cursorCache[ck];
+            if (cursor != null) {
+              params[rule.paramPage] = cursor;
+            } else {
+              // 没 cursor 说明第一页都没成功过/缓存丢了，直接回到第一页行为
+              // 不塞 paramPage，让接口按默认第一页走
+            }
+          } else {
+            // page==1：不塞 cursor
+          }
+        } else {
+          // 默认 page
+          params[rule.paramPage] = page;
+        }
+      }
+    }
+    // ✅✅✅ 分页策略结束
 
     try {
       if (rule.responseType == 'random') {
         return await _fetchRandomMode(rule, params, reqHeaders);
       } else {
-        // paramPage 可以是 '' 来禁用
-        if (rule.paramPage.isNotEmpty) {
-          params[rule.paramPage] = page;
-        }
-
         if (mergeMulti.isEmpty) {
-          return await _fetchJsonMode(rule, params, reqHeaders);
+          return await _fetchJsonMode(
+            rule,
+            params,
+            reqHeaders,
+            finalQuery: finalQuery,
+            filterParams: filterParams,
+          );
         }
         return await _fetchJsonModeMerge(rule, params, reqHeaders, mergeMulti);
       }
@@ -305,7 +342,7 @@ class RuleEngine {
       if (url != null && url.startsWith('http')) {
         if (!wallpapers.any((w) => w.fullUrl == url)) {
           wallpapers.add(UniWallpaper(
-            id: url, // ✅ 直接用 finalUrl 做 id（稳定、去重靠谱）
+            id: url, // ✅ 稳定去重
             sourceId: rule.id,
             thumbUrl: url,
             fullUrl: url,
@@ -320,7 +357,7 @@ class RuleEngine {
     return wallpapers;
   }
 
-  // ---------- json 解析（稳定 id + 复用） ----------
+  // ---------- json 解析（稳定 id） ----------
 
   List<UniWallpaper> _parseJsonToWallpapers(SourceRule rule, dynamic jsonMap) {
     final listPath = JsonPath(rule.listPath);
@@ -329,7 +366,6 @@ class RuleEngine {
     if (match == null || match.value is! List) return [];
 
     final List list = match.value as List;
-
     final out = <UniWallpaper>[];
 
     for (final item in list) {
@@ -343,7 +379,6 @@ class RuleEngine {
 
       final id = _stableId(rule, item, thumb, full);
 
-      // 没链接就别凑数
       if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
 
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
@@ -364,13 +399,15 @@ class RuleEngine {
     return out;
   }
 
-  // ---------- json 单次请求（加日志 + 4xx body） ----------
+  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆） ----------
 
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
     Map<String, dynamic> params,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    required String? finalQuery,
+    required Map<String, dynamic>? filterParams,
+  }) async {
     _logReq(rule, rule.url, params, headers);
 
     try {
@@ -398,6 +435,18 @@ class RuleEngine {
         );
       }
 
+      // ✅ cursor 分页：成功后写回 next cursor
+      if (rule.pageMode == 'cursor' && rule.cursorPath != null && rule.cursorPath!.trim().isNotEmpty) {
+        final nextCursor = _getValue(rule.cursorPath!, response.data);
+        if (nextCursor != null) {
+          final ck = _cursorKey(rule, finalQuery, filterParams);
+          _cursorCache[ck] = nextCursor;
+          AppLog.I.add('CURSOR ${rule.id} set=$nextCursor');
+        } else {
+          AppLog.I.add('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
+        }
+      }
+
       return _parseJsonToWallpapers(rule, response.data);
     } on DioException catch (e) {
       _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
@@ -409,6 +458,7 @@ class RuleEngine {
   }
 
   // ---------- json merge 多请求（加日志 + 4xx body） ----------
+  // merge 多请求一般不适合 cursor；你要 cursor + merge 先别搞，需求爆炸。
 
   Future<List<UniWallpaper>> _fetchJsonModeMerge(
     SourceRule rule,
