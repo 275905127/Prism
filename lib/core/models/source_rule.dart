@@ -3,17 +3,29 @@ class SourceRule {
   final String id;
   final String name;
   final String url;
+
+  /// 规则自带 headers（静态）
   final Map<String, String>? headers;
+
   final Map<String, dynamic>? fixedParams;
+
+  /// 旧字段：保存原始 key
   final String? apiKey;
+
+  /// ✅ 新增：apiKey 放哪、叫什么、前缀
+  /// api_key_in: 'query' | 'header'
+  final String? apiKeyName;
+  final String apiKeyIn;
+  final String apiKeyPrefix;
+
   final List<SourceFilter>? filters;
-  
-  // 🔥 新增：响应类型 ('json' 或 'random')
-  final String responseType; 
-  
+
+  // 响应类型 ('json' or 'random')
+  final String responseType;
+
   final String paramPage;
   final String paramKeyword;
-  
+
   final String listPath;
   final String idPath;
   final String thumbPath;
@@ -30,8 +42,14 @@ class SourceRule {
     this.headers,
     this.fixedParams,
     this.apiKey,
+
+    // ✅ new
+    this.apiKeyName,
+    this.apiKeyIn = 'query',
+    this.apiKeyPrefix = '',
+
     this.filters,
-    this.responseType = 'json', // 默认为 JSON
+    this.responseType = 'json',
     this.paramPage = 'page',
     this.paramKeyword = 'q',
     required this.listPath,
@@ -49,17 +67,26 @@ class SourceRule {
       id: map['id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
       name: map['name'] ?? '未命名图源',
       url: map['url'] ?? '',
+
       headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
       fixedParams: map['fixed_params'],
+
       apiKey: map['api_key'],
-      filters: map['filters'] != null 
-          ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList() 
+
+      // ✅ new
+      apiKeyName: map['api_key_name'],
+      apiKeyIn: map['api_key_in'] ?? 'query',
+      apiKeyPrefix: map['api_key_prefix'] ?? '',
+
+      filters: map['filters'] != null
+          ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList()
           : null,
-      // 🔥 解析类型，默认 json
+
       responseType: map['type'] ?? 'json',
-      
+
       paramPage: map['params']?['page'] ?? 'page',
       paramKeyword: map['params']?['keyword'] ?? 'q',
+
       listPath: map['parser']?['list'] ?? r'$',
       idPath: map['parser']?['id'] ?? 'id',
       thumbPath: map['parser']?['thumb'] ?? 'url',
@@ -76,15 +103,25 @@ class SourceRule {
       'id': id,
       'name': name,
       'url': url,
-      'type': responseType, // 序列化
+      'type': responseType,
+
       'headers': headers,
       'fixed_params': fixedParams,
+
       'api_key': apiKey,
+
+      // ✅ new
+      'api_key_name': apiKeyName,
+      'api_key_in': apiKeyIn,
+      'api_key_prefix': apiKeyPrefix,
+
       'filters': filters?.map((e) => e.toJson()).toList(),
+
       'params': {
         'page': paramPage,
         'keyword': paramKeyword,
       },
+
       'parser': {
         'list': listPath,
         'id': idPath,
@@ -102,16 +139,16 @@ class SourceRule {
 class SourceFilter {
   final String key;
   final String name;
-  final String type; 
-  final String separator; 
+  final String type;
+  final String separator;
   final List<FilterOption> options;
 
   SourceFilter({
-    required this.key, 
-    required this.name, 
-    required this.type, 
-    this.separator = ',', 
-    required this.options
+    required this.key,
+    required this.name,
+    required this.type,
+    this.separator = ',',
+    required this.options,
   });
 
   factory SourceFilter.fromJson(Map<String, dynamic> json) {
@@ -119,15 +156,18 @@ class SourceFilter {
       key: json['key'],
       name: json['name'],
       type: json['type'] ?? 'radio',
-      separator: json['separator'] ?? ',', 
+      separator: json['separator'] ?? ',',
       options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
     );
   }
 
   Map<String, dynamic> toJson() => {
-    'key': key, 'name': name, 'type': type, 'separator': separator,
-    'options': options.map((e) => e.toJson()).toList()
-  };
+        'key': key,
+        'name': name,
+        'type': type,
+        'separator': separator,
+        'options': options.map((e) => e.toJson()).toList()
+      };
 }
 
 class FilterOption {
