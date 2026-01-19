@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../core/utils/app_log.dart';
 
 class LogPage extends StatefulWidget {
@@ -11,7 +12,7 @@ class LogPage extends StatefulWidget {
 class _LogPageState extends State<LogPage> {
   @override
   Widget build(BuildContext context) {
-    final logs = AppLog.I.lines; // List<String>
+    final logs = AppLog.I.lines;
 
     return Scaffold(
       appBar: AppBar(
@@ -29,11 +30,11 @@ class _LogPageState extends State<LogPage> {
           ),
           IconButton(
             icon: const Icon(Icons.copy),
-            onPressed: () {
+            onPressed: () async {
               final text = logs.join('\n');
-              AppLog.I.copyToClipboard(text);
+              await Clipboard.setData(ClipboardData(text: text));
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('已复制到剪贴板')),
+                const SnackBar(content: Text('日志已复制')),
               );
             },
           ),
@@ -45,10 +46,12 @@ class _LogPageState extends State<LogPage> {
               padding: const EdgeInsets.all(12),
               itemCount: logs.length,
               itemBuilder: (context, i) {
-                final line = logs[i];
                 return SelectableText(
-                  line,
-                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                  logs[i],
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
                 );
               },
             ),
