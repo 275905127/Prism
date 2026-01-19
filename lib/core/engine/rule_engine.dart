@@ -87,7 +87,6 @@ class RuleEngine {
 
   void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
     AppLog.I.add('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
-    // 只记录一部分，避免刷屏/卡死
     final s = (data == null) ? '' : data.toString();
     AppLog.I.add('    body=${s.length > 400 ? s.substring(0, 400) + '...' : s}');
   }
@@ -161,9 +160,26 @@ class RuleEngine {
       });
     }
 
-    if (query != null && query.trim().isNotEmpty) {
-      params[rule.paramKeyword] = query.trim();
+    // ✅✅✅ 关键字策略（你缺的就是这一段）✅✅✅
+    String? finalQuery = query;
+
+    // 1) 用户没搜：用 defaultKeyword
+    if ((finalQuery == null || finalQuery.trim().isEmpty) &&
+        rule.defaultKeyword != null &&
+        rule.defaultKeyword!.trim().isNotEmpty) {
+      finalQuery = rule.defaultKeyword;
     }
+
+    // 2) keywordRequired = true 但最终还是没有关键词：直接报错，不发请求
+    if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
+      throw Exception("该图源需要关键词：query 为空（请先搜索或在规则里设置 default_keyword）");
+    }
+
+    // 3) 有关键词：注入到 params
+    if (finalQuery != null && finalQuery.trim().isNotEmpty) {
+      params[rule.paramKeyword] = finalQuery.trim();
+    }
+    // ✅✅✅ 关键字策略结束 ✅✅✅
 
     try {
       if (rule.responseType == 'random') {
@@ -179,7 +195,6 @@ class RuleEngine {
         return await _fetchJsonModeMerge(rule, params, reqHeaders, mergeMulti);
       }
     } catch (e) {
-      // 纯手机时也能在日志页看到
       AppLog.I.add('Engine Error: $e');
       rethrow;
     }
@@ -334,7 +349,7 @@ class RuleEngine {
           responseType: ResponseType.json,
           sendTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
-          validateStatus: (s) => s != null && s < 500, // ✅ 4xx 不直接抛
+          validateStatus: (s) => s != null && s < 500,
         ),
       );
 
@@ -342,7 +357,6 @@ class RuleEngine {
 
       final sc = response.statusCode ?? 0;
       if (sc >= 400) {
-        // ✅ 保持你原本异常流程：让 UI 继续走失败分支
         throw DioException(
           requestOptions: response.requestOptions,
           response: response,
