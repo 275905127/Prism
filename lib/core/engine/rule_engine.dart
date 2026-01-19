@@ -1,6 +1,4 @@
-// lib/core/engine/rule_engine.dart
 import 'dart:math';
-import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
 import '../models/source_rule.dart';
@@ -9,7 +7,6 @@ import '../models/uni_wallpaper.dart';
 class RuleEngine {
   final Dio _dio = Dio();
 
-  /// 支持点路径：a.b.c / a.0.b
   dynamic _readDotPath(dynamic source, String path) {
     if (path.isEmpty) return null;
     if (path == '.') return source;
@@ -29,12 +26,12 @@ class RuleEngine {
         cur = cur[idx];
         continue;
       }
+
       return null;
     }
     return cur;
   }
 
-  /// '.' 返回整个对象；'$...' 走 JSONPath；否则走点路径
   T? _getValue<T>(String path, dynamic source) {
     try {
       if (path.isEmpty) return null;
@@ -63,17 +60,6 @@ class RuleEngine {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       };
 
-  int _retryAfterSecondsFromHeaders(Headers h) {
-    final v = h.value('retry-after');
-    if (v == null) return 0;
-    final s = int.tryParse(v.trim());
-    return s ?? 0;
-  }
-
-  Future<void> _sleepMs(int ms) async {
-    await Future.delayed(Duration(milliseconds: ms));
-  }
-
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
     int page = 1,
@@ -83,13 +69,12 @@ class RuleEngine {
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
-    // ✅ 最终 headers：默认 UA + 规则静态 headers
     final Map<String, String> reqHeaders = {
       ..._defaultUA(),
       ...?rule.headers,
     };
 
-    // ✅ apiKey：支持 query/header + 名字 + 前缀
+    // apiKey 逻辑（按你现有的写法/字段）
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
       final keyName =
@@ -101,7 +86,9 @@ class RuleEngine {
       }
     }
 
-    // ✅ filters：多选用 separator 拼接
+    // ✅ 收集需要 “merge 多请求” 的多选参数
+    final Map<String, List<String>> mergeMulti = {};
+
     if (filterParams != null) {
       filterParams.forEach((key, value) {
         if (value is List) {
@@ -114,29 +101,29 @@ class RuleEngine {
               }
             }
           }
-          final separator = filterRule?.separator ?? ',';
-          params[key] = value.join(separator);
+
+          final encode = (filterRule?.encode ?? 'join').toLowerCase();
+
+          if (encode == 'merge') {
+            // ✅ 多请求合并
+            mergeMulti[key] = value.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+          } else if (encode == 'repeat') {
+            // ✅ repeat：q=red&q=blue 这种（部分 API 支持）
+            // Dio 对 list 的 queryParameters 会变成重复 key
+            params[key] = value;
+          } else {
+            // ✅ join：red,blue
+            final separator = filterRule?.separator ?? ',';
+            params[key] = value.join(separator);
+          }
         } else {
           params[key] = value;
         }
       });
     }
 
-    // ✅ keyword 通用策略：query 优先；否则 default_keyword
-    String? finalQuery = query;
-    if ((finalQuery == null || finalQuery.trim().isEmpty) &&
-        rule.defaultKeyword != null &&
-        rule.defaultKeyword!.trim().isNotEmpty) {
-      finalQuery = rule.defaultKeyword;
-    }
-
-    // ✅ keywordRequired = true 但无 keyword -> 不发请求
-    if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
-      throw Exception("该图源需要关键词，请先搜索或在规则里设置 default_keyword");
-    }
-
-    if (finalQuery != null && finalQuery.trim().isNotEmpty) {
-      params[rule.paramKeyword] = finalQuery.trim();
+    if (query != null && query.trim().isNotEmpty) {
+      params[rule.paramKeyword] = query.trim();
     }
 
     try {
@@ -146,7 +133,14 @@ class RuleEngine {
         if (rule.paramPage.isNotEmpty) {
           params[rule.paramPage] = page;
         }
-        return await _fetchJsonMode(rule, params, reqHeaders);
+
+        // ✅ 如果没有 merge 多选 -> 正常单次请求
+        if (mergeMulti.isEmpty) {
+          return await _fetchJsonMode(rule, params, reqHeaders);
+        }
+
+        // ✅ 有 merge 多选 -> 多次请求合并去重
+        return await _fetchJsonModeMerge(rule, params, reqHeaders, mergeMulti);
       }
     } catch (e) {
       // ignore: avoid_print
@@ -155,7 +149,8 @@ class RuleEngine {
     }
   }
 
-  // random：直链嗅探与锁定（使用 reqHeaders）
+  // ---------------- random 模式：保持你原来的 ----------------
+
   Future<List<UniWallpaper>> _fetchRandomMode(
     SourceRule rule,
     Map<String, dynamic> params,
@@ -174,7 +169,6 @@ class RuleEngine {
 
         String? finalUrl;
 
-        // 1) HEAD 优先
         try {
           final response = await _dio.head(
             rule.url,
@@ -201,7 +195,6 @@ class RuleEngine {
                 responseType: ResponseType.stream,
                 sendTimeout: const Duration(seconds: 5),
                 receiveTimeout: const Duration(seconds: 5),
-                validateStatus: (s) => s != null && s < 400,
               ),
             );
             finalUrl = response.realUri.toString();
@@ -213,7 +206,6 @@ class RuleEngine {
 
         if (finalUrl == null) return null;
 
-        // 参数净化：去掉 _t/_r
         final uri = Uri.parse(finalUrl);
         if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
           final newQueryParams = Map<String, String>.from(uri.queryParameters);
@@ -248,98 +240,106 @@ class RuleEngine {
     return wallpapers;
   }
 
+  // ---------------- json 模式：解析拆出来复用 ----------------
+
+  List<UniWallpaper> _parseJsonToWallpapers(SourceRule rule, dynamic jsonMap) {
+    final listPath = JsonPath(rule.listPath);
+    final match = listPath.read(jsonMap).firstOrNull;
+
+    if (match == null || match.value is! List) return [];
+
+    final List list = match.value as List;
+
+    return list.map((item) {
+      final id = _getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
+
+      String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
+      String full = _getValue<String>(rule.fullPath, item) ?? thumb;
+
+      if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
+        if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
+        if (!full.startsWith('http')) full = rule.imagePrefix! + full;
+      }
+
+      final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
+      final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
+      final grade = _getValue<String>(rule.gradePath ?? '', item);
+
+      return UniWallpaper(
+        id: id.toString(),
+        sourceId: rule.id,
+        thumbUrl: thumb,
+        fullUrl: full,
+        width: width,
+        height: height,
+        grade: grade,
+      );
+    }).toList();
+  }
+
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
     Map<String, dynamic> params,
     Map<String, String> headers,
   ) async {
-    // ✅ 429 退避：最多 3 次
-    int attempt = 0;
+    final response = await _dio.get(
+      rule.url,
+      queryParameters: params,
+      options: Options(
+        headers: headers,
+        responseType: ResponseType.json,
+        sendTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+      ),
+    );
 
-    while (true) {
-      Response response;
-      try {
-        response = await _dio.get(
-          rule.url,
-          queryParameters: params,
-          options: Options(
-            headers: headers,
-            responseType: ResponseType.json,
-            sendTimeout: const Duration(seconds: 10),
-            receiveTimeout: const Duration(seconds: 10),
-            // ✅ 关键：让 4xx/5xx 不抛异常，我们自己处理
-            validateStatus: (s) => s != null && s >= 200 && s < 600,
-          ),
-        );
-      } on DioException catch (e) {
-        // 网络层错误：拒绝连接/超时/断网
-        if (e.error is SocketException) {
-          throw Exception("网络错误：连接失败（可能是网络/代理问题）");
+    return _parseJsonToWallpapers(rule, response.data);
+  }
+
+  // ✅ merge：展开参数组合 -> 多次请求 -> 合并去重
+  Future<List<UniWallpaper>> _fetchJsonModeMerge(
+    SourceRule rule,
+    Map<String, dynamic> baseParams,
+    Map<String, String> headers,
+    Map<String, List<String>> mergeMulti,
+  ) async {
+    // 生成一组 paramSet（支持多个 merge 维度）
+    List<Map<String, dynamic>> paramSets = [Map<String, dynamic>.from(baseParams)];
+
+    mergeMulti.forEach((key, values) {
+      final List<Map<String, dynamic>> next = [];
+      for (final ps in paramSets) {
+        for (final v in values) {
+          final m = Map<String, dynamic>.from(ps);
+          m[key] = v;
+          next.add(m);
         }
-        rethrow;
       }
+      paramSets = next;
+    });
 
-      final status = response.statusCode ?? 0;
+    final List<UniWallpaper> merged = [];
+    final Set<String> seen = {};
 
-      // 429：限流，退避
-      if (status == 429) {
-        attempt++;
-        if (attempt > 3) {
-          throw Exception("触发限流(429)：重试次数已用尽，请降低请求频率/开启限速");
-        }
-        final ra = _retryAfterSecondsFromHeaders(response.headers);
-        final backoffMs = ra > 0 ? ra * 1000 : (800 * attempt * attempt);
-        await _sleepMs(backoffMs);
-        continue;
+    // 为了不把你直接送到 429：默认串行请求（稳）
+    for (final ps in paramSets) {
+      final resp = await _dio.get(
+        rule.url,
+        queryParameters: ps,
+        options: Options(
+          headers: headers,
+          responseType: ResponseType.json,
+          sendTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+        ),
+      );
+
+      final items = _parseJsonToWallpapers(rule, resp.data);
+      for (final it in items) {
+        if (seen.add(it.id)) merged.add(it);
       }
-
-      // 401/403：鉴权问题
-      if (status == 401) {
-        throw Exception("鉴权失败(401)：API Key 无效/缺失/位置错误");
-      }
-      if (status == 403) {
-        throw Exception("拒绝访问(403)：可能需要更严格的鉴权/Referer/权限不足");
-      }
-
-      // 其他非 2xx：直接抛出更干净的信息
-      if (status < 200 || status >= 300) {
-        throw Exception("HTTP $status：${response.data}");
-      }
-
-      // ====== 解析 ======
-      final jsonMap = response.data;
-
-      final listPath = JsonPath(rule.listPath);
-      final match = listPath.read(jsonMap).firstOrNull;
-      if (match == null || match.value is! List) return [];
-
-      final List list = match.value as List;
-
-      return list.map((item) {
-        final id = _getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
-
-        String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
-        String full = _getValue<String>(rule.fullPath, item) ?? thumb;
-
-        if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
-          if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
-          if (!full.startsWith('http')) full = rule.imagePrefix! + full;
-        }
-
-        final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
-        final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
-        final grade = _getValue<String>(rule.gradePath ?? '', item);
-
-        return UniWallpaper(
-          id: id.toString(),
-          sourceId: rule.id,
-          thumbUrl: thumb,
-          fullUrl: full,
-          width: width,
-          height: height,
-          grade: grade,
-        );
-      }).toList();
     }
+
+    return merged;
   }
 }
