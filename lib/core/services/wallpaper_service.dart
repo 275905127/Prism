@@ -1,4 +1,8 @@
 // lib/core/services/wallpaper_service.dart
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+
 import '../engine/rule_engine.dart';
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
@@ -9,6 +13,17 @@ import '../pixiv/pixiv_repository.dart';
 class WallpaperService {
   final RuleEngine _standardEngine = RuleEngine();
   final PixivRepository _pixivRepo = PixivRepository();
+
+  /// ✅ 统一网络出口：下载等行为也走这里（避免 UI 直接 Dio）
+  final Dio _dio = Dio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 15),
+      sendTimeout: const Duration(seconds: 20),
+      receiveTimeout: const Duration(seconds: 25),
+      responseType: ResponseType.json,
+      validateStatus: (s) => s != null && s < 500,
+    ),
+  );
 
   /// 核心方法：获取壁纸列表
   /// 内部自动判断使用哪个引擎
@@ -42,7 +57,7 @@ class WallpaperService {
     final String q = (query != null && query.trim().isNotEmpty)
         ? query
         : (rule.defaultKeyword ?? 'illustration').trim();
-        
+
     return _pixivRepo.fetch(
       rule,
       page: page,
@@ -58,7 +73,68 @@ class WallpaperService {
     if (_pixivRepo.supports(rule)) {
       return _pixivRepo.buildImageHeaders();
     }
-    
+
     return rule.buildRequestHeaders();
+  }
+
+  /// ✅ UI 禁止直接 Dio：下载图片 bytes 统一收口到 Service
+  /// - 自动注入保底 UA
+  /// - 复用 headers（Authorization/Client-ID/Referer/Cookie 等）
+  /// - 统一超时与错误抛出
+  Future<Uint8List> downloadImageBytes({
+    required String url,
+    Map<String, String>? headers,
+  }) async {
+    final String u = url.trim();
+    if (u.isEmpty) {
+      throw Exception('下载地址为空');
+    }
+
+    final Map<String, String> finalHeaders = <String, String>{
+      // 保底 UA
+      'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...?headers,
+    };
+
+    try {
+      final resp = await _dio.get(
+        u,
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: finalHeaders,
+          sendTimeout: const Duration(seconds: 20),
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+
+      final sc = resp.statusCode ?? 0;
+      if (sc >= 400) {
+        throw DioException(
+          requestOptions: resp.requestOptions,
+          response: resp,
+          type: DioExceptionType.badResponse,
+          error: 'HTTP $sc',
+        );
+      }
+
+      final data = resp.data;
+      if (data is! List<int>) {
+        throw Exception('下载返回数据类型异常');
+      }
+
+      final bytes = Uint8List.fromList(data);
+
+      if (bytes.lengthInBytes < 100) {
+        throw Exception('文件过小，可能是错误页面');
+      }
+
+      return bytes;
+    } on DioException catch (e) {
+      // 保留 DioException，交由 UI 统一显示友好错误
+      rethrow;
+    } catch (e) {
+      rethrow;
+    }
   }
 }
