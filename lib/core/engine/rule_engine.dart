@@ -10,7 +10,11 @@ import '../models/uni_wallpaper.dart';
 import '../utils/app_log.dart';
 
 class RuleEngine {
-  final Dio _dio = Dio();
+  /// ✅ 允许注入 Dio：让 WallpaperService 统一网络出口（拦截器/代理/重试/证书/UA/超时等）
+  /// - 不传则内部自建一个默认 Dio（兼容旧用法）
+  RuleEngine({Dio? dio}) : _dio = dio ?? Dio();
+
+  final Dio _dio;
 
   /// ✅ cursor 分页缓存：不同 query / filters 必须隔离
   final Map<String, dynamic> _cursorCache = {};
@@ -174,10 +178,7 @@ class RuleEngine {
     }
 
     final enc = Uri.encodeComponent(kw);
-    return u
-        .replaceAll('{keyword}', enc)
-        .replaceAll('{word}', enc)
-        .replaceAll('{q}', enc);
+    return u.replaceAll('{keyword}', enc).replaceAll('{word}', enc).replaceAll('{q}', enc);
   }
 
   // ---------- 对外入口 ----------
@@ -221,7 +222,8 @@ class RuleEngine {
           }
 
           final encode = (filterRule?.encode ?? 'join').toLowerCase();
-          final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+          final cleaned =
+              value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
           if (cleaned.isEmpty) return; // ✅ 空数组不发（repeat/join/merge 都不该发空）
 
           if (encode == 'merge') {
@@ -274,8 +276,14 @@ class RuleEngine {
           final offset = (page - 1) * size;
           params[rule.paramPage] = offset;
         } else if (rule.pageMode == 'cursor') {
-          if (page > 1) {
-            final ck = _cursorKey(rule, finalQuery, filterParams);
+          // ✅ refresh（page==1）时清掉该条件下的 cursor，避免拿旧游标继续滚
+          final ck = _cursorKey(rule, finalQuery, filterParams);
+          if (page <= 1) {
+            if (_cursorCache.containsKey(ck)) {
+              _cursorCache.remove(ck);
+              AppLog.I.add('CURSOR ${rule.id} cleared (refresh)');
+            }
+          } else {
             final cursor = _cursorCache[ck];
             if (cursor != null) {
               params[rule.paramPage] = cursor;
