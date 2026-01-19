@@ -34,18 +34,13 @@ class RuleEngine {
     return cur;
   }
 
-  /// 统一取值：
-  /// - '.' 返回整个对象
-  /// - '$...' 走 JSONPath
-  /// - 其他走点路径
+  /// '.' 返回整个对象；'$...' 走 JSONPath；否则走点路径
   T? _getValue<T>(String path, dynamic source) {
     try {
       if (path.isEmpty) return null;
       if (path == '.') return source as T;
 
       final p = path.trimLeft();
-
-      // 只在以 $ 开头时使用 JSONPath（更明确，避免误判）
       if (p.startsWith(r'$')) {
         final jp = JsonPath(path);
         return jp.read(source).firstOrNull?.value as T?;
@@ -63,6 +58,11 @@ class RuleEngine {
     return num.tryParse(x?.toString() ?? '') ?? 0;
   }
 
+  Map<String, String> _defaultUA() => const {
+        "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      };
+
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
     int page = 1,
@@ -72,18 +72,30 @@ class RuleEngine {
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
-    // ⚠️ 仍然保持你现有行为：把 apiKey 塞到 apikey
-    // 后面你要做成通用的（query/header/name可配置）再改
-    if (rule.apiKey != null && rule.apiKey!.isNotEmpty) {
-      params['apikey'] = rule.apiKey;
+    // ✅ 最终 headers：规则静态 headers + 默认 UA + apiKey(如果配置为 header)
+    final Map<String, String> reqHeaders = {
+      ..._defaultUA(),
+      ...?rule.headers,
+    };
+
+    // ✅ apiKey：支持 query/header + 名字 + 前缀
+    final apiKey = rule.apiKey;
+    if (apiKey != null && apiKey.isNotEmpty) {
+      final keyName =
+          (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
+      if (rule.apiKeyIn == 'header') {
+        reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
+      } else {
+        // query 一般不加 prefix；你真要也能以后扩展
+        params[keyName] = apiKey;
+      }
     }
 
     if (filterParams != null) {
       filterParams.forEach((key, value) {
         if (value is List) {
-          // 找不到 filter 也会降级用 ',' 拼
           final SourceFilter? filterRule =
-           rule.filters?.where((f) => f.key == key).cast<SourceFilter?>().firstOrNull;
+              rule.filters?.where((f) => f.key == key).cast<SourceFilter?>().firstOrNull;
 
           final separator = filterRule?.separator ?? ',';
           params[key] = value.join(separator);
@@ -99,10 +111,10 @@ class RuleEngine {
 
     try {
       if (rule.responseType == 'random') {
-        return await _fetchRandomMode(rule, params);
+        return await _fetchRandomMode(rule, params, reqHeaders);
       } else {
         params[rule.paramPage] = page;
-        return await _fetchJsonMode(rule, params);
+        return await _fetchJsonMode(rule, params, reqHeaders);
       }
     } catch (e) {
       // ignore: avoid_print
@@ -111,10 +123,11 @@ class RuleEngine {
     }
   }
 
-  // 🔥 核心逻辑：直链嗅探与锁定
+  // random：直链嗅探与锁定（使用 reqHeaders）
   Future<List<UniWallpaper>> _fetchRandomMode(
     SourceRule rule,
     Map<String, dynamic> params,
+    Map<String, String> headers,
   ) async {
     const int batchSize = 6;
     const int delayMs = 300;
@@ -129,13 +142,12 @@ class RuleEngine {
 
         String? finalUrl;
 
-        // 1) HEAD 优先
         try {
           final response = await _dio.head(
             rule.url,
             queryParameters: requestParams,
             options: Options(
-              headers: rule.headers,
+              headers: headers,
               followRedirects: true,
               sendTimeout: const Duration(seconds: 5),
               receiveTimeout: const Duration(seconds: 5),
@@ -144,7 +156,6 @@ class RuleEngine {
           );
           finalUrl = response.realUri.toString();
         } catch (e) {
-          // 2) HEAD 不行回退 GET(stream)
           // ignore: avoid_print
           print("HEAD failed, retrying with GET: $e");
           try {
@@ -152,7 +163,7 @@ class RuleEngine {
               rule.url,
               queryParameters: requestParams,
               options: Options(
-                headers: rule.headers,
+                headers: headers,
                 followRedirects: true,
                 responseType: ResponseType.stream,
                 sendTimeout: const Duration(seconds: 5),
@@ -168,10 +179,8 @@ class RuleEngine {
 
         if (finalUrl == null) return null;
 
-        // 3) 参数净化：去掉 _t/_r
         final uri = Uri.parse(finalUrl);
-        if (uri.queryParameters.containsKey('_t') ||
-            uri.queryParameters.containsKey('_r')) {
+        if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
           final newQueryParams = Map<String, String>.from(uri.queryParameters);
           newQueryParams.remove('_t');
           newQueryParams.remove('_r');
@@ -207,16 +216,13 @@ class RuleEngine {
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
     Map<String, dynamic> params,
+    Map<String, String> headers,
   ) async {
     final response = await _dio.get(
       rule.url,
       queryParameters: params,
       options: Options(
-        headers: rule.headers ??
-            {
-              "User-Agent":
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            },
+        headers: headers,
         responseType: ResponseType.json,
         sendTimeout: const Duration(seconds: 10),
         receiveTimeout: const Duration(seconds: 10),
