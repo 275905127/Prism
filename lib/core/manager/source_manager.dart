@@ -1,12 +1,12 @@
-// lib/core/manager/source_manager.dart
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/source_rule.dart';
 
 class SourceManager extends ChangeNotifier {
-  static const String _kRulesKey = 'prism_rules_v1';
-  static const String _kActiveKey = 'prism_active_id';
+  // ✅ 升版本，隔离旧数据（避免以前的坏规则继续加载）
+  static const String _kRulesKey = 'prism_rules_v2';
+  static const String _kActiveKey = 'prism_active_id_v2';
 
   List<SourceRule> _rules = [];
   SourceRule? _activeRule;
@@ -18,42 +18,36 @@ class SourceManager extends ChangeNotifier {
     _load();
   }
 
-  // 1. 加载本地存储
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    
-    // 读取规则列表
+
     final List<String> list = prefs.getStringList(_kRulesKey) ?? [];
     if (list.isNotEmpty) {
       _rules = list.map((e) => SourceRule.fromJson(jsonDecode(e))).toList();
     } else {
-      // 如果本地没数据，注入测试源
-      _injectTestSource(); 
+      _rules = [];
     }
 
-    // 读取上次选中的源
     final activeId = prefs.getString(_kActiveKey);
-    if (activeId != null && _rules.any((r) => r.id == activeId)) {
-      _activeRule = _rules.firstWhere((r) => r.id == activeId);
-    } else if (_rules.isNotEmpty) {
-      _activeRule = _rules.first;
+    if (activeId != null) {
+      _activeRule = _rules.where((r) => r.id == activeId).cast<SourceRule?>().firstOrNull;
     }
+
+    _activeRule ??= _rules.isNotEmpty ? _rules.first : null;
+
     notifyListeners();
   }
 
-  // 2. 导入新规则 (核心功能)
   Future<void> addRule(String jsonString) async {
     try {
       final Map<String, dynamic> map = jsonDecode(jsonString);
       final newRule = SourceRule.fromJson(map);
 
-      // 如果 ID 重复，先删除旧的
       _rules.removeWhere((r) => r.id == newRule.id);
       _rules.add(newRule);
-      
-      // 自动选中新导入的
+
       _activeRule = newRule;
-      
+
       await _save();
       notifyListeners();
     } catch (e) {
@@ -61,52 +55,43 @@ class SourceManager extends ChangeNotifier {
     }
   }
 
-  // 3. 切换源
   void setActive(String id) {
-    final target = _rules.firstWhere((r) => r.id == id, orElse: () => _rules.first);
+    if (_rules.isEmpty) return;
+    final target = _rules.firstWhere(
+      (r) => r.id == id,
+      orElse: () => _rules.first,
+    );
     _activeRule = target;
     _save();
     notifyListeners();
   }
-  
-  // 4. 删除源
+
   void deleteRule(String id) {
     _rules.removeWhere((r) => r.id == id);
+
     if (_activeRule?.id == id) {
       _activeRule = _rules.isNotEmpty ? _rules.first : null;
     }
+
     _save();
     notifyListeners();
   }
 
-  // 持久化保存
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
-    // 保存列表
+
     final jsonList = _rules.map((r) => jsonEncode(r.toJson())).toList();
     await prefs.setStringList(_kRulesKey, jsonList);
-    // 保存选中项
+
     if (_activeRule != null) {
       await prefs.setString(_kActiveKey, _activeRule!.id);
+    } else {
+      await prefs.remove(_kActiveKey);
     }
   }
+}
 
-  void _injectTestSource() {
-    // 这里放之前的 JsonPlaceholder 测试源
-     _rules.add(SourceRule.fromJson({
-      "id": "jsonplaceholder",
-      "name": "Test Source",
-      "base_url": "https://jsonplaceholder.typicode.com",
-      "search": {"url": "/photos?_limit=10"},
-      "parser": {
-        "list_node": "\$[*]",
-        "id": "id",
-        "thumb": "thumbnailUrl",
-        "full": "url",
-        "width": "id",
-        "height": "albumId"
-      }
-    }));
-    _activeRule = _rules.first;
-  }
+// ✅ 不引入额外依赖的 firstOrNull
+extension _FirstOrNullExt<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
 }
