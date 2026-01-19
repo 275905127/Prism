@@ -20,6 +20,7 @@ import 'pixiv_client.dart';
 ///
 /// ✅ 支持注入 Dio（由 WallpaperService 统一管理网络策略）
 /// ✅ 支持注入 Logger（不再直接依赖 AppLog）
+/// ✅ pages 补全支持：超时重试（可配置）
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -30,8 +31,12 @@ class PixivRepository {
 
     /// ✅ 注入：统一日志出口
     PrismLogger? logger,
+
+    /// ✅ pages 补全配置（并发/超时/重试）
+    PixivPagesConfig? pagesConfig,
   })  : _client = client ?? PixivClient(dio: dio, cookie: cookie),
-        _logger = logger;
+        _logger = logger,
+        _pagesConfig = pagesConfig ?? const PixivPagesConfig();
 
   final PixivClient _client;
   final PrismLogger? _logger;
@@ -54,6 +59,19 @@ class PixivRepository {
 
   /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
+
+  // ---------- pages config（可运行时调整） ----------
+
+  PixivPagesConfig _pagesConfig;
+  PixivPagesConfig get pagesConfig => _pagesConfig;
+
+  void updatePagesConfig(PixivPagesConfig config) {
+    _pagesConfig = config;
+    _logger?.log(
+      'pixiv pages config updated: concurrency=${config.concurrency}, timeout=${config.timeoutPerItem.inSeconds}s, '
+      'retry=${config.retryCount}, delay=${config.retryDelay.inMilliseconds}ms',
+    );
+  }
 
   /// Pixiv：
   /// - 首页没关键词没意义（会空）
@@ -113,8 +131,10 @@ class PixivRepository {
     // ---------- 2) 并发补全 pages（拿 regular/original） ----------
     final enriched = await _enrichWithPages(
       briefs,
-      concurrency: 4,
-      timeoutPerItem: const Duration(seconds: 8),
+      concurrency: _pagesConfig.concurrency,
+      timeoutPerItem: _pagesConfig.timeoutPerItem,
+      retryCount: _pagesConfig.retryCount,
+      retryDelay: _pagesConfig.retryDelay,
     );
 
     // ---------- 3) 转 UniWallpaper（详情与下载用 original） ----------
@@ -147,11 +167,17 @@ class PixivRepository {
     List<PixivIllustBrief> briefs, {
     int concurrency = 4,
     Duration timeoutPerItem = const Duration(seconds: 8),
+
+    /// ✅ pages 重试次数（仅对超时/网络临时错误）
+    int retryCount = 1,
+
+    /// ✅ 重试间隔（会做轻量退避）
+    Duration retryDelay = const Duration(milliseconds: 280),
   }) async {
     if (briefs.isEmpty) return const [];
     if (concurrency < 1) concurrency = 1;
 
-    // ✅ 关键修复：nullable 容器承接并发结果，末尾收口为非空
+    // ✅ nullable 容器承接并发结果，末尾收口为非空
     final List<_PixivEnriched?> results =
         List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
 
@@ -160,6 +186,53 @@ class PixivRepository {
       final v = nextIndex;
       nextIndex++;
       return v;
+    }
+
+    bool _isRetryableError(Object e) {
+      if (e is TimeoutException) return true;
+      if (e is DioException) {
+        // 常见可重试：连接/接收/发送超时、网络异常
+        final t = e.type;
+        if (t == DioExceptionType.connectionTimeout ||
+            t == DioExceptionType.sendTimeout ||
+            t == DioExceptionType.receiveTimeout ||
+            t == DioExceptionType.connectionError) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    Future<List<PixivPageUrls>> _getPagesWithRetry(String illustId) async {
+      Object? lastErr;
+
+      final int maxAttempts = (retryCount < 0 ? 0 : retryCount) + 1; // retryCount=1 => 2 attempts
+      for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          final pages = await _client.getIllustPages(illustId).timeout(timeoutPerItem);
+          return pages;
+        } catch (e) {
+          lastErr = e;
+
+          final retryable = _isRetryableError(e is Object ? e : Exception('unknown'));
+          final bool isLast = attempt >= maxAttempts;
+
+          if (!retryable || isLast) {
+            // 直接抛给外层（外层会写 log 并走 fallback）
+            throw e;
+          }
+
+          // 轻量退避：attempt=1 => 1x, attempt=2 => 2x ...
+          final factor = attempt; // 1,2,3...
+          final wait = Duration(milliseconds: retryDelay.inMilliseconds * factor);
+          _logger?.log('pixiv pages retry id=$illustId attempt=$attempt/$maxAttempts wait=${wait.inMilliseconds}ms err=$e');
+
+          await Future.delayed(wait);
+        }
+      }
+
+      // 理论上走不到
+      throw lastErr ?? Exception('pixiv pages retry failed (unknown)');
     }
 
     Future<void> worker() async {
@@ -174,7 +247,7 @@ class PixivRepository {
         final grade = _gradeFromRestrict(b.xRestrict);
 
         try {
-          final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
+          final pages = await _getPagesWithRetry(b.id);
 
           if (pages.isNotEmpty) {
             final p0 = pages.first;
@@ -215,7 +288,7 @@ class PixivRepository {
   String? _gradeFromRestrict(int xRestrict) {
     if (xRestrict <= 0) return null;
     return xRestrict >= 2 ? 'nsfw' : 'sketchy';
-    }
+  }
 
   String? _deriveOriginalFromThumb(String thumb) {
     if (thumb.isEmpty) return null;
@@ -240,6 +313,39 @@ class PixivRepository {
     } catch (_) {
       return null;
     }
+  }
+}
+
+/// pages 补全配置：
+/// - concurrency：并发 worker 数（过大可能更容易触发超时/限流）
+/// - timeoutPerItem：单个作品 pages 请求超时
+/// - retryCount：重试次数（仅对超时/网络临时错误）
+/// - retryDelay：基础延迟（会做轻量退避：1x/2x/3x...）
+class PixivPagesConfig {
+  final int concurrency;
+  final Duration timeoutPerItem;
+  final int retryCount;
+  final Duration retryDelay;
+
+  const PixivPagesConfig({
+    this.concurrency = 4,
+    this.timeoutPerItem = const Duration(seconds: 8),
+    this.retryCount = 1,
+    this.retryDelay = const Duration(milliseconds: 280),
+  });
+
+  PixivPagesConfig copyWith({
+    int? concurrency,
+    Duration? timeoutPerItem,
+    int? retryCount,
+    Duration? retryDelay,
+  }) {
+    return PixivPagesConfig(
+      concurrency: concurrency ?? this.concurrency,
+      timeoutPerItem: timeoutPerItem ?? this.timeoutPerItem,
+      retryCount: retryCount ?? this.retryCount,
+      retryDelay: retryDelay ?? this.retryDelay,
+    );
   }
 }
 
