@@ -73,6 +73,37 @@ class PixivRepository {
     );
   }
 
+  // ---------- Cookie sync（rule.headers -> PixivClient） ----------
+
+  /// ✅ 关键：兜底把规则里的 Cookie 下沉到 PixivClient
+  /// - 只做“有值则注入”，不在这里清除 cookie（清除逻辑应由 Service/UI 控制）
+  /// - 只打印安全摘要（避免泄露）
+  void _syncCookieFromRuleIfAny(dynamic rule) {
+    try {
+      final dynamic headers = (rule as dynamic).headers;
+      if (headers == null) return;
+
+      String cookie = '';
+
+      if (headers is Map) {
+        final dynamic c1 = headers['Cookie'];
+        final dynamic c2 = headers['cookie'];
+        cookie = (c1 ?? c2)?.toString().trim() ?? '';
+      }
+
+      if (cookie.isEmpty) return;
+
+      // ✅ 真正注入到底层 Client
+      _client.setCookie(cookie);
+
+      final prefix = cookie.length <= 12 ? cookie : cookie.substring(0, 12);
+      _logger?.log('pixiv cookie injected from rule: len=${cookie.length}, prefix="$prefix..."');
+    } catch (e) {
+      // 不要影响主流程
+      _logger?.log('pixiv cookie sync from rule failed: $e');
+    }
+  }
+
   /// Pixiv：
   /// - 首页没关键词没意义（会空）
   /// - 搜索页：query 必填
@@ -84,6 +115,9 @@ class PixivRepository {
   }) async {
     final q = (query ?? '').trim();
     if (q.isEmpty) return const [];
+
+    // ✅ 关键：每次 fetch 前兜底同步一次 rule.headers.Cookie -> client
+    _syncCookieFromRuleIfAny(rule);
 
     // ---------- 读取 filters（UI -> Service -> Repo） ----------
     String order = 'date_d';
@@ -116,7 +150,11 @@ class PixivRepository {
     }
 
     // ---------- 1) 先搜（快速拿到缩略图 + id） ----------
-    _logger?.log('REQ pixiv_search_ajax q="$q" page=$page order=$order mode=$mode s_mode=$sMode');
+    // ✅ 增加 cookie=1/0 打点：用于确认“请求发起时 Client 是否真的持有 Cookie”
+    _logger?.log(
+      'REQ pixiv_search_ajax q="$q" page=$page order=$order mode=$mode s_mode=$sMode cookie=${hasCookie ? 1 : 0}',
+    );
+
     final briefs = await _client.searchArtworks(
       word: q,
       page: page,
@@ -128,7 +166,8 @@ class PixivRepository {
 
     // ✅ 验证日志：用“前 3 个 id”判断排序/筛选是否真的生效（count 不可靠）
     if (briefs.isNotEmpty) {
-      final first3 = briefs.take(3).map((e) => e.id).where((s) => s.isNotEmpty).toList(growable: false);
+      final first3 =
+          briefs.take(3).map((e) => e.id).where((s) => s.isNotEmpty).toList(growable: false);
       _logger?.log('pixiv verify order=$order first3=${first3.isEmpty ? "[]" : first3}');
     } else {
       _logger?.log('pixiv verify order=$order first3=[]');
@@ -152,9 +191,8 @@ class PixivRepository {
 
       // ✅ 详情与下载统一用 original（最高清）
       // 兜底：original 失败则用 regular，再兜底 thumb（保证至少能显示）
-      final best = e.originalUrl.isNotEmpty
-          ? e.originalUrl
-          : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
+      final best =
+          e.originalUrl.isNotEmpty ? e.originalUrl : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
 
       out.add(
         UniWallpaper(
@@ -233,7 +271,9 @@ class PixivRepository {
           // 轻量退避：attempt=1 => 1x, attempt=2 => 2x ...
           final factor = attempt; // 1,2,3...
           final wait = Duration(milliseconds: retryDelay.inMilliseconds * factor);
-          _logger?.log('pixiv pages retry id=$illustId attempt=$attempt/$maxAttempts wait=${wait.inMilliseconds}ms err=$e');
+          _logger?.log(
+            'pixiv pages retry id=$illustId attempt=$attempt/$maxAttempts wait=${wait.inMilliseconds}ms err=$e',
+          );
 
           await Future.delayed(wait);
         }
