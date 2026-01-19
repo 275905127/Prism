@@ -1,13 +1,14 @@
 import 'package:dio/dio.dart';
 
 /// Pixiv Ajax API Client（无需 key）
+///
 /// - 搜索：/ajax/search/artworks/{word}?p=1...
-/// - 取原图/大图：/ajax/illust/{id}/pages
+/// - 取大图/原图：/ajax/illust/{id}/pages
 ///
 /// 注意：
 /// 1) i.pximg.net 图片通常要求 Referer: https://www.pixiv.net/
-/// 2) 部分内容可能需要登录 Cookie（可选，不强制）
-/// 3) 这里是“平台 SDK”，不掺进 RuleEngine
+/// 2) 部分内容可能需要登录 Cookie（可选）
+/// 3) 这里只负责请求 Pixiv Ajax，不掺进 RuleEngine
 class PixivClient {
   final Dio _dio;
   String? _cookie;
@@ -17,7 +18,6 @@ class PixivClient {
     String? cookie,
   })  : _dio = dio ?? Dio(),
         _cookie = cookie {
-    // 你也可以在外面传 Dio 并统一代理/超时
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 10),
@@ -34,16 +34,14 @@ class PixivClient {
     _dio.options.headers = _baseApiHeaders(cookie: cookie);
   }
 
-  /// 给图片加载/下载用（CachedNetworkImage / Dio 下载原图）
-  /// - Pixiv 图片 CDN 基本需要 Referer
+  /// 给 i.pximg.net 图片加载用（CachedNetworkImage / Dio 下载）
   Map<String, String> buildImageHeaders() {
     final h = <String, String>{
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       'Referer': 'https://www.pixiv.net/',
     };
-    if (_cookie != null && _cookie!.trim().isNotEmpty) {
-      h['Cookie'] = _cookie!.trim();
-    }
+    final c = _cookie?.trim() ?? '';
+    if (c.isNotEmpty) h['Cookie'] = c;
     return h;
   }
 
@@ -53,14 +51,12 @@ class PixivClient {
       'Referer': 'https://www.pixiv.net/',
       'Accept': 'application/json',
     };
-    if (cookie != null && cookie.trim().isNotEmpty) {
-      h['Cookie'] = cookie.trim();
-    }
+    final c = cookie?.trim() ?? '';
+    if (c.isNotEmpty) h['Cookie'] = c;
     return h;
   }
 
-  /// 搜索：返回 illust id + 搜索页给的缩略图（square1200）
-  /// 你日志里验证过这个接口 200：
+  /// 搜索：返回 illust id + 搜索页给的缩略图（square1200 / img-master）
   /// GET /ajax/search/artworks/{word}?order=date_d&mode=all&s_mode=s_tag&p=1
   Future<List<PixivIllustBrief>> searchArtworks({
     required String word,
@@ -98,7 +94,6 @@ class PixivClient {
     final data = resp.data;
     if (data is! Map) return [];
 
-    // { error: false, body: { illustManga: { data: [...] } } }
     final body = data['body'];
     if (body is! Map) return [];
 
@@ -111,6 +106,7 @@ class PixivClient {
     final out = <PixivIllustBrief>[];
     for (final it in list) {
       if (it is! Map) continue;
+
       final id = (it['id'] ?? '').toString();
       if (id.isEmpty) continue;
 
@@ -118,7 +114,6 @@ class PixivClient {
         PixivIllustBrief(
           id: id,
           title: (it['title'] ?? '').toString(),
-          // 这是搜索页给的缩略图（square1200）
           thumbUrl: (it['url'] ?? '').toString(),
           width: _toInt(it['width']),
           height: _toInt(it['height']),
@@ -129,7 +124,7 @@ class PixivClient {
     return out;
   }
 
-  /// 获取某个作品的所有页图 URL（最关键：original / regular / small）
+  /// 获取作品所有页 URL（含 original / regular / small）
   /// GET /ajax/illust/{id}/pages
   Future<List<PixivPageUrls>> getIllustPages(String illustId) async {
     final id = illustId.trim();
@@ -152,6 +147,7 @@ class PixivClient {
 
     final data = resp.data;
     if (data is! Map) return [];
+
     final body = data['body'];
     if (body is! List) return [];
 
