@@ -199,6 +199,21 @@ class SourceRule {
       }
     };
   }
+  /// 给图片加载用：把 rule.headers + apiKey(header 模式) 合并
+  Map<String, String> buildRequestHeaders() {
+    final h = <String, String>{
+      "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      ...?headers,
+    };
+
+    final k = apiKey;
+    if (k != null && k.isNotEmpty && apiKeyIn == 'header') {
+      final keyName = (apiKeyName == null || apiKeyName!.isEmpty) ? 'apikey' : apiKeyName!;
+      h[keyName] = '$apiKeyPrefix$k';
+    }
+    return h;
+  }
 }
 
 class SourceFilter {
@@ -287,19 +302,4 @@ class FilterOption {
   Map<String, dynamic> toJson() {
     return {'name': name, 'value': value};
   }
-}
-
-  Map<String, String> buildRequestHeaders() {
-  final h = <String, String>{
-    "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ...?headers,
-  };
-
-  final k = apiKey;
-  if (k != null && k.isNotEmpty && apiKeyIn == 'header') {
-    final keyName = (apiKeyName == null || apiKeyName!.isEmpty) ? 'apikey' : apiKeyName!;
-    h[keyName] = '$apiKeyPrefix$k';
-  }
-  return h;
 }
