@@ -72,7 +72,7 @@ class RuleEngine {
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
-    // ✅ 最终 headers：规则静态 headers + 默认 UA + apiKey(如果配置为 header)
+    // ✅ 最终 headers：默认 UA + 规则静态 headers
     final Map<String, String> reqHeaders = {
       ..._defaultUA(),
       ...?rule.headers,
@@ -86,17 +86,23 @@ class RuleEngine {
       if (rule.apiKeyIn == 'header') {
         reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
       } else {
-        // query 一般不加 prefix；你真要也能以后扩展
         params[keyName] = apiKey;
       }
     }
 
+    // ✅ filters：多选用 separator 拼接
     if (filterParams != null) {
       filterParams.forEach((key, value) {
         if (value is List) {
-          final SourceFilter? filterRule =
-              rule.filters?.where((f) => f.key == key).cast<SourceFilter?>().firstOrNull;
-
+          SourceFilter? filterRule;
+          if (rule.filters != null) {
+            for (final f in rule.filters!) {
+              if (f.key == key) {
+                filterRule = f;
+                break;
+              }
+            }
+          }
           final separator = filterRule?.separator ?? ',';
           params[key] = value.join(separator);
         } else {
@@ -105,8 +111,21 @@ class RuleEngine {
       });
     }
 
-    if (query != null && query.isNotEmpty) {
-      params[rule.paramKeyword] = query;
+    // ✅ keyword 通用策略：query 优先；否则 default_keyword
+    String? finalQuery = query;
+    if ((finalQuery == null || finalQuery.trim().isEmpty) &&
+        rule.defaultKeyword != null &&
+        rule.defaultKeyword!.trim().isNotEmpty) {
+      finalQuery = rule.defaultKeyword;
+    }
+
+    // ✅ keywordRequired = true 但无 keyword -> 不发请求，直接提示
+    if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
+      throw Exception("该图源需要关键词，请先搜索或在规则里设置 default_keyword");
+    }
+
+    if (finalQuery != null && finalQuery.trim().isNotEmpty) {
+      params[rule.paramKeyword] = finalQuery.trim();
     }
 
     try {
@@ -142,6 +161,7 @@ class RuleEngine {
 
         String? finalUrl;
 
+        // 1) HEAD 优先
         try {
           final response = await _dio.head(
             rule.url,
@@ -179,6 +199,7 @@ class RuleEngine {
 
         if (finalUrl == null) return null;
 
+        // 3) 参数净化：去掉 _t/_r
         final uri = Uri.parse(finalUrl);
         if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
           final newQueryParams = Map<String, String>.from(uri.queryParameters);
