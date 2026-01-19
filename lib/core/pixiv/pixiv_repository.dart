@@ -1,13 +1,4 @@
-// lib/core/pixiv/pixiv_repository.dart
-//
-// Pixiv 专用仓库：提供一个与 RuleEngine 类似的 fetch 接口，方便 UI 分支调用。
-// ✅ 不引入 Queue
-// ✅ 提供 supports(ruleId) + fetch(...)，匹配你 UI 报错里正在调用的方法名
-// ✅ 输出 UniWallpaper：thumbUrl/fullUrl/width/height/id 都有
-//
-// 重要说明：Pixiv 没官方公开 API，本实现用 pixiv.net/ajax/search 接口。
-// 需要 Referer，未登录情况下可用性取决于 Pixiv 策略/地区/频率限制。
-// 这只是“能跑通 + 可扩展”的落地版本。
+import 'dart:async';
 
 import 'package:dio/dio.dart';
 
@@ -15,10 +6,16 @@ import '../models/uni_wallpaper.dart';
 import '../utils/app_log.dart';
 import 'pixiv_client.dart';
 
+/// Pixiv 专用仓库（不走 RuleEngine）
+///
+/// UI 只需要：
+/// - if (_pixivRepo.supports(rule)) => _pixivRepo.fetch(...)
 class PixivRepository {
   PixivRepository({
     Dio? dio,
-  }) : _dio = dio ??
+    String? cookie,
+    PixivClient? client,
+  })  : _dio = dio ??
             Dio(
               BaseOptions(
                 baseUrl: 'https://www.pixiv.net',
@@ -31,155 +28,174 @@ class PixivRepository {
                 responseType: ResponseType.json,
                 validateStatus: (s) => s != null && s < 500,
                 sendTimeout: const Duration(seconds: 10),
-                receiveTimeout: const Duration(seconds: 10),
+                receiveTimeout: const Duration(seconds: 15),
               ),
-            );
+            ),
+        _client = client ?? PixivClient(dio: dio, cookie: cookie);
 
   final Dio _dio;
+  final PixivClient _client;
 
-  /// 你可以把 pixiv 规则 id 固定成这个，也可以按前缀判断
   static const String kRuleId = 'pixiv_search_ajax';
 
-  /// UI 分支用：判断当前 rule 是否应该走 PixivRepository
   bool supports(dynamic rule) {
     try {
       final id = (rule as dynamic).id?.toString() ?? '';
       if (id == kRuleId) return true;
-      // 兼容你可能写的别名
       if (id.startsWith('pixiv')) return true;
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
     return false;
   }
 
-  /// 给 UI 用的统一入口：签名对齐 RuleEngine.fetch 的用法（page/query）
+  Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
+
   Future<List<UniWallpaper>> fetch(
     dynamic rule, {
     int page = 1,
     String? query,
-    Map<String, dynamic>? filterParams, // 预留，不用也别炸
+    Map<String, dynamic>? filterParams,
   }) async {
     final q = (query ?? '').trim();
     if (q.isEmpty) return const [];
 
-    // Pixiv 的 keyword 在 path：/ajax/search/artworks/{word}
-    final path = '/ajax/search/artworks/${Uri.encodeComponent(q)}';
+    // 1) 先搜（快速拿到缩略图 + id）
+    AppLog.I.add('REQ pixiv_search_ajax q="$q" page=$page');
+    final briefs = await _client.searchArtworks(word: q, page: page);
+    AppLog.I.add('RESP pixiv_search_ajax count=${briefs.length}');
 
-    final params = <String, dynamic>{
-      'order': 'date_d',
-      'mode': 'all',
-      's_mode': 's_tag',
-      'p': page,
-    };
+    if (briefs.isEmpty) return const [];
 
-    AppLog.I.add('REQ pixiv_search_ajax GET https://www.pixiv.net$path');
-    AppLog.I.add('    params=$params');
+    // 2) 再补 fullUrl（regular/original），避免“全是缩略图”
+    //    不要傻逼到每张都串行：用并发池。
+    final enriched = await _enrichWithPages(briefs, concurrency: 4);
 
-    final resp = await _dio.get(path, queryParameters: params);
-
-    AppLog.I.add(
-        'RESP pixiv_search_ajax status=${resp.statusCode ?? 'N/A'} url=${resp.realUri}');
-    final sc = resp.statusCode ?? 0;
-    if (sc >= 400) {
-      AppLog.I.add('    body=${resp.data}');
-      throw DioException(
-        requestOptions: resp.requestOptions,
-        response: resp,
-        type: DioExceptionType.badResponse,
-        error: 'HTTP $sc',
+    // 3) 转 UniWallpaper
+    final out = <UniWallpaper>[];
+    for (final e in enriched) {
+      out.add(
+        UniWallpaper(
+          id: e.id,
+          sourceId: 'pixiv',
+          thumbUrl: e.thumbUrl,
+          fullUrl: e.fullUrl,
+          width: e.width.toDouble(),
+          height: e.height.toDouble(),
+          grade: e.grade,
+        ),
       );
     }
-
-    return _parse(resp.data);
+    return out;
   }
 
-  List<UniWallpaper> _parse(dynamic data) {
-    // 目标结构（你日志里见过）：
-    // { error:false, body:{ illustManga:{ data:[{ id, url, width, height, ... }], ... } } }
-    try {
-      final body = (data is Map) ? data['body'] : null;
-      final illustManga = (body is Map) ? body['illustManga'] : null;
-      final list = (illustManga is Map) ? illustManga['data'] : null;
-      if (list is! List) return const [];
+  Future<List<_PixivEnriched>> _enrichWithPages(
+    List<PixivIllustBrief> briefs, {
+    int concurrency = 4,
+  }) async {
+    final results = List<_PixivEnriched>.filled(briefs.length, _PixivEnriched.empty(), growable: false);
 
-      final out = <UniWallpaper>[];
+    int i = 0;
+    Future<void> worker() async {
+      while (true) {
+        final idx = i;
+        i++;
+        if (idx >= briefs.length) return;
 
-      for (final item in list) {
-        if (item is! Map) continue;
+        final b = briefs[idx];
 
-        final id = (item['id'] ?? '').toString();
-        if (id.isEmpty) continue;
+        // 默认：先用 thumb 推一个 full（兜底）
+        var full = _deriveOriginalFromThumb(b.thumbUrl) ?? b.thumbUrl;
+        var grade = _gradeFromRestrict(b.xRestrict);
 
-        final width = _toDouble(item['width']);
-        final height = _toDouble(item['height']);
+        try {
+          final pages = await _client.getIllustPages(b.id);
+          if (pages.isNotEmpty) {
+            // 优先 regular（更稳定），original 更可能格式/权限坑
+            final p0 = pages.first;
+            final regular = p0.regular.trim();
+            final original = p0.original.trim();
 
-        // Pixiv 返回的 url 通常是 square1200 / img-master（缩略）
-        final thumb = (item['url'] ?? '').toString();
+            if (regular.isNotEmpty) full = regular;
+            else if (original.isNotEmpty) full = original;
+          }
+        } catch (e) {
+          // 不要炸主流程，记录一下就行
+          AppLog.I.add('pixiv pages fail id=${b.id} err=$e');
+        }
 
-        // 尝试从 thumb 推导原图（i.pximg.net/img-original/...）
-        // 注意：原图通常需要 Referer + 可能需要 Cookie；你当前引擎只负责给 URL，不保证能直接下原图
-        final full = _deriveOriginalFromThumb(thumb) ?? thumb;
-
-        out.add(
-          UniWallpaper(
-            id: id,
-            sourceId: 'pixiv',
-            thumbUrl: thumb,
-            fullUrl: full,
-            width: width,
-            height: height,
-          ),
+        results[idx] = _PixivEnriched(
+          id: b.id,
+          thumbUrl: b.thumbUrl,
+          fullUrl: full,
+          width: b.width,
+          height: b.height,
+          grade: grade,
         );
       }
-
-      return out;
-    } catch (e) {
-      AppLog.I.add('pixiv parse error: $e');
-      return const [];
     }
+
+    final workers = List.generate(concurrency, (_) => worker());
+    await Future.wait(workers);
+    return results.where((e) => e.id.isNotEmpty).toList();
   }
 
-  double _toDouble(dynamic v) {
-    if (v is num) return v.toDouble();
-    return double.tryParse(v?.toString() ?? '') ?? 0.0;
+  String? _gradeFromRestrict(int xRestrict) {
+    if (xRestrict <= 0) return null;
+    // 粗暴点：>0 就当 sketchy/nsfw
+    return xRestrict >= 2 ? 'nsfw' : 'sketchy';
   }
 
   String? _deriveOriginalFromThumb(String thumb) {
     if (thumb.isEmpty) return null;
 
-    // 常见 thumb:
+    // thumb:
     // https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/19/18/48/32/140131153_p0_square1200.jpg
-    //
-    // 原图一般：
-    // https://i.pximg.net/img-original/img/2026/01/19/18/48/32/140131153_p0.png (或 jpg)
-    //
-    // 这里做一个“尽量合理”的推导：把 /c/.../img-master/ => /img-original/
-    // 并把 _square1200.jpg 去掉后缀，改成 .jpg（不保证 100%）
     try {
       final u = Uri.parse(thumb);
       if (!u.host.contains('i.pximg.net')) return null;
 
       final p = u.path;
-
-      // 必须包含 img-master/img/
       final idx = p.indexOf('/img-master/img/');
       if (idx < 0) return null;
 
       final tail = p.substring(idx + '/img-master/'.length); // img/2026/...
       var newPath = '/img-original/$tail';
 
-      // 去掉 _square1200 或 _master1200 等
       newPath = newPath
           .replaceAll('_square1200', '')
           .replaceAll('_master1200', '')
           .replaceAll('_custom1200', '');
 
-      // 把 jpg/png 后缀“先保留”，因为不确定原图格式
-      // 这里不强改扩展名，只做路径替换
+      // 不强改扩展名（png/jpg 不确定）
       return u.replace(path: newPath, query: '').toString();
     } catch (_) {
       return null;
     }
   }
+}
+
+class _PixivEnriched {
+  final String id;
+  final String thumbUrl;
+  final String fullUrl;
+  final int width;
+  final int height;
+  final String? grade;
+
+  const _PixivEnriched({
+    required this.id,
+    required this.thumbUrl,
+    required this.fullUrl,
+    required this.width,
+    required this.height,
+    required this.grade,
+  });
+
+  factory _PixivEnriched.empty() => const _PixivEnriched(
+        id: '',
+        thumbUrl: '',
+        fullUrl: '',
+        width: 0,
+        height: 0,
+        grade: null,
+      );
 }
