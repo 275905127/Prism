@@ -47,6 +47,8 @@ class PixivRepository {
     return false;
   }
 
+  bool get hasCookie => _client.hasCookie;
+
   /// （可选）外部更新 Cookie
   void setCookie(String? cookie) => _client.setCookie(cookie);
 
@@ -60,26 +62,62 @@ class PixivRepository {
     dynamic rule, {
     int page = 1,
     String? query,
-    Map<String, dynamic>? filterParams, // 预留
+    Map<String, dynamic>? filterParams,
   }) async {
     final q = (query ?? '').trim();
     if (q.isEmpty) return const [];
 
-    // 1) 先搜（快速拿到缩略图 + id）
-    _logger?.log('REQ pixiv_search_ajax q="$q" page=$page');
-    final briefs = await _client.searchArtworks(word: q, page: page);
+    // ---------- 读取 filters（UI -> Service -> Repo） ----------
+    String order = 'date_d';
+    String mode = 'all';
+    String sMode = 's_tag';
+
+    final fp = filterParams ?? const <String, dynamic>{};
+
+    String _pickStr(String k, String fallback) {
+      final v = fp[k];
+      final s = (v ?? '').toString().trim();
+      return s.isEmpty ? fallback : s;
+    }
+
+    order = _pickStr('order', order);
+    mode = _pickStr('mode', mode);
+    sMode = _pickStr('s_mode', sMode);
+
+    // ---------- 两档体验：无 Cookie 时限制某些选项 ----------
+    // 1) 热门排序通常需要登录（或会返回空/降级），这里直接降级到最新
+    if (!hasCookie && order.toLowerCase().contains('popular')) {
+      _logger?.log('pixiv filter blocked (no cookie): order=$order -> date_d');
+      order = 'date_d';
+    }
+
+    // 2) R-18：无 Cookie 时直接降级为 safe（避免“看似可选但实际加载失败/空”）
+    if (!hasCookie && mode.toLowerCase() == 'r18') {
+      _logger?.log('pixiv filter blocked (no cookie): mode=r18 -> safe');
+      mode = 'safe';
+    }
+
+    // ---------- 1) 先搜（快速拿到缩略图 + id） ----------
+    _logger?.log('REQ pixiv_search_ajax q="$q" page=$page order=$order mode=$mode s_mode=$sMode');
+    final briefs = await _client.searchArtworks(
+      word: q,
+      page: page,
+      order: order,
+      mode: mode,
+      sMode: sMode,
+    );
     _logger?.log('RESP pixiv_search_ajax count=${briefs.length}');
 
     if (briefs.isEmpty) return const [];
 
-    // 2) 并发补全 pages（拿 regular/original），避免全是缩略图
+    // ---------- 2) 并发补全 pages（拿 regular/original） ----------
     final enriched = await _enrichWithPages(
       briefs,
       concurrency: 4,
       timeoutPerItem: const Duration(seconds: 8),
     );
 
-    // 3) 转 UniWallpaper
+    // ---------- 3) 转 UniWallpaper（详情与下载用 original） ----------
     final out = <UniWallpaper>[];
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
@@ -113,13 +151,10 @@ class PixivRepository {
     if (briefs.isEmpty) return const [];
     if (concurrency < 1) concurrency = 1;
 
-    // ✅ 关键修复：
-    // 以前用 results.length = briefs.length 会产生 null 槽位（并发失败时未赋值 -> 运行期 type cast 崩溃）
-    // 这里显式用 nullable 容器承接，再在末尾收口为非空 List<_PixivEnriched>
+    // ✅ 关键修复：nullable 容器承接并发结果，末尾收口为非空
     final List<_PixivEnriched?> results =
         List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
 
-    // ✅ 线程安全的“任务游标”
     var nextIndex = 0;
     int takeIndex() {
       final v = nextIndex;
@@ -134,7 +169,6 @@ class PixivRepository {
 
         final b = briefs[idx];
 
-        // 默认：先兜底（thumb 推导 original 仅作 fallback，不保证可用）
         String regular = '';
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
@@ -151,10 +185,8 @@ class PixivRepository {
             if (o.isNotEmpty) original = o;
           }
         } catch (e) {
-          // 不要炸主流程：能显示 thumb 就够了
           _logger?.log('pixiv pages fail id=${b.id} err=$e');
         } finally {
-          // ✅ 无论 pages 成功/失败/超时，都必须写入一个 Enriched，杜绝 null 槽位
           results[idx] = _PixivEnriched(
             id: b.id,
             thumbUrl: b.thumbUrl,
@@ -171,7 +203,6 @@ class PixivRepository {
     final workers = List.generate(concurrency, (_) => worker());
     await Future.wait(workers);
 
-    // ✅ 收口：把 nullable results 转为非空 List<_PixivEnriched>，并过滤空/异常占位
     final out = <_PixivEnriched>[];
     for (final e in results) {
       if (e == null) continue;
@@ -183,15 +214,12 @@ class PixivRepository {
 
   String? _gradeFromRestrict(int xRestrict) {
     if (xRestrict <= 0) return null;
-    // 粗暴但可用：>0 即敏感分级
     return xRestrict >= 2 ? 'nsfw' : 'sketchy';
-  }
+    }
 
   String? _deriveOriginalFromThumb(String thumb) {
     if (thumb.isEmpty) return null;
 
-    // thumb:
-    // https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/19/18/48/32/140131153_p0_square1200.jpg
     try {
       final u = Uri.parse(thumb);
       if (!u.host.contains('i.pximg.net')) return null;
@@ -208,7 +236,6 @@ class PixivRepository {
           .replaceAll('_master1200', '')
           .replaceAll('_custom1200', '');
 
-      // 不强改扩展名（png/jpg 不确定）
       return u.replace(path: newPath, query: '').toString();
     } catch (_) {
       return null;
@@ -219,11 +246,7 @@ class PixivRepository {
 class _PixivEnriched {
   final String id;
   final String thumbUrl;
-
-  /// Pixiv pages 接口给的 regular（推荐用于详情展示的备选）
   final String regularUrl;
-
-  /// Pixiv pages 接口给的 original（用于详情/下载）
   final String originalUrl;
 
   final int width;
