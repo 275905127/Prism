@@ -1,12 +1,14 @@
 // lib/ui/pages/wallpaper_detail_page.dart
 import 'dart:typed_data';
-import 'package:dio/dio.dart';
-import 'package:flutter/material.dart';
+
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/models/uni_wallpaper.dart';
+import '../../core/services/wallpaper_service.dart';
 import '../widgets/foggy_app_bar.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
@@ -50,28 +52,11 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
     );
 
     try {
-      final Map<String, String> finalHeaders = Map<String, String>.from(widget.headers ?? {});
-      // 保底 UA
-      finalHeaders.putIfAbsent(
-        'User-Agent',
-        () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      );
-
-      final response = await Dio().get(
-        widget.wallpaper.fullUrl,
-        options: Options(
-          responseType: ResponseType.bytes,
-          headers: finalHeaders,
-          sendTimeout: const Duration(seconds: 20),
-          receiveTimeout: const Duration(seconds: 20),
-        ),
-      );
-
-      final Uint8List imageBytes = Uint8List.fromList(response.data);
-
-      if (imageBytes.lengthInBytes < 100) {
-        throw "文件过小，可能是错误页面";
-      }
+      // ✅ UI 不再直接 Dio：统一走 Service
+      final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
+            url: widget.wallpaper.fullUrl,
+            headers: widget.headers,
+          );
 
       final String extension = _detectExtension(imageBytes);
       final String fileName = "prism_${DateTime.now().millisecondsSinceEpoch}.$extension";
@@ -87,11 +72,15 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
       }
     } on GalException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 保存失败: ${e.type.message}")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("❌ 保存失败: ${e.type.message}")),
+        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ 下载错误: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("❌ 下载错误: $e")),
+        );
       }
     } finally {
       if (mounted) setState(() => _isDownloading = false);
@@ -170,8 +159,10 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text("ID: ${widget.wallpaper.id}",
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                  Text(
+                    "ID: ${widget.wallpaper.id}",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
                   const SizedBox(height: 4),
                   Text(
                     (widget.wallpaper.width > 0 && widget.wallpaper.height > 0)
