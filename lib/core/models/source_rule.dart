@@ -1,4 +1,5 @@
 // lib/core/models/source_rule.dart
+
 class SourceRule {
   final String id;
   final String name;
@@ -9,7 +10,7 @@ class SourceRule {
 
   final Map<String, dynamic>? fixedParams;
 
-  /// 保存原始 key
+  /// api key 原值
   final String? apiKey;
 
   /// apiKey 放哪、叫什么、前缀
@@ -18,13 +19,15 @@ class SourceRule {
   final String apiKeyIn;
   final String apiKeyPrefix;
 
-  /// ✅ 新增：keyword 策略（通用关键）
+  /// ✅ 通用关键字策略
+  /// default_keyword: 首页/无搜索词时自动注入
+  /// keyword_required: 必须有 keyword，否则直接报错不发请求（例如 Unsplash search）
   final String? defaultKeyword;
   final bool keywordRequired;
 
   final List<SourceFilter>? filters;
 
-  // 响应类型 ('json' or 'random')
+  /// 响应类型: 'json' | 'random'
   final String responseType;
 
   final String paramPage;
@@ -45,24 +48,26 @@ class SourceRule {
     required this.url,
     this.headers,
     this.fixedParams,
-    this.apiKey,
 
+    this.apiKey,
     this.apiKeyName,
     this.apiKeyIn = 'query',
     this.apiKeyPrefix = '',
 
-    /// ✅ new
     this.defaultKeyword,
     this.keywordRequired = false,
 
     this.filters,
     this.responseType = 'json',
+
     this.paramPage = 'page',
     this.paramKeyword = 'q',
+
     required this.listPath,
     required this.idPath,
     required this.thumbPath,
     required this.fullPath,
+
     this.widthPath,
     this.heightPath,
     this.imagePrefix,
@@ -79,12 +84,10 @@ class SourceRule {
       fixedParams: map['fixed_params'],
 
       apiKey: map['api_key'],
-
       apiKeyName: map['api_key_name'],
       apiKeyIn: map['api_key_in'] ?? 'query',
       apiKeyPrefix: map['api_key_prefix'] ?? '',
 
-      /// ✅ new
       defaultKeyword: map['default_keyword'],
       keywordRequired: map['keyword_required'] ?? false,
 
@@ -123,7 +126,6 @@ class SourceRule {
       'api_key_in': apiKeyIn,
       'api_key_prefix': apiKeyPrefix,
 
-      /// ✅ new
       'default_keyword': defaultKeyword,
       'keyword_required': keywordRequired,
 
@@ -148,4 +150,49 @@ class SourceRule {
   }
 }
 
-// ↓↓↓ 下面 SourceFilter / FilterOption 保持你原来的不变
+class SourceFilter {
+  final String key;
+  final String name;
+  final String type;
+  final String separator;
+  final List<FilterOption> options;
+
+  SourceFilter({
+    required this.key,
+    required this.name,
+    required this.type,
+    this.separator = ',',
+    required this.options,
+  });
+
+  factory SourceFilter.fromJson(Map<String, dynamic> json) {
+    return SourceFilter(
+      key: json['key'],
+      name: json['name'],
+      type: json['type'] ?? 'radio',
+      separator: json['separator'] ?? ',',
+      options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'key': key,
+        'name': name,
+        'type': type,
+        'separator': separator,
+        'options': options.map((e) => e.toJson()).toList()
+      };
+}
+
+class FilterOption {
+  final String name;
+  final String value;
+
+  FilterOption({required this.name, required this.value});
+
+  factory FilterOption.fromJson(Map<String, dynamic> json) {
+    return FilterOption(name: json['name'], value: json['value']);
+  }
+
+  Map<String, dynamic> toJson() => {'name': name, 'value': value};
+}
