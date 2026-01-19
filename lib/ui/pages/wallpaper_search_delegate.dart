@@ -157,7 +157,10 @@ class _SearchResultsState extends State<_SearchResults> {
     final manager = context.watch<SourceManager>();
     final rule = manager.activeRule;
 
-    final headers = rule?.buildRequestHeaders();
+    // ✅ headers：Pixiv 必须 Referer；其它图源走 buildRequestHeaders()
+    final headers = (rule != null && _pixivRepo.supports(rule))
+        ? _pixivRepo.buildImageHeaders()
+        : rule?.buildRequestHeaders();
 
     return Stack(
       children: [
@@ -176,7 +179,6 @@ class _SearchResultsState extends State<_SearchResults> {
                 MaterialPageRoute(
                   builder: (_) => WallpaperDetailPage(
                     wallpaper: paper,
-                    // ✅ 必须用 buildRequestHeaders，别再传 rule.headers
                     headers: headers,
                   ),
                 ),
