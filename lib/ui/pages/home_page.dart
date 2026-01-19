@@ -122,11 +122,17 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      // ✅ 路由：Pixiv 不支持“首页无关键词”拉列表
-      // 你要 Pixiv 就走搜索入口，不要在 HomePage 硬拉
-      List<UniWallpaper> data;
+      // ✅ 分支：Pixiv 走 PixivRepository；其他走 RuleEngine
+      final List<UniWallpaper> data;
+
       if (_pixivRepo.supports(rule)) {
-        data = [];
+        // Pixiv 首页必须有关键词：优先用规则 defaultKeyword，否则兜底一个
+        final String q = (rule.defaultKeyword ?? 'illustration').trim();
+        data = await _pixivRepo.fetch(
+          rule,
+          page: _page,
+          query: q,
+        );
       } else {
         data = await _engine.fetch(
           rule,
@@ -246,10 +252,14 @@ class _HomePageState extends State<HomePage> {
 
     final activeRule = context.read<SourceManager>().activeRule;
 
+    // ✅ 图片 headers：Pixiv 必须带 Referer；其它图源走 buildRequestHeaders()
+    final headers = (activeRule != null && _pixivRepo.supports(activeRule))
+        ? _pixivRepo.buildImageHeaders()
+        : activeRule?.buildRequestHeaders();
+
     final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
-      // ✅ 不要再只用 rule.headers：必须用 buildRequestHeaders()
-      httpHeaders: activeRule?.buildRequestHeaders(),
+      httpHeaders: headers,
       fit: BoxFit.fitWidth,
       placeholder: (c, u) => Container(
         color: Colors.grey[100],
@@ -317,6 +327,11 @@ class _HomePageState extends State<HomePage> {
         _initSource();
       });
     }
+
+    // ✅ 详情页 headers：Pixiv 必须 Referer
+    final detailHeaders = (activeRule != null && _pixivRepo.supports(activeRule))
+        ? _pixivRepo.buildImageHeaders()
+        : activeRule?.buildRequestHeaders();
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -445,7 +460,7 @@ class _HomePageState extends State<HomePage> {
                         MaterialPageRoute(
                           builder: (_) => WallpaperDetailPage(
                             wallpaper: paper,
-                            headers: activeRule?.buildRequestHeaders(),
+                            headers: detailHeaders,
                           ),
                         ),
                       ),
