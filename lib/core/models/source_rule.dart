@@ -19,6 +19,14 @@ class SourceRule {
   final String paramPage;     // page param name, can be '' to disable
   final String paramKeyword;  // keyword param name, can be '' to disable
 
+  // ✅ 新增：分页模式
+  // 'page'   : page=1,2,3...
+  // 'offset' : paramPage = offset/start = (page-1)*pageSize
+  // 'cursor' : paramPage = cursor/after，page>1 从上次响应读出来继续
+  final String pageMode;      // 'page' | 'offset' | 'cursor'
+  final int pageSize;         // offset 模式用；0 表示自动猜测（per_page/limit/rows/...)
+  final String? cursorPath;   // cursor 模式用：从响应里读下一页游标
+
   final String listPath;
   final String idPath;
   final String thumbPath;
@@ -45,6 +53,12 @@ class SourceRule {
     this.responseType = 'json',
     this.paramPage = 'page',
     this.paramKeyword = 'q',
+
+    // ✅ 新增字段默认值：不影响旧规则
+    this.pageMode = 'page',
+    this.pageSize = 0,
+    this.cursorPath,
+
     required this.listPath,
     required this.idPath,
     required this.thumbPath,
@@ -67,7 +81,7 @@ class SourceRule {
       out[k.toString()] = v?.toString() ?? '';
     });
     return out;
-    }
+  }
 
   static Map<String, dynamic>? _parseMapDyn(dynamic raw) {
     if (raw is! Map) return null;
@@ -87,6 +101,20 @@ class SourceRule {
   static String _normalizeResponseType(dynamic v) {
     final s = (v ?? '').toString().toLowerCase().trim();
     return (s == 'random') ? 'random' : 'json';
+  }
+
+  static String _normalizePageMode(dynamic v) {
+    final s = (v ?? '').toString().toLowerCase().trim();
+    if (s == 'offset') return 'offset';
+    if (s == 'cursor') return 'cursor';
+    return 'page';
+  }
+
+  static int _normalizeInt(dynamic v, int fallback) {
+    if (v == null) return fallback;
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v.toString()) ?? fallback;
   }
 
   factory SourceRule.fromJson(Map<String, dynamic> map) {
@@ -146,6 +174,11 @@ class SourceRule {
       paramPage: (params['page'] ?? 'page').toString(),
       paramKeyword: (params['keyword'] ?? 'q').toString(),
 
+      // ✅ 新增：分页字段（不写也不影响旧规则）
+      pageMode: _normalizePageMode(map['page_mode']),
+      pageSize: _normalizeInt(map['page_size'], 0),
+      cursorPath: map['cursor_path']?.toString(),
+
       // ✅ parser 同理
       listPath: (parser['list'] ?? r'$').toString(),
       idPath: (parser['id'] ?? 'id').toString(),
@@ -187,6 +220,11 @@ class SourceRule {
         'keyword': paramKeyword,
       },
 
+      // ✅ 新增：分页配置（不写也没事）
+      'page_mode': pageMode,
+      'page_size': pageSize,
+      'cursor_path': cursorPath,
+
       'parser': {
         'list': listPath,
         'id': idPath,
@@ -199,6 +237,7 @@ class SourceRule {
       }
     };
   }
+
   /// 给图片加载用：把 rule.headers + apiKey(header 模式) 合并
   Map<String, String> buildRequestHeaders() {
     final h = <String, String>{
