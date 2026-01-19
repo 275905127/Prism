@@ -113,8 +113,11 @@ class PixivRepository {
     if (briefs.isEmpty) return const [];
     if (concurrency < 1) concurrency = 1;
 
-    final results = <_PixivEnriched>[];
-    results.length = briefs.length;
+    // ✅ 关键修复：
+    // 以前用 results.length = briefs.length 会产生 null 槽位（并发失败时未赋值 -> 运行期 type cast 崩溃）
+    // 这里显式用 nullable 容器承接，再在末尾收口为非空 List<_PixivEnriched>
+    final List<_PixivEnriched?> results =
+        List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
 
     // ✅ 线程安全的“任务游标”
     var nextIndex = 0;
@@ -150,25 +153,32 @@ class PixivRepository {
         } catch (e) {
           // 不要炸主流程：能显示 thumb 就够了
           _logger?.log('pixiv pages fail id=${b.id} err=$e');
+        } finally {
+          // ✅ 无论 pages 成功/失败/超时，都必须写入一个 Enriched，杜绝 null 槽位
+          results[idx] = _PixivEnriched(
+            id: b.id,
+            thumbUrl: b.thumbUrl,
+            regularUrl: regular,
+            originalUrl: original,
+            width: b.width,
+            height: b.height,
+            grade: grade,
+          );
         }
-
-        results[idx] = _PixivEnriched(
-          id: b.id,
-          thumbUrl: b.thumbUrl,
-          regularUrl: regular,
-          originalUrl: original,
-          width: b.width,
-          height: b.height,
-          grade: grade,
-        );
       }
     }
 
     final workers = List.generate(concurrency, (_) => worker());
     await Future.wait(workers);
 
-    // 去掉空占位
-    return results.where((e) => e.id.isNotEmpty).toList(growable: false);
+    // ✅ 收口：把 nullable results 转为非空 List<_PixivEnriched>，并过滤空/异常占位
+    final out = <_PixivEnriched>[];
+    for (final e in results) {
+      if (e == null) continue;
+      if (e.id.isEmpty) continue;
+      out.add(e);
+    }
+    return out;
   }
 
   String? _gradeFromRestrict(int xRestrict) {
