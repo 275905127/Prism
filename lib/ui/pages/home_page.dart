@@ -7,9 +7,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/manager/source_manager.dart';
-import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
-import '../../core/pixiv/pixiv_repository.dart';
+import '../../core/services/wallpaper_service.dart'; // 引入 Service
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -25,8 +24,9 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final RuleEngine _engine = RuleEngine();
-  final PixivRepository _pixivRepo = PixivRepository();
+  // 🔥 删除：不再直接持有 Engine 和 Repo
+  // final RuleEngine _engine = RuleEngine();
+  // final PixivRepository _pixivRepo = PixivRepository();
 
   final ScrollController _scrollController = ScrollController();
 
@@ -74,7 +74,6 @@ class _HomePageState extends State<HomePage> {
         }
       });
     } catch (e) {
-      // ignore: avoid_print
       print("加载筛选记录失败: $e");
     }
   }
@@ -92,7 +91,6 @@ class _HomePageState extends State<HomePage> {
         await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
       }
     } catch (e) {
-      // ignore: avoid_print
       print("保存筛选记录失败: $e");
     }
   }
@@ -122,24 +120,13 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      // ✅ 分支：Pixiv 走 PixivRepository；其他走 RuleEngine
-      final List<UniWallpaper> data;
-
-      if (_pixivRepo.supports(rule)) {
-        // Pixiv 首页必须有关键词：优先用规则 defaultKeyword，否则兜底一个
-        final String q = (rule.defaultKeyword ?? 'illustration').trim();
-        data = await _pixivRepo.fetch(
-          rule,
-          page: _page,
-          query: q,
-        );
-      } else {
-        data = await _engine.fetch(
-          rule,
-          page: _page,
-          filterParams: _currentFilters,
-        );
-      }
+      // 🔥 核心修改：通过 Service 调用，UI 甚至不知道底层用了什么引擎
+      final data = await context.read<WallpaperService>().fetch(
+        rule,
+        page: _page,
+        filterParams: _currentFilters,
+        // query: 首页一般没有搜索词，除非你需要支持默认搜索
+      );
 
       if (!mounted) return;
 
@@ -174,6 +161,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ... _showFilterSheet, _showImportDialog 保持不变 ...
   void _showFilterSheet() {
     final rule = context.read<SourceManager>().activeRule;
     if (rule == null || rule.filters.isEmpty) {
@@ -252,10 +240,8 @@ class _HomePageState extends State<HomePage> {
 
     final activeRule = context.read<SourceManager>().activeRule;
 
-    // ✅ 图片 headers：Pixiv 必须带 Referer；其它图源走 buildRequestHeaders()
-    final headers = (activeRule != null && _pixivRepo.supports(activeRule))
-        ? _pixivRepo.buildImageHeaders()
-        : activeRule?.buildRequestHeaders();
+    // 🔥 核心修改：使用 Service 获取 Headers，不再手动判断 if-else
+    final headers = context.read<WallpaperService>().getImageHeaders(activeRule);
 
     final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
@@ -328,10 +314,8 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    // ✅ 详情页 headers：Pixiv 必须 Referer
-    final detailHeaders = (activeRule != null && _pixivRepo.supports(activeRule))
-        ? _pixivRepo.buildImageHeaders()
-        : activeRule?.buildRequestHeaders();
+    // 🔥 核心修改：使用 Service 获取 Headers
+    final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -357,6 +341,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
+      // ... Drawer 和 Body 几乎保持不变 ...
       drawer: Drawer(
         child: Column(
           children: [
