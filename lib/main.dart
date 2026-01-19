@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import 'core/manager/source_manager.dart';
 import 'ui/pages/home_page.dart';
+import 'core/services/wallpaper_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +23,15 @@ void main() {
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => SourceManager()),
+        // 🔥 新增：注册 WallpaperService (它不需要混入 ChangeNotifier，用 Provider 即可)
+        Provider(create: (_) => WallpaperService()),
+      ],
 
   @override
   Widget build(BuildContext context) {
