@@ -153,8 +153,9 @@ class SourceRule {
 class SourceFilter {
   final String key;
   final String name;
-  final String type;
-  final String separator;
+  final String type;        // radio / checklist
+  final String separator;   // join 模式用
+  final String encode;      // ✅ join | repeat | merge
   final List<FilterOption> options;
 
   SourceFilter({
@@ -162,6 +163,7 @@ class SourceFilter {
     required this.name,
     required this.type,
     this.separator = ',',
+    this.encode = 'join',
     required this.options,
   });
 
@@ -171,6 +173,8 @@ class SourceFilter {
       name: json['name'],
       type: json['type'] ?? 'radio',
       separator: json['separator'] ?? ',',
+      // ✅ 默认策略：checklist 默认 join；你想多请求就写 merge
+      encode: json['encode'] ?? ((json['type'] ?? 'radio') == 'checklist' ? 'join' : 'join'),
       options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
     );
   }
@@ -180,19 +184,7 @@ class SourceFilter {
         'name': name,
         'type': type,
         'separator': separator,
+        'encode': encode,
         'options': options.map((e) => e.toJson()).toList()
       };
-}
-
-class FilterOption {
-  final String name;
-  final String value;
-
-  FilterOption({required this.name, required this.value});
-
-  factory FilterOption.fromJson(Map<String, dynamic> json) {
-    return FilterOption(name: json['name'], value: json['value']);
-  }
-
-  Map<String, dynamic> toJson() => {'name': name, 'value': value};
 }
