@@ -1,3 +1,5 @@
+// lib/core/models/source_rule.dart
+
 class SourceRule {
   final String id;
   final String name;
@@ -8,14 +10,14 @@ class SourceRule {
 
   final String? apiKey;
   final String? apiKeyName;
-  final String apiKeyIn;
-  final String apiKeyPrefix;
+  final String apiKeyIn;      // 'query' | 'header'
+  final String apiKeyPrefix;  // e.g. 'Bearer '
 
   final List<SourceFilter> filters;
 
-  final String responseType;
-  final String paramPage;
-  final String paramKeyword;
+  final String responseType;  // 'json' | 'random'
+  final String paramPage;     // page param name, can be '' to disable
+  final String paramKeyword;  // keyword param name, can be '' to disable
 
   final String listPath;
   final String idPath;
@@ -26,11 +28,10 @@ class SourceRule {
   final String? imagePrefix;
   final String? gradePath;
 
-  // 🔒 先给默认值，避免你后面再炸
   final bool keywordRequired;
   final String? defaultKeyword;
 
-  SourceRule({
+  const SourceRule({
     required this.id,
     required this.name,
     required this.url,
@@ -61,18 +62,23 @@ class SourceRule {
       id: map['id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
       name: map['name'] ?? '未命名图源',
       url: map['url'] ?? '',
+
       headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
-      fixedParams: map['fixed_params'],
+      fixedParams: map['fixed_params'] is Map ? Map<String, dynamic>.from(map['fixed_params']) : null,
+
       apiKey: map['api_key'],
       apiKeyName: map['api_key_name'],
       apiKeyIn: map['api_key_in'] ?? 'query',
       apiKeyPrefix: map['api_key_prefix'] ?? '',
+
       filters: (map['filters'] as List? ?? [])
-          .map((e) => SourceFilter.fromJson(e))
+          .map((e) => SourceFilter.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
+
       responseType: map['type'] ?? 'json',
       paramPage: map['params']?['page'] ?? 'page',
       paramKeyword: map['params']?['keyword'] ?? 'q',
+
       listPath: map['parser']?['list'] ?? r'$',
       idPath: map['parser']?['id'] ?? 'id',
       thumbPath: map['parser']?['thumb'] ?? 'url',
@@ -81,21 +87,61 @@ class SourceRule {
       heightPath: map['parser']?['height'],
       imagePrefix: map['parser']?['image_prefix'],
       gradePath: map['parser']?['grade'],
+
       keywordRequired: map['keyword_required'] ?? false,
       defaultKeyword: map['default_keyword'],
     );
+  }
+
+  /// ✅ 关键：给 SourceManager 存储用（r.toJson()）
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'url': url,
+      'type': responseType,
+
+      'headers': headers,
+      'fixed_params': fixedParams,
+
+      'api_key': apiKey,
+      'api_key_name': apiKeyName,
+      'api_key_in': apiKeyIn,
+      'api_key_prefix': apiKeyPrefix,
+
+      'keyword_required': keywordRequired,
+      'default_keyword': defaultKeyword,
+
+      'filters': filters.map((e) => e.toJson()).toList(),
+
+      'params': {
+        'page': paramPage,
+        'keyword': paramKeyword,
+      },
+
+      'parser': {
+        'list': listPath,
+        'id': idPath,
+        'thumb': thumbPath,
+        'full': fullPath,
+        'width': widthPath,
+        'height': heightPath,
+        'image_prefix': imagePrefix,
+        'grade': gradePath,
+      }
+    };
   }
 }
 
 class SourceFilter {
   final String key;
   final String name;
-  final String type;        // radio / checklist
-  final String separator;
-  final String encode;      // join / repeat / merge
+  final String type;       // 'radio' | 'checklist'
+  final String separator;  // join 时使用
+  final String encode;     // 'join' | 'repeat' | 'merge'
   final List<FilterOption> options;
 
-  SourceFilter({
+  const SourceFilter({
     required this.key,
     required this.name,
     required this.type,
@@ -106,15 +152,26 @@ class SourceFilter {
 
   factory SourceFilter.fromJson(Map<String, dynamic> json) {
     return SourceFilter(
-      key: json['key'],
-      name: json['name'],
+      key: json['key'] ?? '',
+      name: json['name'] ?? '',
       type: json['type'] ?? 'radio',
       separator: json['separator'] ?? ',',
       encode: json['encode'] ?? 'join',
       options: (json['options'] as List? ?? [])
-          .map((e) => FilterOption.fromJson(e))
+          .map((e) => FilterOption.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'key': key,
+      'name': name,
+      'type': type,
+      'separator': separator,
+      'encode': encode,
+      'options': options.map((e) => e.toJson()).toList(),
+    };
   }
 }
 
@@ -122,7 +179,7 @@ class FilterOption {
   final String name;
   final String value;
 
-  FilterOption({
+  const FilterOption({
     required this.name,
     required this.value,
   });
@@ -132,5 +189,9 @@ class FilterOption {
       name: json['name'] ?? '',
       value: json['value'] ?? '',
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'name': name, 'value': value};
   }
 }
