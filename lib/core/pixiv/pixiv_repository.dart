@@ -22,34 +22,35 @@ class PixivRepository {
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
 
   Future<List<UniWallpaper>> search({
-    required String keyword,
-    int page = 1,
-  }) async {
-    final kw = keyword.trim();
-    if (kw.isEmpty) return [];
+  required String keyword,
+  int page = 1,
+  bool expandMultiPage = true, // ✅ 新增
+}) async {
+  final kw = keyword.trim();
+  if (kw.isEmpty) return [];
 
-    // 1) 先拿列表（只有缩略图）
-    final briefs = await _client.searchArtworks(word: kw, page: page);
+  final briefs = await _client.searchArtworks(word: kw, page: page);
 
-    // 2) 先返回一个“可用但不完美”的列表（thumb=搜索缩略图）
-    // 然后再 enrich 成 regular/original（同一次函数里完成）
-    final base = briefs.map((b) {
-      return UniWallpaper(
-        id: b.id,
-        sourceId: 'pixiv',
-        thumbUrl: b.thumbUrl,
-        fullUrl: b.thumbUrl, // 先占位，后面 enrich
-        width: b.width.toDouble(),
-        height: b.height.toDouble(),
-        grade: (b.xRestrict == 0) ? 'sfw' : 'nsfw',
-      );
-    }).toList();
+  final base = briefs.map((b) {
+    return UniWallpaper(
+      id: b.id,
+      sourceId: 'pixiv',
+      thumbUrl: b.thumbUrl,
+      fullUrl: b.thumbUrl,
+      width: b.width.toDouble(),
+      height: b.height.toDouble(),
+      grade: (b.xRestrict == 0) ? 'sfw' : 'nsfw',
+    );
+  }).toList();
 
-    // 3) enrich：把 fullUrl 替换成 regular/original（至少不是“全是缩略图”）
+  if (!expandMultiPage) {
     await _enrichFullUrlsInPlace(base);
-
     return base;
   }
+
+  // ✅ 多页展开
+  return await _expandMultiPage(base);
+}
 
   Future<void> _enrichFullUrlsInPlace(List<UniWallpaper> list) async {
     if (list.isEmpty) return;
