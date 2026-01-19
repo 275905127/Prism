@@ -57,39 +57,107 @@ class SourceRule {
     this.defaultKeyword,
   });
 
+  // --------- helpers (private) ---------
+
+  static Map<String, String>? _parseHeaders(dynamic raw) {
+    if (raw is! Map) return null;
+    final out = <String, String>{};
+    raw.forEach((k, v) {
+      if (k == null) return;
+      out[k.toString()] = v?.toString() ?? '';
+    });
+    return out;
+    }
+
+  static Map<String, dynamic>? _parseMapDyn(dynamic raw) {
+    if (raw is! Map) return null;
+    final out = <String, dynamic>{};
+    raw.forEach((k, v) {
+      if (k == null) return;
+      out[k.toString()] = v;
+    });
+    return out;
+  }
+
+  static String _normalizeApiKeyIn(dynamic v) {
+    final s = (v ?? '').toString().toLowerCase().trim();
+    return (s == 'header') ? 'header' : 'query';
+  }
+
+  static String _normalizeResponseType(dynamic v) {
+    final s = (v ?? '').toString().toLowerCase().trim();
+    return (s == 'random') ? 'random' : 'json';
+  }
+
   factory SourceRule.fromJson(Map<String, dynamic> map) {
+    // ✅ 兼容 fixed_params / fixedParams
+    final fixed = map.containsKey('fixed_params')
+        ? map['fixed_params']
+        : map['fixedParams'];
+
+    // ✅ 兼容 type / responseType
+    final type = map.containsKey('type') ? map['type'] : map['responseType'];
+
+    // ✅ 兼容 params = {} 不存在时
+    final params = (map['params'] is Map) ? map['params'] as Map : const {};
+
+    // ✅ 兼容 parser = {} 不存在时
+    final parser = (map['parser'] is Map) ? map['parser'] as Map : const {};
+
+    // ✅ 兼容 filters 脏数据（只接受 Map）
+    final rawFilters = map['filters'];
+    final List<SourceFilter> parsedFilters = [];
+    if (rawFilters is List) {
+      for (final e in rawFilters) {
+        if (e is Map) {
+          try {
+            parsedFilters.add(SourceFilter.fromJson(Map<String, dynamic>.from(e)));
+          } catch (_) {
+            // skip bad filter
+          }
+        }
+      }
+    }
+
     return SourceRule(
       id: map['id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
       name: map['name'] ?? '未命名图源',
       url: map['url'] ?? '',
 
-      headers: map['headers'] != null ? Map<String, String>.from(map['headers']) : null,
-      fixedParams: map['fixed_params'] is Map ? Map<String, dynamic>.from(map['fixed_params']) : null,
+      // ✅ headers 容错：value toString
+      headers: _parseHeaders(map['headers']),
+
+      // ✅ fixed_params 容错 + 兼容
+      fixedParams: _parseMapDyn(fixed),
 
       apiKey: map['api_key'],
       apiKeyName: map['api_key_name'],
-      apiKeyIn: map['api_key_in'] ?? 'query',
-      apiKeyPrefix: map['api_key_prefix'] ?? '',
 
-      filters: (map['filters'] as List? ?? [])
-          .map((e) => SourceFilter.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList(),
+      // ✅ apiKeyIn 收敛
+      apiKeyIn: _normalizeApiKeyIn(map['api_key_in']),
+      apiKeyPrefix: (map['api_key_prefix'] ?? '').toString(),
 
-      responseType: map['type'] ?? 'json',
-      paramPage: map['params']?['page'] ?? 'page',
-      paramKeyword: map['params']?['keyword'] ?? 'q',
+      filters: parsedFilters,
 
-      listPath: map['parser']?['list'] ?? r'$',
-      idPath: map['parser']?['id'] ?? 'id',
-      thumbPath: map['parser']?['thumb'] ?? 'url',
-      fullPath: map['parser']?['full'] ?? 'url',
-      widthPath: map['parser']?['width'],
-      heightPath: map['parser']?['height'],
-      imagePrefix: map['parser']?['image_prefix'],
-      gradePath: map['parser']?['grade'],
+      // ✅ type 收敛 + 兼容
+      responseType: _normalizeResponseType(type),
+
+      // ✅ params 里允许 ''（显式禁用），所以这里用 toString 保留空串
+      paramPage: (params['page'] ?? 'page').toString(),
+      paramKeyword: (params['keyword'] ?? 'q').toString(),
+
+      // ✅ parser 同理
+      listPath: (parser['list'] ?? r'$').toString(),
+      idPath: (parser['id'] ?? 'id').toString(),
+      thumbPath: (parser['thumb'] ?? 'url').toString(),
+      fullPath: (parser['full'] ?? 'url').toString(),
+      widthPath: parser['width']?.toString(),
+      heightPath: parser['height']?.toString(),
+      imagePrefix: parser['image_prefix']?.toString(),
+      gradePath: parser['grade']?.toString(),
 
       keywordRequired: map['keyword_required'] ?? false,
-      defaultKeyword: map['default_keyword'],
+      defaultKeyword: map['default_keyword']?.toString(),
     );
   }
 
@@ -150,16 +218,41 @@ class SourceFilter {
     required this.options,
   });
 
+  static String _normalizeType(dynamic v) {
+    final s = (v ?? '').toString().toLowerCase().trim();
+    return (s == 'checklist') ? 'checklist' : 'radio';
+  }
+
+  static String _normalizeEncode(dynamic v) {
+    final s = (v ?? '').toString().toLowerCase().trim();
+    if (s == 'repeat') return 'repeat';
+    if (s == 'merge') return 'merge';
+    return 'join';
+  }
+
   factory SourceFilter.fromJson(Map<String, dynamic> json) {
+    final rawOptions = json['options'];
+    final List<FilterOption> parsed = [];
+
+    if (rawOptions is List) {
+      for (final e in rawOptions) {
+        if (e is Map) {
+          try {
+            parsed.add(FilterOption.fromJson(Map<String, dynamic>.from(e)));
+          } catch (_) {
+            // skip bad option
+          }
+        }
+      }
+    }
+
     return SourceFilter(
-      key: json['key'] ?? '',
-      name: json['name'] ?? '',
-      type: json['type'] ?? 'radio',
-      separator: json['separator'] ?? ',',
-      encode: json['encode'] ?? 'join',
-      options: (json['options'] as List? ?? [])
-          .map((e) => FilterOption.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList(),
+      key: (json['key'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      type: _normalizeType(json['type']),
+      separator: (json['separator'] ?? ',').toString(),
+      encode: _normalizeEncode(json['encode']),
+      options: parsed,
     );
   }
 
@@ -186,8 +279,8 @@ class FilterOption {
 
   factory FilterOption.fromJson(Map<String, dynamic> json) {
     return FilterOption(
-      name: json['name'] ?? '',
-      value: json['value'] ?? '',
+      name: (json['name'] ?? '').toString(),
+      value: (json['value'] ?? '').toString(),
     );
   }
 
