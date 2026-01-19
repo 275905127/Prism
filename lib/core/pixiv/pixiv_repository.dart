@@ -1,6 +1,8 @@
 // lib/core/pixiv/pixiv_repository.dart
 import 'dart:async';
 
+import 'package:dio/dio.dart';
+
 import '../models/uni_wallpaper.dart';
 import '../utils/app_log.dart';
 import 'pixiv_client.dart';
@@ -15,11 +17,16 @@ import 'pixiv_client.dart';
 /// - 搜索接口给的是缩略图 url（square1200）
 /// - 详情/下载要拿 /ajax/illust/{id}/pages 才有 regular/original
 /// - i.pximg.net 图片一般需要 Referer: https://www.pixiv.net/
+///
+/// ✅ 改动：支持注入 Dio（由 WallpaperService 统一管理网络策略）
 class PixivRepository {
   PixivRepository({
     String? cookie,
     PixivClient? client,
-  }) : _client = client ?? PixivClient(cookie: cookie);
+
+    /// ✅ 注入：用于统一出口（建议传“Pixiv 专用 Dio”，并共享拦截器/代理配置）
+    Dio? dio,
+  }) : _client = client ?? PixivClient(dio: dio, cookie: cookie);
 
   final PixivClient _client;
 
@@ -33,6 +40,9 @@ class PixivRepository {
     } catch (_) {}
     return false;
   }
+
+  /// （可选）外部更新 Cookie
+  void setCookie(String? cookie) => _client.setCookie(cookie);
 
   /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
@@ -116,9 +126,7 @@ class PixivRepository {
         final grade = _gradeFromRestrict(b.xRestrict);
 
         try {
-          final pages = await _client
-              .getIllustPages(b.id)
-              .timeout(timeoutPerItem);
+          final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
 
           if (pages.isNotEmpty) {
             final p0 = pages.first;
