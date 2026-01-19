@@ -4,7 +4,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 
 import '../models/uni_wallpaper.dart';
-import '../utils/app_log.dart';
+import '../utils/prism_logger.dart';
 import 'pixiv_client.dart';
 
 /// Pixiv 专用仓库（不走 RuleEngine）
@@ -18,7 +18,8 @@ import 'pixiv_client.dart';
 /// - 详情/下载要拿 /ajax/illust/{id}/pages 才有 regular/original
 /// - i.pximg.net 图片一般需要 Referer: https://www.pixiv.net/
 ///
-/// ✅ 改动：支持注入 Dio（由 WallpaperService 统一管理网络策略）
+/// ✅ 支持注入 Dio（由 WallpaperService 统一管理网络策略）
+/// ✅ 支持注入 Logger（不再直接依赖 AppLog）
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -26,9 +27,14 @@ class PixivRepository {
 
     /// ✅ 注入：用于统一出口（建议传“Pixiv 专用 Dio”，并共享拦截器/代理配置）
     Dio? dio,
-  }) : _client = client ?? PixivClient(dio: dio, cookie: cookie);
+
+    /// ✅ 注入：统一日志出口
+    PrismLogger? logger,
+  })  : _client = client ?? PixivClient(dio: dio, cookie: cookie),
+        _logger = logger;
 
   final PixivClient _client;
+  final PrismLogger? _logger;
 
   static const String kRuleId = 'pixiv_search_ajax';
 
@@ -60,9 +66,9 @@ class PixivRepository {
     if (q.isEmpty) return const [];
 
     // 1) 先搜（快速拿到缩略图 + id）
-    AppLog.I.add('REQ pixiv_search_ajax q="$q" page=$page');
+    _logger?.log('REQ pixiv_search_ajax q="$q" page=$page');
     final briefs = await _client.searchArtworks(word: q, page: page);
-    AppLog.I.add('RESP pixiv_search_ajax count=${briefs.length}');
+    _logger?.log('RESP pixiv_search_ajax count=${briefs.length}');
 
     if (briefs.isEmpty) return const [];
 
@@ -138,7 +144,7 @@ class PixivRepository {
           }
         } catch (e) {
           // 不要炸主流程：能显示 thumb 就够了
-          AppLog.I.add('pixiv pages fail id=${b.id} err=$e');
+          _logger?.log('pixiv pages fail id=${b.id} err=$e');
         }
 
         results[idx] = _PixivEnriched(
