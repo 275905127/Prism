@@ -132,8 +132,10 @@ class RuleEngine {
       if (rule.responseType == 'random') {
         return await _fetchRandomMode(rule, params, reqHeaders);
       } else {
+      if (rule.paramPage.isNotEmpty) {
         params[rule.paramPage] = page;
-        return await _fetchJsonMode(rule, params, reqHeaders);
+      }
+      return await _fetchJsonMode(rule, params, reqHeaders);
       }
     } catch (e) {
       // ignore: avoid_print
