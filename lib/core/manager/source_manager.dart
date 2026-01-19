@@ -77,6 +77,55 @@ class SourceManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// ✅ 更新某条规则的 headers（不可变写法：toJson -> 改 -> fromJson）
+  Future<void> updateRuleHeaders(String ruleId, Map<String, String>? headers) async {
+    if (_rules.isEmpty) return;
+
+    final idx = _rules.indexWhere((r) => r.id == ruleId);
+    if (idx < 0) return;
+
+    final old = _rules[idx];
+    final m = Map<String, dynamic>.from(old.toJson());
+
+    // headers 允许为 null（表示清空）
+    m['headers'] = headers;
+
+    final updated = SourceRule.fromJson(m);
+
+    _rules[idx] = updated;
+    if (_activeRule?.id == ruleId) {
+      _activeRule = updated;
+    }
+
+    await _save();
+    notifyListeners();
+  }
+
+  /// ✅ 更新单个 header（如 Cookie），value 为空则移除该 key
+  Future<void> updateRuleHeader(String ruleId, String key, String? value) async {
+    if (key.trim().isEmpty) return;
+
+    final idx = _rules.indexWhere((r) => r.id == ruleId);
+    if (idx < 0) return;
+
+    final old = _rules[idx];
+    final h = <String, String>{...?(old.headers)};
+
+    final v = value?.trim() ?? '';
+    if (v.isEmpty) {
+      h.remove(key);
+      // 顺手把大小写变体也清掉，避免重复
+      if (key.toLowerCase() == 'cookie') {
+        h.remove('cookie');
+        h.remove('Cookie');
+      }
+    } else {
+      h[key] = v;
+    }
+
+    await updateRuleHeaders(ruleId, h.isEmpty ? null : h);
+  }
+
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
 
