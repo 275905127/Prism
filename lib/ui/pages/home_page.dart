@@ -235,7 +235,7 @@ class _HomePageState extends State<HomePage> {
 
     Widget imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
-      httpHeaders: context.read<SourceManager>().activeRule?.headers,
+      httpHeaders: context.read<SourceManager>().activeRule?.buildRequestHeaders(),
       fit: BoxFit.fitWidth, 
       placeholder: (c, u) => Container(
         color: Colors.grey[100], 
