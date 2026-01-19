@@ -84,13 +84,18 @@ class PixivRepository {
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
 
+      // ✅ 详情与下载统一用 original（最高清）
+      // 兜底：original 失败则用 regular，再兜底 thumb（保证至少能显示）
+      final best = e.originalUrl.isNotEmpty
+          ? e.originalUrl
+          : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
+
       out.add(
         UniWallpaper(
           id: e.id,
           sourceId: 'pixiv',
           thumbUrl: e.thumbUrl,
-          // ✅ fullUrl 用 regular（最稳），original 留作未来下载/高清开关
-          fullUrl: e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl,
+          fullUrl: best,
           width: e.width.toDouble(),
           height: e.height.toDouble(),
           grade: e.grade,
@@ -205,10 +210,10 @@ class _PixivEnriched {
   final String id;
   final String thumbUrl;
 
-  /// Pixiv pages 接口给的 regular（推荐用于详情展示）
+  /// Pixiv pages 接口给的 regular（推荐用于详情展示的备选）
   final String regularUrl;
 
-  /// Pixiv pages 接口给的 original（用于下载/高清模式）
+  /// Pixiv pages 接口给的 original（用于详情/下载）
   final String originalUrl;
 
   final int width;
