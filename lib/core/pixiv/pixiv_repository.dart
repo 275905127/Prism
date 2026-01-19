@@ -13,6 +13,7 @@ import 'package:dio/dio.dart';
 
 import '../models/uni_wallpaper.dart';
 import '../utils/app_log.dart';
+import 'pixiv_client.dart';
 
 class PixivRepository {
   PixivRepository({
