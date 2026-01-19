@@ -1,3 +1,4 @@
+// lib/core/engine/rule_engine.dart
 import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
@@ -73,8 +74,13 @@ class RuleEngine {
 
   Map<String, String> _maskHeaders(Map<String, String> headers) {
     final m = Map<String, String>.from(headers);
+
+    // Authorization / apikey 之类的都给你打码，别在手机上裸奔
     if (m.containsKey('Authorization')) {
       m['Authorization'] = _mask(m['Authorization']!);
+    }
+    if (m.containsKey('apikey')) {
+      m['apikey'] = _mask(m['apikey']!);
     }
     return m;
   }
@@ -98,6 +104,26 @@ class RuleEngine {
     if (s.isNotEmpty) {
       AppLog.I.add('    body=${s.length > 400 ? s.substring(0, 400) + '...' : s}');
     }
+  }
+
+  // ---------- 稳定 ID 兜底（关键） ----------
+  // 你的分页去重、到底判断都靠 id。id 不稳定就是必炸。
+  String _stableId(SourceRule rule, dynamic item, String thumb, String full) {
+    try {
+      final raw = _getValue(rule.idPath, item);
+      final s = raw?.toString().trim();
+      if (s != null && s.isNotEmpty) return s;
+    } catch (_) {
+      // ignore
+    }
+
+    final f = full.trim();
+    if (f.isNotEmpty) return f;
+
+    final t = thumb.trim();
+    if (t.isNotEmpty) return t;
+
+    return DateTime.now().millisecondsSinceEpoch.toString();
   }
 
   // ---------- 对外入口 ----------
@@ -135,12 +161,11 @@ class RuleEngine {
       filterParams.forEach((key, value) {
         if (value is List) {
           SourceFilter? filterRule;
-          if (rule.filters != null) {
-            for (final f in rule.filters!) {
-              if (f.key == key) {
-                filterRule = f;
-                break;
-              }
+          // ✅ 你模型里 filters 是 List 非空，别再写 rule.filters != null 这种废话
+          for (final f in rule.filters) {
+            if (f.key == key) {
+              filterRule = f;
+              break;
             }
           }
 
@@ -160,24 +185,24 @@ class RuleEngine {
       });
     }
 
-    // ✅✅✅ 关键字策略（你缺的就是这一段）✅✅✅
+    // ✅✅✅ 关键字策略：用户不搜 -> defaultKeyword；keywordRequired 则强制
     String? finalQuery = query;
 
-    // 1) 用户没搜：用 defaultKeyword
     if ((finalQuery == null || finalQuery.trim().isEmpty) &&
         rule.defaultKeyword != null &&
         rule.defaultKeyword!.trim().isNotEmpty) {
       finalQuery = rule.defaultKeyword;
     }
 
-    // 2) keywordRequired = true 但最终还是没有关键词：直接报错，不发请求
     if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
       throw Exception("该图源需要关键词：query 为空（请先搜索或在规则里设置 default_keyword）");
     }
 
-    // 3) 有关键词：注入到 params
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
-      params[rule.paramKeyword] = finalQuery.trim();
+      // paramKeyword 可以是 '' 来禁用
+      if (rule.paramKeyword.isNotEmpty) {
+        params[rule.paramKeyword] = finalQuery.trim();
+      }
     }
     // ✅✅✅ 关键字策略结束 ✅✅✅
 
@@ -185,6 +210,7 @@ class RuleEngine {
       if (rule.responseType == 'random') {
         return await _fetchRandomMode(rule, params, reqHeaders);
       } else {
+        // paramPage 可以是 '' 来禁用
         if (rule.paramPage.isNotEmpty) {
           params[rule.paramPage] = page;
         }
@@ -279,7 +305,7 @@ class RuleEngine {
       if (url != null && url.startsWith('http')) {
         if (!wallpapers.any((w) => w.fullUrl == url)) {
           wallpapers.add(UniWallpaper(
-            id: url.hashCode.toString(),
+            id: url, // ✅ 直接用 finalUrl 做 id（稳定、去重靠谱）
             sourceId: rule.id,
             thumbUrl: url,
             fullUrl: url,
@@ -294,7 +320,7 @@ class RuleEngine {
     return wallpapers;
   }
 
-  // ---------- json 解析（原样） ----------
+  // ---------- json 解析（稳定 id + 复用） ----------
 
   List<UniWallpaper> _parseJsonToWallpapers(SourceRule rule, dynamic jsonMap) {
     final listPath = JsonPath(rule.listPath);
@@ -304,9 +330,9 @@ class RuleEngine {
 
     final List list = match.value as List;
 
-    return list.map((item) {
-      final id = _getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
+    final out = <UniWallpaper>[];
 
+    for (final item in list) {
       String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
       String full = _getValue<String>(rule.fullPath, item) ?? thumb;
 
@@ -315,20 +341,27 @@ class RuleEngine {
         if (!full.startsWith('http')) full = rule.imagePrefix! + full;
       }
 
+      final id = _stableId(rule, item, thumb, full);
+
+      // 没链接就别凑数
+      if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
+
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
       final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
       final grade = _getValue<String>(rule.gradePath ?? '', item);
 
-      return UniWallpaper(
-        id: id.toString(),
+      out.add(UniWallpaper(
+        id: id,
         sourceId: rule.id,
         thumbUrl: thumb,
         fullUrl: full,
         width: width,
         height: height,
         grade: grade,
-      );
-    }).toList();
+      ));
+    }
+
+    return out;
   }
 
   // ---------- json 单次请求（加日志 + 4xx body） ----------
