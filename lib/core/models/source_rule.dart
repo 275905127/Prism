@@ -288,3 +288,15 @@ class FilterOption {
     return {'name': name, 'value': value};
   }
 }
+
+  Map<String, String> buildRequestHeaders() {
+  final h = <String, String>{};
+  if (headers != null) h.addAll(headers!);
+
+  final k = apiKey;
+  if (k != null && k.isNotEmpty && apiKeyIn == 'header') {
+    final keyName = (apiKeyName == null || apiKeyName!.isEmpty) ? 'apikey' : apiKeyName!;
+    h[keyName] = '$apiKeyPrefix$k';
+  }
+  return h;
+}
