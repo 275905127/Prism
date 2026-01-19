@@ -35,6 +35,17 @@ class WallpaperService {
   /// ✅ Pixiv 仓库
   late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio, logger: _logger);
 
+  /// ✅ Pixiv Cookie（来自 UI 持久化/内存注入）
+  String? _pixivCookie;
+
+  /// ✅ UI 化入口：设置/清除 Pixiv Cookie（会立即影响 Ajax + i.pximg.net 图片）
+  void setPixivCookie(String? cookie) {
+    final c = cookie?.trim() ?? '';
+    _pixivCookie = c.isEmpty ? null : c;
+    _pixivRepo.setCookie(_pixivCookie);
+    _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
+  }
+
   /// 核心方法：获取壁纸列表
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
@@ -58,14 +69,30 @@ class WallpaperService {
   }
 
   /// ✅ Pixiv：同步规则里的 Cookie → PixivClient
+  /// 规则里的 Cookie 优先级更高（用于“规则自带 Cookie”场景）
   void _syncPixivCookieFromRule(SourceRule rule) {
     final headers = rule.headers;
-    if (headers == null) return;
+    if (headers == null) {
+      // 如果规则没有 headers，不动 UI 注入的 cookie
+      if (_pixivCookie != null) {
+        _pixivRepo.setCookie(_pixivCookie);
+      }
+      return;
+    }
 
-    final cookie = headers['Cookie'] ?? headers['cookie'];
-    if (cookie != null && cookie.trim().isNotEmpty) {
-      _pixivRepo.setCookie(cookie.trim());
+    final cookie = (headers['Cookie'] ?? headers['cookie'])?.trim() ?? '';
+    if (cookie.isNotEmpty) {
+      // 规则 Cookie 覆盖 UI Cookie
+      _pixivRepo.setCookie(cookie);
       _logger.log('Pixiv cookie injected from rule');
+      return;
+    }
+
+    // 规则没有 Cookie：回退 UI Cookie；若 UI 也没有，则清掉，避免残留
+    if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
+      _pixivRepo.setCookie(_pixivCookie);
+    } else {
+      _pixivRepo.setCookie(null);
     }
   }
 
@@ -91,6 +118,8 @@ class WallpaperService {
     if (rule == null) return null;
 
     if (_pixivRepo.supports(rule)) {
+      // ✅ 关键：即使还没 fetch，也先同步一次 Cookie，避免网格先渲染导致 403
+      _syncPixivCookieFromRule(rule);
       return _pixivRepo.buildImageHeaders();
     }
 
