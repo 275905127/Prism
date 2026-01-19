@@ -11,7 +11,7 @@ import '../pixiv/pixiv_repository.dart';
 /// 桥梁层：统一管理所有图源引擎的调用
 /// UI 只需与此类交互，无需关心底层是 RuleEngine 还是 PixivRepository
 class WallpaperService {
-  /// ✅ 统一网络出口：RuleEngine / 下载 都走同一个 Dio（后续拦截器/代理/重试统一放这里）
+  /// ✅ 通用网络出口（RuleEngine / 下载 等）
   final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -22,10 +22,14 @@ class WallpaperService {
     ),
   );
 
+  /// ✅ Pixiv 专用 Dio：必须有 Pixiv baseUrl，避免污染通用 Dio
+  late final Dio _pixivDio = _createPixivDioFrom(_dio);
+
   /// ✅ 通用引擎复用同一个 Dio（避免 RuleEngine 私有 Dio 绕开全局策略）
   late final RuleEngine _standardEngine = RuleEngine(dio: _dio);
 
-  final PixivRepository _pixivRepo = PixivRepository();
+  /// ✅ Pixiv 仓库复用 Pixiv 专用 Dio（但共享通用 Dio 的拦截器/adapter 策略）
+  late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio);
 
   /// 核心方法：获取壁纸列表
   /// 内部自动判断使用哪个引擎
@@ -137,5 +141,31 @@ class WallpaperService {
     } catch (_) {
       rethrow;
     }
+  }
+
+  /// ✅ 从通用 Dio 派生 Pixiv Dio：
+  /// - 共享 adapter（代理/证书/自定义 transport）
+  /// - 共享 interceptors（统一日志/重试/UA/鉴权注入等）
+  /// - 单独设置 Pixiv 的 baseUrl 与超时
+  static Dio _createPixivDioFrom(Dio base) {
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: 'https://www.pixiv.net',
+        connectTimeout: base.options.connectTimeout ?? const Duration(seconds: 15),
+        sendTimeout: base.options.sendTimeout ?? const Duration(seconds: 20),
+        receiveTimeout: base.options.receiveTimeout ?? const Duration(seconds: 25),
+        responseType: ResponseType.json,
+        validateStatus: base.options.validateStatus,
+      ),
+    );
+
+    // 共享 transport（非常关键：代理/抓包/证书策略通常在这里）
+    dio.httpClientAdapter = base.httpClientAdapter;
+
+    // 共享拦截器（复用同一实例，保证策略一致）
+    dio.interceptors.clear();
+    dio.interceptors.addAll(base.interceptors);
+
+    return dio;
   }
 }
