@@ -9,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/engine/rule_engine.dart';
 import '../../core/models/uni_wallpaper.dart';
+import '../../core/pixiv/pixiv_repository.dart';
+
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
 import 'log_page.dart';
@@ -24,6 +26,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final RuleEngine _engine = RuleEngine();
+  final PixivRepository _pixivRepo = PixivRepository();
+
   final ScrollController _scrollController = ScrollController();
 
   List<UniWallpaper> _wallpapers = [];
@@ -33,7 +37,6 @@ class _HomePageState extends State<HomePage> {
   bool _isScrolled = false;
 
   Map<String, dynamic> _currentFilters = {};
-
   String? _currentRuleId;
 
   @override
@@ -119,11 +122,18 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      final data = await _engine.fetch(
-        rule,
-        page: _page,
-        filterParams: _currentFilters,
-      );
+      // ✅ 路由：Pixiv 不支持“首页无关键词”拉列表
+      // 你要 Pixiv 就走搜索入口，不要在 HomePage 硬拉
+      List<UniWallpaper> data;
+      if (_pixivRepo.supports(rule)) {
+        data = [];
+      } else {
+        data = await _engine.fetch(
+          rule,
+          page: _page,
+          filterParams: _currentFilters,
+        );
+      }
 
       if (!mounted) return;
 
@@ -236,9 +246,9 @@ class _HomePageState extends State<HomePage> {
 
     final activeRule = context.read<SourceManager>().activeRule;
 
-    Widget imageWidget = CachedNetworkImage(
+    final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
-      // ✅ 关键：图片请求也要带 apiKey(header) ，否则 Unsplash 这类会 401/403/断图
+      // ✅ 不要再只用 rule.headers：必须用 buildRequestHeaders()
       httpHeaders: activeRule?.buildRequestHeaders(),
       fit: BoxFit.fitWidth,
       placeholder: (c, u) => Container(
@@ -252,7 +262,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    Widget content = Container(
+    final content = Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(kRadius),
@@ -291,9 +301,8 @@ class _HomePageState extends State<HomePage> {
 
     if (paper.aspectRatio > 0) {
       return AspectRatio(aspectRatio: paper.aspectRatio, child: content);
-    } else {
-      return content;
     }
+    return content;
   }
 
   @override
@@ -436,7 +445,6 @@ class _HomePageState extends State<HomePage> {
                         MaterialPageRoute(
                           builder: (_) => WallpaperDetailPage(
                             wallpaper: paper,
-                            // ✅ 详情页也要用 buildRequestHeaders，否则需要 Authorization 的源会裂
                             headers: activeRule?.buildRequestHeaders(),
                           ),
                         ),
