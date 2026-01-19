@@ -126,6 +126,14 @@ class PixivRepository {
     );
     _logger?.log('RESP pixiv_search_ajax count=${briefs.length}');
 
+    // ✅ 验证日志：用“前 3 个 id”判断排序/筛选是否真的生效（count 不可靠）
+    if (briefs.isNotEmpty) {
+      final first3 = briefs.take(3).map((e) => e.id).where((s) => s.isNotEmpty).toList(growable: false);
+      _logger?.log('pixiv verify order=$order first3=${first3.isEmpty ? "[]" : first3}');
+    } else {
+      _logger?.log('pixiv verify order=$order first3=[]');
+    }
+
     if (briefs.isEmpty) return const [];
 
     // ---------- 2) 并发补全 pages（拿 regular/original） ----------
