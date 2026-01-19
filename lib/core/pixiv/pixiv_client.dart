@@ -11,7 +11,7 @@ import 'package:dio/dio.dart';
 /// 2) 部分内容可能需要登录 Cookie（可选）
 /// 3) 这里只负责请求 Pixiv Ajax，不掺进 RuleEngine
 ///
-/// ✅ 改动：允许注入 Dio（由 WallpaperService 统一注入拦截器/代理/证书等网络策略）
+/// ✅ 允许注入 Dio（由 WallpaperService 统一注入拦截器/代理/证书等网络策略）
 /// ⚠️ 建议注入“Pixiv 专用 Dio”（baseUrl=Pixiv），避免污染通用 Dio 的 baseUrl/options
 class PixivClient {
   final Dio _dio;
@@ -33,6 +33,8 @@ class PixivClient {
       headers: _baseApiHeaders(cookie: cookie),
     );
   }
+
+  bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
   void setCookie(String? cookie) {
     _cookie = cookie;
