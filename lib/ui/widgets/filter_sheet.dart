@@ -1,6 +1,10 @@
 // lib/ui/widgets/filter_sheet.dart
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/manager/source_manager.dart';
 import '../../core/models/source_rule.dart';
+import '../../core/services/wallpaper_service.dart';
 
 class FilterSheet extends StatefulWidget {
   final List<SourceFilter> filters;
@@ -24,7 +28,6 @@ class _FilterSheetState extends State<FilterSheet> {
   @override
   void initState() {
     super.initState();
-    // 深拷贝：避免直接改引用
     _tempValues = <String, dynamic>{};
     widget.currentValues.forEach((key, value) {
       if (value is List) {
@@ -33,6 +36,44 @@ class _FilterSheetState extends State<FilterSheet> {
         _tempValues[key] = value;
       }
     });
+  }
+
+  bool _isPixivActiveSource(BuildContext context) {
+    final activeRule = context.read<SourceManager>().activeRule;
+    return context.read<WallpaperService>().isPixivRule(activeRule);
+  }
+
+  bool _hasPixivCookie(BuildContext context) {
+    return context.read<WallpaperService>().hasPixivCookie;
+  }
+
+  bool _isOptionLockedForPixiv({
+    required String filterKey,
+    required String optionValue,
+    required bool hasCookie,
+  }) {
+    if (hasCookie) return false;
+
+    final k = filterKey.trim().toLowerCase();
+    final v = optionValue.trim().toLowerCase();
+
+    // 按 Pixiv 官方形态做两档：
+    // - 热门排序：需登录
+    if (k == 'order' && v.contains('popular')) return true;
+
+    // - R-18：通常需登录（且未登录常导致空/失败/不可见）
+    if (k == 'mode' && v == 'r18') return true;
+
+    return false;
+  }
+
+  void _toastLocked() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('该筛选项需要设置 Pixiv Cookie 才能使用'),
+        duration: Duration(milliseconds: 1200),
+      ),
+    );
   }
 
   @override
@@ -98,6 +139,9 @@ class _FilterSheetState extends State<FilterSheet> {
   Widget _buildFilterGroup(SourceFilter filter) {
     final bool isMulti = filter.type == 'checklist';
 
+    final bool isPixiv = _isPixivActiveSource(context);
+    final bool hasCookie = _hasPixivCookie(context);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -112,7 +156,14 @@ class _FilterSheetState extends State<FilterSheet> {
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(4)),
                   child: const Text("多选", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                )
+                ),
+              if (isPixiv && !hasCookie && (filter.key.toLowerCase() == 'order' || filter.key.toLowerCase() == 'mode'))
+                Container(
+                  margin: const EdgeInsets.only(left: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(4)),
+                  child: const Text("部分需登录", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                ),
             ],
           ),
         ),
@@ -125,55 +176,80 @@ class _FilterSheetState extends State<FilterSheet> {
 
               bool isSelected = false;
               if (isMulti) {
-                // 多选：强制成 List<String>，避免 Object/dynamic 漂移
-                final List<String> list = (val is List)
-                    ? val.map((e) => e.toString()).toList()
-                    : <String>[];
+                final List<String> list = (val is List) ? val.map((e) => e.toString()).toList() : <String>[];
                 isSelected = list.contains(option.value);
               } else {
-                // 单选：统一按字符串比较更稳
                 isSelected = (val?.toString() ?? '') == option.value;
               }
 
+              final bool locked = isPixiv
+                  ? _isOptionLockedForPixiv(
+                      filterKey: filter.key,
+                      optionValue: option.value,
+                      hasCookie: hasCookie,
+                    )
+                  : false;
+
+              // 置灰：禁用 onSelected，但保留点击提示
+              final FilterChip chip = FilterChip(
+                label: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(option.name),
+                    if (locked) ...[
+                      const SizedBox(width: 6),
+                      const Icon(Icons.lock_outline, size: 14, color: Colors.grey),
+                    ],
+                  ],
+                ),
+                selected: isSelected,
+                selectedColor: Colors.black,
+                checkmarkColor: Colors.white,
+                labelStyle: TextStyle(
+                  color: locked
+                      ? Colors.grey
+                      : (isSelected ? Colors.white : Colors.black),
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                ),
+                backgroundColor: Colors.grey[100],
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  side: BorderSide.none,
+                ),
+                onSelected: locked
+                    ? null
+                    : (bool selected) {
+                        setState(() {
+                          if (isMulti) {
+                            final List<String> list =
+                                (val is List) ? val.map((e) => e.toString()).toList() : <String>[];
+
+                            if (selected) {
+                              if (!list.contains(option.value)) list.add(option.value);
+                            } else {
+                              list.remove(option.value);
+                            }
+                            _tempValues[filter.key] = list;
+                          } else {
+                            if (selected) {
+                              _tempValues[filter.key] = option.value;
+                            } else {
+                              _tempValues.remove(filter.key);
+                            }
+                          }
+                        });
+                      },
+              );
+
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
-                child: FilterChip(
-                  label: Text(option.name),
-                  selected: isSelected,
-                  selectedColor: Colors.black,
-                  checkmarkColor: Colors.white,
-                  labelStyle: TextStyle(
-                    color: isSelected ? Colors.white : Colors.black,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: locked ? _toastLocked : null,
+                  child: Opacity(
+                    opacity: locked ? 0.55 : 1.0,
+                    child: chip,
                   ),
-                  backgroundColor: Colors.grey[100],
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    side: BorderSide.none,
-                  ),
-                  onSelected: (bool selected) {
-                    setState(() {
-                      if (isMulti) {
-                        final List<String> list = (val is List)
-                            ? val.map((e) => e.toString()).toList()
-                            : <String>[];
-
-                        if (selected) {
-                          if (!list.contains(option.value)) list.add(option.value);
-                        } else {
-                          list.remove(option.value);
-                        }
-                        _tempValues[filter.key] = list;
-                      } else {
-                        if (selected) {
-                          _tempValues[filter.key] = option.value;
-                        } else {
-                          // 再点一次取消选择（可选行为，留着更通用）
-                          _tempValues.remove(filter.key);
-                        }
-                      }
-                    });
-                  },
                 ),
               );
             }).toList(),
