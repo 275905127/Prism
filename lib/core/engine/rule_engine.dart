@@ -93,7 +93,7 @@ class RuleEngine {
   void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
     AppLog.I.add('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
     final s = (data == null) ? '' : data.toString();
-    AppLog.I.add('    body=${s.length > 400 ? s.substring(0, 400) + '...' : s}');
+    AppLog.I.add('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
   }
 
   void _logErr(SourceRule rule, int? status, String realUrl, Object e, dynamic data) {
@@ -101,11 +101,12 @@ class RuleEngine {
     AppLog.I.add('    err=$e');
     final s = (data == null) ? '' : data.toString();
     if (s.isNotEmpty) {
-      AppLog.I.add('    body=${s.length > 400 ? s.substring(0, 400) + '...' : s}');
+      AppLog.I.add('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
     }
   }
 
   // ---------- cursor key ----------
+
   String _cursorKey(SourceRule r, String? q, Map<String, dynamic>? f) {
     return '${r.id}|${q ?? ''}|${jsonEncode(f ?? {})}';
   }
@@ -136,6 +137,22 @@ class RuleEngine {
     if (t.isNotEmpty) return t;
 
     return DateTime.now().millisecondsSinceEpoch.toString();
+  }
+
+  // ---------- URL template ----------
+  // 支持 rule.url 里写 {keyword}，用于 Pixiv 这种 keyword 在 path 的接口
+  String _buildRequestUrl(SourceRule rule, String? finalQuery) {
+    String u = rule.url;
+
+    if (!u.contains('{keyword}')) return u;
+
+    final kw = (finalQuery ?? '').trim();
+    if (kw.isEmpty) {
+      // 这里不“猜 default”，default 已经在 fetch() 里处理过了
+      throw Exception("该图源需要关键词：keyword 为空（url 含 {keyword}）");
+    }
+
+    return u.replaceAll('{keyword}', Uri.encodeComponent(kw));
   }
 
   // ---------- 对外入口 ----------
@@ -189,7 +206,7 @@ class RuleEngine {
             params[key] = value.join(separator);
           }
         } else {
-          // ✅ 关键：空字符串参数不该发（waifu.im included_tags= 会 400）
+          // ✅ 空字符串参数不该发（waifu.im included_tags= 会 400）
           if (value is String && value.trim().isEmpty) return;
           params[key] = value;
         }
@@ -216,6 +233,9 @@ class RuleEngine {
     }
     // ✅✅✅ 关键字策略结束
 
+    // ✅ URL 占位符（Pixiv 等：keyword 在 path）
+    final String requestUrl = _buildRequestUrl(rule, finalQuery);
+
     // ✅✅✅ 分页策略（page / offset / cursor）
     if (rule.responseType != 'random') {
       if (rule.paramPage.isNotEmpty) {
@@ -240,18 +260,19 @@ class RuleEngine {
 
     try {
       if (rule.responseType == 'random') {
-        return await _fetchRandomMode(rule, params, reqHeaders);
+        return await _fetchRandomMode(rule, requestUrl, params, reqHeaders);
       } else {
         if (mergeMulti.isEmpty) {
           return await _fetchJsonMode(
             rule,
+            requestUrl,
             params,
             reqHeaders,
             finalQuery: finalQuery,
             filterParams: filterParams,
           );
         }
-        return await _fetchJsonModeMerge(rule, params, reqHeaders, mergeMulti);
+        return await _fetchJsonModeMerge(rule, requestUrl, params, reqHeaders, mergeMulti);
       }
     } catch (e) {
       AppLog.I.add('Engine Error: $e');
@@ -263,13 +284,14 @@ class RuleEngine {
 
   Future<List<UniWallpaper>> _fetchRandomMode(
     SourceRule rule,
+    String requestUrl,
     Map<String, dynamic> params,
     Map<String, String> headers,
   ) async {
     const int batchSize = 6;
     const int delayMs = 300;
 
-    _logReq(rule, rule.url, params, headers);
+    _logReq(rule, requestUrl, params, headers);
 
     final futures = List.generate(batchSize, (index) async {
       await Future.delayed(Duration(milliseconds: index * delayMs));
@@ -283,7 +305,7 @@ class RuleEngine {
 
         try {
           final response = await _dio.head(
-            rule.url,
+            requestUrl,
             queryParameters: requestParams,
             options: Options(
               headers: headers,
@@ -294,10 +316,10 @@ class RuleEngine {
             ),
           );
           finalUrl = response.realUri.toString();
-        } catch (e) {
+        } catch (_) {
           try {
             final response = await _dio.get(
-              rule.url,
+              requestUrl,
               queryParameters: requestParams,
               options: Options(
                 headers: headers,
@@ -334,7 +356,7 @@ class RuleEngine {
     final results = await Future.wait(futures);
 
     final List<UniWallpaper> wallpapers = [];
-    for (var url in results) {
+    for (final url in results) {
       if (url != null && url.startsWith('http')) {
         if (!wallpapers.any((w) => w.fullUrl == url)) {
           wallpapers.add(UniWallpaper(
@@ -399,12 +421,13 @@ class RuleEngine {
 
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
+    String requestUrl,
     Map<String, dynamic> params,
     Map<String, String> headers, {
     required String? finalQuery,
     required Map<String, dynamic>? filterParams,
   }) async {
-    _logReq(rule, rule.url, params, headers);
+    _logReq(rule, requestUrl, params, headers);
 
     // ✅ 只对这个图源打印 Smithsonian 的结构（避免“乱码式刷屏”）
     const String kDebugRuleId = 'smithsonian_open_access_images';
@@ -422,7 +445,7 @@ class RuleEngine {
 
     try {
       final response = await _dio.get(
-        rule.url,
+        requestUrl,
         queryParameters: params,
         options: Options(
           headers: headers,
@@ -448,9 +471,10 @@ class RuleEngine {
       // ✅ 定点 debug：只打印第一条的 media 结构（帮你写配置用）
       if (dbg) {
         try {
-          final media0 = JsonPath(
-            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]'
-          ).read(response.data).firstOrNull?.value;
+          final media0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]')
+              .read(response.data)
+              .firstOrNull
+              ?.value;
           AppLog.I.add('DBG ${rule.id} media0=${safeJson(media0)}');
         } catch (e) {
           AppLog.I.add('DBG ${rule.id} media0 ERR=$e');
@@ -458,7 +482,7 @@ class RuleEngine {
 
         try {
           final content0 = JsonPath(
-            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content'
+            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content',
           ).read(response.data).firstOrNull?.value;
           AppLog.I.add('DBG ${rule.id} media0.content=${safeJson(content0)}');
         } catch (e) {
@@ -467,7 +491,7 @@ class RuleEngine {
 
         try {
           final thumb0 = JsonPath(
-            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail'
+            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail',
           ).read(response.data).firstOrNull?.value;
           AppLog.I.add('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
         } catch (e) {
@@ -492,7 +516,7 @@ class RuleEngine {
       _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
       rethrow;
     } catch (e) {
-      _logErr(rule, null, rule.url, e, null);
+      _logErr(rule, null, requestUrl, e, null);
       rethrow;
     }
   }
@@ -502,6 +526,7 @@ class RuleEngine {
 
   Future<List<UniWallpaper>> _fetchJsonModeMerge(
     SourceRule rule,
+    String requestUrl,
     Map<String, dynamic> baseParams,
     Map<String, String> headers,
     Map<String, List<String>> mergeMulti,
@@ -526,11 +551,11 @@ class RuleEngine {
     final Set<String> seen = {};
 
     for (final ps in paramSets) {
-      _logReq(rule, rule.url, ps, headers);
+      _logReq(rule, requestUrl, ps, headers);
 
       try {
         final resp = await _dio.get(
-          rule.url,
+          requestUrl,
           queryParameters: ps,
           options: Options(
             headers: headers,
@@ -561,7 +586,7 @@ class RuleEngine {
         _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
         rethrow;
       } catch (e) {
-        _logErr(rule, null, rule.url, e, null);
+        _logErr(rule, null, requestUrl, e, null);
         rethrow;
       }
     }
