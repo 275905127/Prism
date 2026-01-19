@@ -1,3 +1,4 @@
+// lib/core/pixiv/pixiv_client.dart
 import 'package:dio/dio.dart';
 
 /// Pixiv Ajax API Client（无需 key）
@@ -9,6 +10,9 @@ import 'package:dio/dio.dart';
 /// 1) i.pximg.net 图片通常要求 Referer: https://www.pixiv.net/
 /// 2) 部分内容可能需要登录 Cookie（可选）
 /// 3) 这里只负责请求 Pixiv Ajax，不掺进 RuleEngine
+///
+/// ✅ 改动：允许注入 Dio（由 WallpaperService 统一注入拦截器/代理/证书等网络策略）
+/// ⚠️ 建议注入“Pixiv 专用 Dio”（baseUrl=Pixiv），避免污染通用 Dio 的 baseUrl/options
 class PixivClient {
   final Dio _dio;
   String? _cookie;
@@ -18,6 +22,7 @@ class PixivClient {
     String? cookie,
   })  : _dio = dio ?? Dio(),
         _cookie = cookie {
+    // ✅ 注意：这里会设置 baseUrl 与超时，适合“Pixiv 专用 Dio”
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 10),
