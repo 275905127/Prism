@@ -10,22 +10,22 @@ class SourceRule {
 
   final String? apiKey;
   final String? apiKeyName;
-  final String apiKeyIn;      // 'query' | 'header'
-  final String apiKeyPrefix;  // e.g. 'Bearer '
+  final String apiKeyIn; // 'query' | 'header'
+  final String apiKeyPrefix; // e.g. 'Bearer '
 
   final List<SourceFilter> filters;
 
-  final String responseType;  // 'json' | 'random'
-  final String paramPage;     // page param name, can be '' to disable
-  final String paramKeyword;  // keyword param name, can be '' to disable
+  final String responseType; // 'json' | 'random'
+  final String paramPage; // page param name, can be '' to disable
+  final String paramKeyword; // keyword param name, can be '' to disable
 
   // ✅ 新增：分页模式
   // 'page'   : page=1,2,3...
   // 'offset' : paramPage = offset/start = (page-1)*pageSize
   // 'cursor' : paramPage = cursor/after，page>1 从上次响应读出来继续
-  final String pageMode;      // 'page' | 'offset' | 'cursor'
-  final int pageSize;         // offset 模式用；0 表示自动猜测（per_page/limit/rows/...)
-  final String? cursorPath;   // cursor 模式用：从响应里读下一页游标
+  final String pageMode; // 'page' | 'offset' | 'cursor'
+  final int pageSize; // offset 模式用；0 表示自动猜测（per_page/limit/rows/...)
+  final String? cursorPath; // cursor 模式用：从响应里读下一页游标
 
   final String listPath;
   final String idPath;
@@ -119,17 +119,13 @@ class SourceRule {
 
   factory SourceRule.fromJson(Map<String, dynamic> map) {
     // ✅ 兼容 fixed_params / fixedParams
-    final fixed = map.containsKey('fixed_params')
-        ? map['fixed_params']
-        : map['fixedParams'];
+    final fixed = map.containsKey('fixed_params') ? map['fixed_params'] : map['fixedParams'];
 
     // ✅ 兼容 type / responseType
     final type = map.containsKey('type') ? map['type'] : map['responseType'];
 
-    // ✅ 兼容 params = {} 不存在时
+    // ✅ 兼容 params / parser 不存在
     final params = (map['params'] is Map) ? map['params'] as Map : const {};
-
-    // ✅ 兼容 parser = {} 不存在时
     final parser = (map['parser'] is Map) ? map['parser'] as Map : const {};
 
     // ✅ 兼容 filters 脏数据（只接受 Map）
@@ -152,25 +148,18 @@ class SourceRule {
       name: map['name'] ?? '未命名图源',
       url: map['url'] ?? '',
 
-      // ✅ headers 容错：value toString
       headers: _parseHeaders(map['headers']),
-
-      // ✅ fixed_params 容错 + 兼容
       fixedParams: _parseMapDyn(fixed),
 
       apiKey: map['api_key'],
       apiKeyName: map['api_key_name'],
-
-      // ✅ apiKeyIn 收敛
       apiKeyIn: _normalizeApiKeyIn(map['api_key_in']),
       apiKeyPrefix: (map['api_key_prefix'] ?? '').toString(),
 
       filters: parsedFilters,
-
-      // ✅ type 收敛 + 兼容
       responseType: _normalizeResponseType(type),
 
-      // ✅ params 里允许 ''（显式禁用），所以这里用 toString 保留空串
+      // ✅ params 允许 ''（显式禁用）
       paramPage: (params['page'] ?? 'page').toString(),
       paramKeyword: (params['keyword'] ?? 'q').toString(),
 
@@ -179,7 +168,7 @@ class SourceRule {
       pageSize: _normalizeInt(map['page_size'], 0),
       cursorPath: map['cursor_path']?.toString(),
 
-      // ✅ parser 同理
+      // ✅ parser
       listPath: (parser['list'] ?? r'$').toString(),
       idPath: (parser['id'] ?? 'id').toString(),
       thumbPath: (parser['thumb'] ?? 'url').toString(),
@@ -194,33 +183,27 @@ class SourceRule {
     );
   }
 
-  /// ✅ 关键：给 SourceManager 存储用（r.toJson()）
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'name': name,
       'url': url,
       'type': responseType,
-
       'headers': headers,
       'fixed_params': fixedParams,
-
       'api_key': apiKey,
       'api_key_name': apiKeyName,
       'api_key_in': apiKeyIn,
       'api_key_prefix': apiKeyPrefix,
-
       'keyword_required': keywordRequired,
       'default_keyword': defaultKeyword,
-
       'filters': filters.map((e) => e.toJson()).toList(),
-
       'params': {
         'page': paramPage,
         'keyword': paramKeyword,
       },
 
-      // ✅ 新增：分页配置（不写也没事）
+      // ✅ 新增：分页配置
       'page_mode': pageMode,
       'page_size': pageSize,
       'cursor_path': cursorPath,
@@ -241,8 +224,8 @@ class SourceRule {
   /// 给图片加载用：把 rule.headers + apiKey(header 模式) 合并
   Map<String, String> buildRequestHeaders() {
     final h = <String, String>{
-      "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       ...?headers,
     };
 
@@ -258,9 +241,9 @@ class SourceRule {
 class SourceFilter {
   final String key;
   final String name;
-  final String type;       // 'radio' | 'checklist'
-  final String separator;  // join 时使用
-  final String encode;     // 'join' | 'repeat' | 'merge'
+  final String type; // 'radio' | 'checklist'
+  final String separator; // join 时使用
+  final String encode; // 'join' | 'repeat' | 'merge'
   final List<FilterOption> options;
 
   const SourceFilter({
