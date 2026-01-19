@@ -7,14 +7,18 @@ import 'package:json_path/json_path.dart';
 
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
-import '../utils/app_log.dart';
+import '../utils/prism_logger.dart';
 
 class RuleEngine {
   /// ✅ 允许注入 Dio：让 WallpaperService 统一网络出口（拦截器/代理/重试/证书/UA/超时等）
-  /// - 不传则内部自建一个默认 Dio（兼容旧用法）
-  RuleEngine({Dio? dio}) : _dio = dio ?? Dio();
+  /// ✅ 允许注入 Logger：核心层不再直接依赖 AppLog（UI 实现）
+  /// - 不传则内部自建默认 Dio（兼容旧用法）
+  RuleEngine({Dio? dio, PrismLogger? logger})
+      : _dio = dio ?? Dio(),
+        _logger = logger;
 
   final Dio _dio;
+  final PrismLogger? _logger;
 
   /// ✅ cursor 分页缓存：不同 query / filters 必须隔离
   final Map<String, dynamic> _cursorCache = {};
@@ -89,23 +93,23 @@ class RuleEngine {
   }
 
   void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
-    AppLog.I.add('REQ ${rule.id} GET $url');
-    AppLog.I.add('    params=$params');
-    AppLog.I.add('    headers=${_maskHeaders(headers)}');
+    _logger?.log('REQ ${rule.id} GET $url');
+    _logger?.log('    params=$params');
+    _logger?.log('    headers=${_maskHeaders(headers)}');
   }
 
   void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
-    AppLog.I.add('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
+    _logger?.log('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
     final s = (data == null) ? '' : data.toString();
-    AppLog.I.add('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+    _logger?.log('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
   }
 
   void _logErr(SourceRule rule, int? status, String realUrl, Object e, dynamic data) {
-    AppLog.I.add('ERR ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
-    AppLog.I.add('    err=$e');
+    _logger?.log('ERR ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
+    _logger?.log('    err=$e');
     final s = (data == null) ? '' : data.toString();
     if (s.isNotEmpty) {
-      AppLog.I.add('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+      _logger?.log('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
     }
   }
 
@@ -234,8 +238,7 @@ class RuleEngine {
           } else {
             final separator = filterRule?.separator ?? ',';
             final joined = cleaned.join(separator);
-            if (joined.trim().isEmpty) return;
-            params[key] = joined;
+            if (joined.trim().isNotEmpty) params[key] = joined;
           }
         } else {
           // ✅ 空字符串参数不该发（waifu.im included_tags= 会 400）
@@ -281,7 +284,7 @@ class RuleEngine {
           if (page <= 1) {
             if (_cursorCache.containsKey(ck)) {
               _cursorCache.remove(ck);
-              AppLog.I.add('CURSOR ${rule.id} cleared (refresh)');
+              _logger?.log('CURSOR ${rule.id} cleared (refresh)');
             }
           } else {
             final cursor = _cursorCache[ck];
@@ -313,7 +316,7 @@ class RuleEngine {
         return await _fetchJsonModeMerge(rule, requestUrl, params, reqHeaders, mergeMulti);
       }
     } catch (e) {
-      AppLog.I.add('Engine Error: $e');
+      _logger?.log('Engine Error: $e');
       rethrow;
     }
   }
@@ -411,7 +414,7 @@ class RuleEngine {
       }
     }
 
-    AppLog.I.add('RESP ${rule.id} random_count=${wallpapers.length}');
+    _logger?.log('RESP ${rule.id} random_count=${wallpapers.length}');
     return wallpapers;
   }
 
@@ -517,9 +520,9 @@ class RuleEngine {
               .read(response.data)
               .firstOrNull
               ?.value;
-          AppLog.I.add('DBG ${rule.id} media0=${safeJson(media0)}');
+          _logger?.log('DBG ${rule.id} media0=${safeJson(media0)}');
         } catch (e) {
-          AppLog.I.add('DBG ${rule.id} media0 ERR=$e');
+          _logger?.log('DBG ${rule.id} media0 ERR=$e');
         }
 
         try {
@@ -527,9 +530,9 @@ class RuleEngine {
               .read(response.data)
               .firstOrNull
               ?.value;
-          AppLog.I.add('DBG ${rule.id} media0.content=${safeJson(content0)}');
+          _logger?.log('DBG ${rule.id} media0.content=${safeJson(content0)}');
         } catch (e) {
-          AppLog.I.add('DBG ${rule.id} media0.content ERR=$e');
+          _logger?.log('DBG ${rule.id} media0.content ERR=$e');
         }
 
         try {
@@ -537,9 +540,9 @@ class RuleEngine {
               .read(response.data)
               .firstOrNull
               ?.value;
-          AppLog.I.add('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
+          _logger?.log('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
         } catch (e) {
-          AppLog.I.add('DBG ${rule.id} media0.thumbnail ERR=$e');
+          _logger?.log('DBG ${rule.id} media0.thumbnail ERR=$e');
         }
       }
 
@@ -549,9 +552,9 @@ class RuleEngine {
         if (nextCursor != null) {
           final ck = _cursorKey(rule, finalQuery, filterParams);
           _cursorCache[ck] = nextCursor;
-          AppLog.I.add('CURSOR ${rule.id} set=$nextCursor');
+          _logger?.log('CURSOR ${rule.id} set=$nextCursor');
         } else {
-          AppLog.I.add('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
+          _logger?.log('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
         }
       }
 
@@ -589,7 +592,7 @@ class RuleEngine {
       paramSets = next;
     });
 
-    AppLog.I.add('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
+    _logger?.log('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
 
     final List<UniWallpaper> merged = [];
     final Set<String> seen = {};
@@ -635,7 +638,7 @@ class RuleEngine {
       }
     }
 
-    AppLog.I.add('MERGE ${rule.id} merged=${merged.length}');
+    _logger?.log('MERGE ${rule.id} merged=${merged.length}');
     return merged;
   }
 }
