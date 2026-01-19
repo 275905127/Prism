@@ -7,6 +7,7 @@ import '../engine/rule_engine.dart';
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
 import '../pixiv/pixiv_repository.dart';
+import '../utils/prism_logger.dart';
 
 /// 桥梁层：统一管理所有图源引擎的调用
 /// UI 只需与此类交互，无需关心底层是 RuleEngine 还是 PixivRepository
@@ -25,11 +26,14 @@ class WallpaperService {
   /// ✅ Pixiv 专用 Dio：必须有 Pixiv baseUrl，避免污染通用 Dio
   late final Dio _pixivDio = _createPixivDioFrom(_dio);
 
+  /// ✅ 默认日志出口：写入 AppLog（日志页继续可用）
+  final PrismLogger _logger = const AppLogLogger();
+
   /// ✅ 通用引擎复用同一个 Dio（避免 RuleEngine 私有 Dio 绕开全局策略）
-  late final RuleEngine _standardEngine = RuleEngine(dio: _dio);
+  late final RuleEngine _standardEngine = RuleEngine(dio: _dio, logger: _logger);
 
   /// ✅ Pixiv 仓库复用 Pixiv 专用 Dio（但共享通用 Dio 的拦截器/adapter 策略）
-  late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio);
+  late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio, logger: _logger);
 
   /// 核心方法：获取壁纸列表
   /// 内部自动判断使用哪个引擎
