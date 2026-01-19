@@ -66,8 +66,8 @@ class RuleEngine {
   }
 
   Map<String, String> _defaultUA() => const {
-        "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       };
 
   // ---------- App 内日志（打码） ----------
@@ -139,20 +139,45 @@ class RuleEngine {
     return DateTime.now().millisecondsSinceEpoch.toString();
   }
 
-  // ---------- URL template ----------
-  // 支持 rule.url 里写 {keyword}，用于 Pixiv 这种 keyword 在 path 的接口
-  String _buildRequestUrl(SourceRule rule, String? finalQuery) {
-    String u = rule.url;
+  // ---------- 参数写入（空参过滤统一入口） ----------
+  void _putParam(Map<String, dynamic> params, String key, dynamic value) {
+    if (value == null) return;
 
-    if (!u.contains('{keyword}')) return u;
+    if (value is String) {
+      if (value.trim().isEmpty) return;
+      params[key] = value;
+      return;
+    }
+
+    if (value is List) {
+      final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+      if (cleaned.isEmpty) return;
+      params[key] = cleaned;
+      return;
+    }
+
+    params[key] = value;
+  }
+
+  // ---------- URL template ----------
+  // 支持 rule.url 里写 {keyword}/{word}/{q}，用于 Pixiv 这种 keyword 在 path 的接口
+  String _buildRequestUrl(SourceRule rule, String? finalQuery) {
+    final u = rule.url;
+
+    final hasTpl = u.contains('{keyword}') || u.contains('{word}') || u.contains('{q}');
+    if (!hasTpl) return u;
 
     final kw = (finalQuery ?? '').trim();
     if (kw.isEmpty) {
-      // 这里不“猜 default”，default 已经在 fetch() 里处理过了
-      throw Exception("该图源需要关键词：keyword 为空（url 含 {keyword}）");
+      // default 已在 fetch() 里处理过；这里代表：url 需要占位符但你仍没给词
+      throw Exception('该图源需要关键词：keyword 为空（url 含 {keyword}/{word}/{q}）');
     }
 
-    return u.replaceAll('{keyword}', Uri.encodeComponent(kw));
+    final enc = Uri.encodeComponent(kw);
+    return u
+        .replaceAll('{keyword}', enc)
+        .replaceAll('{word}', enc)
+        .replaceAll('{q}', enc);
   }
 
   // ---------- 对外入口 ----------
@@ -178,7 +203,7 @@ class RuleEngine {
       if (rule.apiKeyIn == 'header') {
         reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
       } else {
-        params[keyName] = apiKey;
+        _putParam(params, keyName, apiKey);
       }
     }
 
@@ -196,19 +221,23 @@ class RuleEngine {
           }
 
           final encode = (filterRule?.encode ?? 'join').toLowerCase();
+          final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+          if (cleaned.isEmpty) return; // ✅ 空数组不发（repeat/join/merge 都不该发空）
 
           if (encode == 'merge') {
-            mergeMulti[key] = value.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+            mergeMulti[key] = cleaned;
           } else if (encode == 'repeat') {
-            params[key] = value; // Dio 会变成重复 key
+            // Dio 会变成重复 key
+            params[key] = cleaned;
           } else {
             final separator = filterRule?.separator ?? ',';
-            params[key] = value.join(separator);
+            final joined = cleaned.join(separator);
+            if (joined.trim().isEmpty) return;
+            params[key] = joined;
           }
         } else {
           // ✅ 空字符串参数不该发（waifu.im included_tags= 会 400）
-          if (value is String && value.trim().isEmpty) return;
-          params[key] = value;
+          _putParam(params, key, value);
         }
       });
     }
@@ -223,12 +252,13 @@ class RuleEngine {
     }
 
     if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
-      throw Exception("该图源需要关键词：query 为空（请先搜索或在规则里设置 default_keyword）");
+      throw Exception('该图源需要关键词：query 为空（请先搜索或在规则里设置 default_keyword）');
     }
 
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
+      // paramKeyword 可以是 '' 来禁用
       if (rule.paramKeyword.isNotEmpty) {
-        params[rule.paramKeyword] = finalQuery.trim();
+        _putParam(params, rule.paramKeyword, finalQuery.trim());
       }
     }
     // ✅✅✅ 关键字策略结束
@@ -359,14 +389,16 @@ class RuleEngine {
     for (final url in results) {
       if (url != null && url.startsWith('http')) {
         if (!wallpapers.any((w) => w.fullUrl == url)) {
-          wallpapers.add(UniWallpaper(
-            id: url, // ✅ 稳定去重
-            sourceId: rule.id,
-            thumbUrl: url,
-            fullUrl: url,
-            width: 0,
-            height: 0,
-          ));
+          wallpapers.add(
+            UniWallpaper(
+              id: url, // ✅ 稳定去重
+              sourceId: rule.id,
+              thumbUrl: url,
+              fullUrl: url,
+              width: 0,
+              height: 0,
+            ),
+          );
         }
       }
     }
@@ -387,7 +419,7 @@ class RuleEngine {
     final out = <UniWallpaper>[];
 
     for (final item in list) {
-      String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
+      String thumb = _getValue<String>(rule.thumbPath, item) ?? '';
       String full = _getValue<String>(rule.fullPath, item) ?? thumb;
 
       if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
@@ -403,15 +435,17 @@ class RuleEngine {
       final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
       final grade = _getValue<String>(rule.gradePath ?? '', item);
 
-      out.add(UniWallpaper(
-        id: id,
-        sourceId: rule.id,
-        thumbUrl: thumb,
-        fullUrl: full,
-        width: width,
-        height: height,
-        grade: grade,
-      ));
+      out.add(
+        UniWallpaper(
+          id: id,
+          sourceId: rule.id,
+          thumbUrl: thumb,
+          fullUrl: full,
+          width: width,
+          height: height,
+          grade: grade,
+        ),
+      );
     }
 
     return out;
@@ -429,7 +463,7 @@ class RuleEngine {
   }) async {
     _logReq(rule, requestUrl, params, headers);
 
-    // ✅ 只对这个图源打印 Smithsonian 的结构（避免“乱码式刷屏”）
+    // ✅ 只对这个图源打印 Smithsonian 的结构（避免刷屏）
     const String kDebugRuleId = 'smithsonian_open_access_images';
     final bool dbg = rule.id == kDebugRuleId;
 
@@ -481,18 +515,20 @@ class RuleEngine {
         }
 
         try {
-          final content0 = JsonPath(
-            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content',
-          ).read(response.data).firstOrNull?.value;
+          final content0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content')
+              .read(response.data)
+              .firstOrNull
+              ?.value;
           AppLog.I.add('DBG ${rule.id} media0.content=${safeJson(content0)}');
         } catch (e) {
           AppLog.I.add('DBG ${rule.id} media0.content ERR=$e');
         }
 
         try {
-          final thumb0 = JsonPath(
-            r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail',
-          ).read(response.data).firstOrNull?.value;
+          final thumb0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail')
+              .read(response.data)
+              .firstOrNull
+              ?.value;
           AppLog.I.add('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
         } catch (e) {
           AppLog.I.add('DBG ${rule.id} media0.thumbnail ERR=$e');
@@ -522,7 +558,7 @@ class RuleEngine {
   }
 
   // ---------- json merge 多请求（加日志 + 4xx body） ----------
-  // merge 多请求一般不适合 cursor；cursor + merge 先别做，复杂度直接爆炸。
+  // merge 多请求一般不适合 cursor；cursor + merge 先别做。
 
   Future<List<UniWallpaper>> _fetchJsonModeMerge(
     SourceRule rule,
