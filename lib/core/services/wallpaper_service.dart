@@ -11,10 +11,7 @@ import '../pixiv/pixiv_repository.dart';
 /// 桥梁层：统一管理所有图源引擎的调用
 /// UI 只需与此类交互，无需关心底层是 RuleEngine 还是 PixivRepository
 class WallpaperService {
-  final RuleEngine _standardEngine = RuleEngine();
-  final PixivRepository _pixivRepo = PixivRepository();
-
-  /// ✅ 统一网络出口：下载等行为也走这里（避免 UI 直接 Dio）
+  /// ✅ 统一网络出口：RuleEngine / 下载 都走同一个 Dio（后续拦截器/代理/重试统一放这里）
   final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -24,6 +21,11 @@ class WallpaperService {
       validateStatus: (s) => s != null && s < 500,
     ),
   );
+
+  /// ✅ 通用引擎复用同一个 Dio（避免 RuleEngine 私有 Dio 绕开全局策略）
+  late final RuleEngine _standardEngine = RuleEngine(dio: _dio);
+
+  final PixivRepository _pixivRepo = PixivRepository();
 
   /// 核心方法：获取壁纸列表
   /// 内部自动判断使用哪个引擎
@@ -130,10 +132,9 @@ class WallpaperService {
       }
 
       return bytes;
-    } on DioException catch (e) {
-      // 保留 DioException，交由 UI 统一显示友好错误
+    } on DioException {
       rethrow;
-    } catch (e) {
+    } catch (_) {
       rethrow;
     }
   }
