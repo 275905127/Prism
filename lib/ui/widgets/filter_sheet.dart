@@ -5,7 +5,7 @@ import '../../core/models/source_rule.dart';
 class FilterSheet extends StatefulWidget {
   final List<SourceFilter> filters;
   final Map<String, dynamic> currentValues;
-  final Function(Map<String, dynamic>) onApply;
+  final ValueChanged<Map<String, dynamic>> onApply;
 
   const FilterSheet({
     super.key,
@@ -24,11 +24,11 @@ class _FilterSheetState extends State<FilterSheet> {
   @override
   void initState() {
     super.initState();
-    // 深拷贝，防止直接修改 List 引用
-    _tempValues = {};
+    // 深拷贝：避免直接改引用
+    _tempValues = <String, dynamic>{};
     widget.currentValues.forEach((key, value) {
       if (value is List) {
-        _tempValues[key] = List.from(value);
+        _tempValues[key] = List<dynamic>.from(value);
       } else {
         _tempValues[key] = value;
       }
@@ -62,18 +62,16 @@ class _FilterSheetState extends State<FilterSheet> {
             ),
           ),
           const Divider(height: 1),
-          
           Flexible(
             child: ListView.builder(
               shrinkWrap: true,
               itemCount: widget.filters.length,
               itemBuilder: (context, index) {
-                final filter = widget.filters[index];
+                final SourceFilter filter = widget.filters[index];
                 return _buildFilterGroup(filter);
               },
             ),
           ),
-
           Padding(
             padding: const EdgeInsets.all(20),
             child: SizedBox(
@@ -98,7 +96,7 @@ class _FilterSheetState extends State<FilterSheet> {
   }
 
   Widget _buildFilterGroup(SourceFilter filter) {
-    final isMulti = filter.type == 'checklist';
+    final bool isMulti = filter.type == 'checklist';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -122,16 +120,19 @@ class _FilterSheetState extends State<FilterSheet> {
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
-            children: filter.options.map((option) {
-              final val = _tempValues[filter.key];
+            children: filter.options.map<Widget>((FilterOption option) {
+              final dynamic val = _tempValues[filter.key];
+
               bool isSelected = false;
-              
               if (isMulti) {
-                // 多选判断：列表里有没有这个值
-                if (val is List) isSelected = val.contains(option.value);
+                // 多选：强制成 List<String>，避免 Object/dynamic 漂移
+                final List<String> list = (val is List)
+                    ? val.map((e) => e.toString()).toList()
+                    : <String>[];
+                isSelected = list.contains(option.value);
               } else {
-                // 单选判断：值是否相等
-                isSelected = val == option.value;
+                // 单选：统一按字符串比较更稳
+                isSelected = (val?.toString() ?? '') == option.value;
               }
 
               return Padding(
@@ -147,24 +148,28 @@ class _FilterSheetState extends State<FilterSheet> {
                   ),
                   backgroundColor: Colors.grey[100],
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8), 
-                    side: BorderSide.none
+                    borderRadius: BorderRadius.circular(8),
+                    side: BorderSide.none,
                   ),
-                  onSelected: (selected) {
+                  onSelected: (bool selected) {
                     setState(() {
                       if (isMulti) {
-                        // 🔥 多选逻辑
-                        List<String> list = val is List ? List.from(val) : [];
+                        final List<String> list = (val is List)
+                            ? val.map((e) => e.toString()).toList()
+                            : <String>[];
+
                         if (selected) {
-                          list.add(option.value);
+                          if (!list.contains(option.value)) list.add(option.value);
                         } else {
                           list.remove(option.value);
                         }
                         _tempValues[filter.key] = list;
                       } else {
-                        // 🔥 单选逻辑
                         if (selected) {
                           _tempValues[filter.key] = option.value;
+                        } else {
+                          // 再点一次取消选择（可选行为，留着更通用）
+                          _tempValues.remove(filter.key);
                         }
                       }
                     });
