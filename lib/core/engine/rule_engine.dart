@@ -1,5 +1,6 @@
 // lib/core/engine/rule_engine.dart
 import 'dart:math';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:json_path/json_path.dart';
 import '../models/source_rule.dart';
@@ -28,7 +29,6 @@ class RuleEngine {
         cur = cur[idx];
         continue;
       }
-
       return null;
     }
     return cur;
@@ -62,6 +62,17 @@ class RuleEngine {
         "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       };
+
+  int _retryAfterSecondsFromHeaders(Headers h) {
+    final v = h.value('retry-after');
+    if (v == null) return 0;
+    final s = int.tryParse(v.trim());
+    return s ?? 0;
+  }
+
+  Future<void> _sleepMs(int ms) async {
+    await Future.delayed(Duration(milliseconds: ms));
+  }
 
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
@@ -119,7 +130,7 @@ class RuleEngine {
       finalQuery = rule.defaultKeyword;
     }
 
-    // ✅ keywordRequired = true 但无 keyword -> 不发请求，直接提示
+    // ✅ keywordRequired = true 但无 keyword -> 不发请求
     if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
       throw Exception("该图源需要关键词，请先搜索或在规则里设置 default_keyword");
     }
@@ -132,10 +143,10 @@ class RuleEngine {
       if (rule.responseType == 'random') {
         return await _fetchRandomMode(rule, params, reqHeaders);
       } else {
-      if (rule.paramPage.isNotEmpty) {
-        params[rule.paramPage] = page;
-      }
-      return await _fetchJsonMode(rule, params, reqHeaders);
+        if (rule.paramPage.isNotEmpty) {
+          params[rule.paramPage] = page;
+        }
+        return await _fetchJsonMode(rule, params, reqHeaders);
       }
     } catch (e) {
       // ignore: avoid_print
@@ -190,6 +201,7 @@ class RuleEngine {
                 responseType: ResponseType.stream,
                 sendTimeout: const Duration(seconds: 5),
                 receiveTimeout: const Duration(seconds: 5),
+                validateStatus: (s) => s != null && s < 400,
               ),
             );
             finalUrl = response.realUri.toString();
@@ -201,7 +213,7 @@ class RuleEngine {
 
         if (finalUrl == null) return null;
 
-        // 3) 参数净化：去掉 _t/_r
+        // 参数净化：去掉 _t/_r
         final uri = Uri.parse(finalUrl);
         if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
           final newQueryParams = Map<String, String>.from(uri.queryParameters);
@@ -241,50 +253,93 @@ class RuleEngine {
     Map<String, dynamic> params,
     Map<String, String> headers,
   ) async {
-    final response = await _dio.get(
-      rule.url,
-      queryParameters: params,
-      options: Options(
-        headers: headers,
-        responseType: ResponseType.json,
-        sendTimeout: const Duration(seconds: 10),
-        receiveTimeout: const Duration(seconds: 10),
-      ),
-    );
+    // ✅ 429 退避：最多 3 次
+    int attempt = 0;
 
-    final jsonMap = response.data;
-
-    final listPath = JsonPath(rule.listPath);
-    final match = listPath.read(jsonMap).firstOrNull;
-
-    if (match == null || match.value is! List) return [];
-
-    final List list = match.value as List;
-
-    return list.map((item) {
-      final id = _getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
-
-      String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
-      String full = _getValue<String>(rule.fullPath, item) ?? thumb;
-
-      if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
-        if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
-        if (!full.startsWith('http')) full = rule.imagePrefix! + full;
+    while (true) {
+      Response response;
+      try {
+        response = await _dio.get(
+          rule.url,
+          queryParameters: params,
+          options: Options(
+            headers: headers,
+            responseType: ResponseType.json,
+            sendTimeout: const Duration(seconds: 10),
+            receiveTimeout: const Duration(seconds: 10),
+            // ✅ 关键：让 4xx/5xx 不抛异常，我们自己处理
+            validateStatus: (s) => s != null && s >= 200 && s < 600,
+          ),
+        );
+      } on DioException catch (e) {
+        // 网络层错误：拒绝连接/超时/断网
+        if (e.error is SocketException) {
+          throw Exception("网络错误：连接失败（可能是网络/代理问题）");
+        }
+        rethrow;
       }
 
-      final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
-      final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
-      final grade = _getValue<String>(rule.gradePath ?? '', item);
+      final status = response.statusCode ?? 0;
 
-      return UniWallpaper(
-        id: id.toString(),
-        sourceId: rule.id,
-        thumbUrl: thumb,
-        fullUrl: full,
-        width: width,
-        height: height,
-        grade: grade,
-      );
-    }).toList();
+      // 429：限流，退避
+      if (status == 429) {
+        attempt++;
+        if (attempt > 3) {
+          throw Exception("触发限流(429)：重试次数已用尽，请降低请求频率/开启限速");
+        }
+        final ra = _retryAfterSecondsFromHeaders(response.headers);
+        final backoffMs = ra > 0 ? ra * 1000 : (800 * attempt * attempt);
+        await _sleepMs(backoffMs);
+        continue;
+      }
+
+      // 401/403：鉴权问题
+      if (status == 401) {
+        throw Exception("鉴权失败(401)：API Key 无效/缺失/位置错误");
+      }
+      if (status == 403) {
+        throw Exception("拒绝访问(403)：可能需要更严格的鉴权/Referer/权限不足");
+      }
+
+      // 其他非 2xx：直接抛出更干净的信息
+      if (status < 200 || status >= 300) {
+        throw Exception("HTTP $status：${response.data}");
+      }
+
+      // ====== 解析 ======
+      final jsonMap = response.data;
+
+      final listPath = JsonPath(rule.listPath);
+      final match = listPath.read(jsonMap).firstOrNull;
+      if (match == null || match.value is! List) return [];
+
+      final List list = match.value as List;
+
+      return list.map((item) {
+        final id = _getValue<String>(rule.idPath, item) ?? DateTime.now().toString();
+
+        String thumb = _getValue<String>(rule.thumbPath, item) ?? "";
+        String full = _getValue<String>(rule.fullPath, item) ?? thumb;
+
+        if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
+          if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
+          if (!full.startsWith('http')) full = rule.imagePrefix! + full;
+        }
+
+        final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
+        final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
+        final grade = _getValue<String>(rule.gradePath ?? '', item);
+
+        return UniWallpaper(
+          id: id.toString(),
+          sourceId: rule.id,
+          thumbUrl: thumb,
+          fullUrl: full,
+          width: width,
+          height: height,
+          grade: grade,
+        );
+      }).toList();
+    }
   }
 }
