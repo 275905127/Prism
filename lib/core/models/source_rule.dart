@@ -9,14 +9,18 @@ class SourceRule {
 
   final Map<String, dynamic>? fixedParams;
 
-  /// 旧字段：保存原始 key
+  /// 保存原始 key
   final String? apiKey;
 
-  /// ✅ 新增：apiKey 放哪、叫什么、前缀
+  /// apiKey 放哪、叫什么、前缀
   /// api_key_in: 'query' | 'header'
   final String? apiKeyName;
   final String apiKeyIn;
   final String apiKeyPrefix;
+
+  /// ✅ 新增：keyword 策略（通用关键）
+  final String? defaultKeyword;
+  final bool keywordRequired;
 
   final List<SourceFilter>? filters;
 
@@ -43,10 +47,13 @@ class SourceRule {
     this.fixedParams,
     this.apiKey,
 
-    // ✅ new
     this.apiKeyName,
     this.apiKeyIn = 'query',
     this.apiKeyPrefix = '',
+
+    /// ✅ new
+    this.defaultKeyword,
+    this.keywordRequired = false,
 
     this.filters,
     this.responseType = 'json',
@@ -73,10 +80,13 @@ class SourceRule {
 
       apiKey: map['api_key'],
 
-      // ✅ new
       apiKeyName: map['api_key_name'],
       apiKeyIn: map['api_key_in'] ?? 'query',
       apiKeyPrefix: map['api_key_prefix'] ?? '',
+
+      /// ✅ new
+      defaultKeyword: map['default_keyword'],
+      keywordRequired: map['keyword_required'] ?? false,
 
       filters: map['filters'] != null
           ? (map['filters'] as List).map((e) => SourceFilter.fromJson(e)).toList()
@@ -109,11 +119,13 @@ class SourceRule {
       'fixed_params': fixedParams,
 
       'api_key': apiKey,
-
-      // ✅ new
       'api_key_name': apiKeyName,
       'api_key_in': apiKeyIn,
       'api_key_prefix': apiKeyPrefix,
+
+      /// ✅ new
+      'default_keyword': defaultKeyword,
+      'keyword_required': keywordRequired,
 
       'filters': filters?.map((e) => e.toJson()).toList(),
 
@@ -136,49 +148,4 @@ class SourceRule {
   }
 }
 
-class SourceFilter {
-  final String key;
-  final String name;
-  final String type;
-  final String separator;
-  final List<FilterOption> options;
-
-  SourceFilter({
-    required this.key,
-    required this.name,
-    required this.type,
-    this.separator = ',',
-    required this.options,
-  });
-
-  factory SourceFilter.fromJson(Map<String, dynamic> json) {
-    return SourceFilter(
-      key: json['key'],
-      name: json['name'],
-      type: json['type'] ?? 'radio',
-      separator: json['separator'] ?? ',',
-      options: (json['options'] as List).map((e) => FilterOption.fromJson(e)).toList(),
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'key': key,
-        'name': name,
-        'type': type,
-        'separator': separator,
-        'options': options.map((e) => e.toJson()).toList()
-      };
-}
-
-class FilterOption {
-  final String name;
-  final String value;
-
-  FilterOption({required this.name, required this.value});
-
-  factory FilterOption.fromJson(Map<String, dynamic> json) {
-    return FilterOption(name: json['name'], value: json['value']);
-  }
-
-  Map<String, dynamic> toJson() => {'name': name, 'value': value};
-}
+// ↓↓↓ 下面 SourceFilter / FilterOption 保持你原来的不变
