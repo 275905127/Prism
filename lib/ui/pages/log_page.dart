@@ -11,7 +11,7 @@ class LogPage extends StatefulWidget {
 class _LogPageState extends State<LogPage> {
   @override
   Widget build(BuildContext context) {
-    final logs = AppLog.I.lines;
+    final logs = AppLog.I.lines; // List<String>
 
     return Scaffold(
       appBar: AppBar(
@@ -20,25 +20,37 @@ class _LogPageState extends State<LogPage> {
           IconButton(
             icon: const Icon(Icons.delete_outline),
             onPressed: () {
-              setState(() => AppLog.I.clear());
+              AppLog.I.clear();
+              setState(() {});
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('已清空日志')),
+              );
             },
           ),
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => setState(() {}),
+            icon: const Icon(Icons.copy),
+            onPressed: () {
+              final text = logs.join('\n');
+              AppLog.I.copyToClipboard(text);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('已复制到剪贴板')),
+              );
+            },
           ),
         ],
       ),
       body: logs.isEmpty
           ? const Center(child: Text('暂无日志'))
-          : ListView.separated(
+          : ListView.builder(
               padding: const EdgeInsets.all(12),
               itemCount: logs.length,
-              separatorBuilder: (_, __) => const Divider(height: 12),
-              itemBuilder: (_, i) => SelectableText(
-                logs[i],
-                style: const TextStyle(fontSize: 12, height: 1.3),
-              ),
+              itemBuilder: (context, i) {
+                final line = logs[i];
+                return SelectableText(
+                  line,
+                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                );
+              },
             ),
     );
   }
