@@ -10,6 +10,9 @@ import 'pixiv_client.dart';
 /// Pixiv 专用仓库
 /// ✅ 修复：补回 setCookie 和 copyWith 方法，解决构建报错
 /// ✅ 功能：强制同步 Rule 中的 User-Agent 和 Cookie
+/// ✅ 新增：登录态校验缓存（cookie 非空不代表已登录）
+/// ✅ 改进：降级逻辑改为基于 loginOk（而非 hasCookie）
+/// ✅ 日志：输出 cookie=1/0 login=1/0，便于定位
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -52,6 +55,61 @@ class PixivRepository {
     _pagesConfig = config;
   }
 
+  // ---------- Login check cache ----------
+
+  /// 登录态缓存：避免每次 fetch 都打 /ajax/user/self
+  /// - cookie 变化会导致登录态变化；但本 Repo 侧无法稳定拿到 cookie 值本体
+  /// - 因此策略为：短 TTL + cookie 为空直接视为未登录
+  static const Duration _kLoginCacheTtl = Duration(minutes: 5);
+
+  bool? _cachedLoginOk;
+  DateTime? _cachedLoginAt;
+  bool _checkingLogin = false;
+  Future<bool>? _checkingLoginFuture;
+
+  Future<bool> _getLoginOkCached() async {
+    // 无 cookie 直接 false，并清掉缓存
+    if (!hasCookie) {
+      _cachedLoginOk = false;
+      _cachedLoginAt = DateTime.now();
+      return false;
+    }
+
+    final now = DateTime.now();
+    final lastAt = _cachedLoginAt;
+    if (lastAt != null && _cachedLoginOk != null) {
+      final age = now.difference(lastAt);
+      if (age <= _kLoginCacheTtl) {
+        return _cachedLoginOk!;
+      }
+    }
+
+    // 防止并发多次触发 checkLogin
+    if (_checkingLogin && _checkingLoginFuture != null) {
+      return _checkingLoginFuture!;
+    }
+
+    _checkingLogin = true;
+    _checkingLoginFuture = () async {
+      try {
+        final ok = await _client.checkLogin();
+        _cachedLoginOk = ok;
+        _cachedLoginAt = DateTime.now();
+        return ok;
+      } catch (_) {
+        // 网络异常时：保守返回 false，避免 popular/r18 误用导致异常或空
+        _cachedLoginOk = false;
+        _cachedLoginAt = DateTime.now();
+        return false;
+      } finally {
+        _checkingLogin = false;
+        _checkingLoginFuture = null;
+      }
+    }();
+
+    return _checkingLoginFuture!;
+  }
+
   // ---------- Config sync ----------
 
   /// 从 Rule 中提取 Cookie 和 User-Agent 并注入 Client
@@ -76,11 +134,15 @@ class PixivRepository {
           cookie: cookie,
           userAgent: ua,
         );
-        
-        if (ua != null) {
+
+        // 配置变化后：登录态缓存可能失效，主动清掉，下一次按需重验
+        _cachedLoginOk = null;
+        _cachedLoginAt = null;
+
+        if (ua != null && ua.isNotEmpty) {
           _logger?.log('pixiv config synced: UA updated');
         }
-        if (cookie != null) {
+        if (cookie != null && cookie.isNotEmpty) {
           final prefix = cookie.length <= 12 ? cookie : cookie.substring(0, 12);
           _logger?.log('pixiv config synced: Cookie injected ($prefix...)');
         }
@@ -119,38 +181,46 @@ class PixivRepository {
     mode = _pickStr('mode', mode);
     sMode = _pickStr('s_mode', sMode);
 
-    // 3. 降级逻辑 (无 Cookie 时)
-    if (!hasCookie) {
+    // 3. 登录态判断（cookie 非空不代表已登录）
+    final bool loginOk = await _getLoginOkCached();
+
+    // 4. 降级逻辑：未登录时阻止 popular / r18
+    if (!loginOk) {
       if (order.toLowerCase().contains('popular')) {
-        _logger?.log('pixiv filter blocked (no cookie): order=$order -> date_d');
+        _logger?.log('pixiv filter blocked (not logged in): order=$order -> date_d');
         order = 'date_d';
       }
       if (mode.toLowerCase() == 'r18') {
-        _logger?.log('pixiv filter blocked (no cookie): mode=r18 -> safe');
+        _logger?.log('pixiv filter blocked (not logged in): mode=r18 -> safe');
         mode = 'safe';
       }
     }
 
     _logger?.log(
-      'REQ pixiv q="$q" page=$page order=$order mode=$mode cookie=${hasCookie ? 1 : 0}',
+      'REQ pixiv q="$q" page=$page order=$order mode=$mode cookie=${hasCookie ? 1 : 0} login=${loginOk ? 1 : 0}',
     );
 
-    // 4. 执行搜索
+    // 5. 执行搜索
     final ruleId = (rule as dynamic).id?.toString() ?? '';
     List<PixivIllustBrief> briefs = [];
 
-    if (ruleId == kUserRuleId) {
-       briefs = await _client.getUserArtworks(userId: q, page: page);
-    } else {
-       briefs = await _client.searchArtworks(
-        word: q,
-        page: page,
-        order: order,
-        mode: mode,
-        sMode: sMode,
-      );
+    try {
+      if (ruleId == kUserRuleId) {
+        briefs = await _client.getUserArtworks(userId: q, page: page);
+      } else {
+        briefs = await _client.searchArtworks(
+          word: q,
+          page: page,
+          order: order,
+          mode: mode,
+          sMode: sMode,
+        );
+      }
+    } catch (e) {
+      _logger?.log('ERR pixiv search: $e');
+      rethrow;
     }
-    
+
     _logger?.log('RESP pixiv count=${briefs.length}');
 
     if (briefs.isNotEmpty) {
@@ -160,7 +230,7 @@ class PixivRepository {
 
     if (briefs.isEmpty) return const [];
 
-    // 5. 并发补全
+    // 6. 并发补全
     final enriched = await _enrichWithPages(
       briefs,
       concurrency: _pagesConfig.concurrency,
@@ -169,13 +239,13 @@ class PixivRepository {
       retryDelay: _pagesConfig.retryDelay,
     );
 
-    // 6. 转换结果
+    // 7. 转换结果
     final out = <UniWallpaper>[];
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
-      
-      final best = e.originalUrl.isNotEmpty 
-          ? e.originalUrl 
+
+      final best = e.originalUrl.isNotEmpty
+          ? e.originalUrl
           : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
 
       out.add(
@@ -201,7 +271,7 @@ class PixivRepository {
     Duration retryDelay = const Duration(milliseconds: 280),
   }) async {
     if (briefs.isEmpty) return const [];
-    
+
     final List<_PixivEnriched?> results =
         List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
 
@@ -223,6 +293,7 @@ class PixivRepository {
         final grade = _gradeFromRestrict(b.xRestrict);
 
         if (original.isEmpty) {
+          // 这里 pages 请求失败不应影响主列表，保持吞错
           try {
             final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
             if (pages.isNotEmpty) {
@@ -230,11 +301,12 @@ class PixivRepository {
               if (p0.regular.isNotEmpty) regular = p0.regular;
               if (p0.original.isNotEmpty) original = p0.original;
             }
-          } catch (e) {
+          } catch (_) {
             // ignore
           }
         } else {
-           regular = original; 
+          // thumb 能推导 original：直接用同一个
+          regular = original;
         }
 
         results[idx] = _PixivEnriched(
@@ -273,7 +345,7 @@ class PixivRepository {
       final idx = p.indexOf('/img-master/img/');
       if (idx < 0) return null;
 
-      final tail = p.substring(idx + '/img-master/'.length); 
+      final tail = p.substring(idx + '/img-master/'.length);
       var newPath = '/img-original/$tail';
 
       newPath = newPath
