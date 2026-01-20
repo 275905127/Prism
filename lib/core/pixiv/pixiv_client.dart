@@ -14,6 +14,9 @@ class PixivClient {
   final Dio _dio;
   String? _cookie;
 
+  /// 可选日志回调（Repo 可注入 PrismLogger.log）
+  final void Function(String msg)? _log;
+
   // 🔥 默认 UA，但会被 updateConfig 覆盖
   String _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -21,8 +24,10 @@ class PixivClient {
   PixivClient({
     Dio? dio,
     String? cookie,
+    void Function(String msg)? logger,
   })  : _dio = dio ?? Dio(),
-        _cookie = cookie {
+        _cookie = cookie,
+        _log = logger {
     // 初始化 Headers
     _updateHeaders();
 
@@ -51,6 +56,12 @@ class PixivClient {
     _updateHeaders();
   }
 
+  String _uaShort() {
+    final ua = _userAgent.trim();
+    if (ua.isEmpty) return '';
+    return ua.length <= 42 ? ua : ua.substring(0, 42);
+  }
+
   /// 统一刷新 Dio Headers
   void _updateHeaders() {
     _dio.options.headers = {
@@ -73,7 +84,7 @@ class PixivClient {
     return h;
   }
 
-  /// ✅ 新增：检查当前 Cookie + UA 是否为“有效登录态”
+  /// ✅ 检查当前 Cookie + UA 是否为“有效登录态”
   ///
   /// 说明：
   /// - 仅 hasCookie 为 true 不代表 Pixiv 认可已登录（过期/缺字段/风控/UA 不一致都可能失败）
@@ -84,27 +95,74 @@ class PixivClient {
   /// - false : 未登录/失效/被拦截/网络错误
   Future<bool> checkLogin() async {
     // 没 cookie 直接 false
-    if (!hasCookie) return false;
+    if (!hasCookie) {
+      _log?.call('pixiv checkLogin: no cookie -> false');
+      return false;
+    }
 
     try {
       final resp = await _dio.get('/ajax/user/self');
 
       final sc = resp.statusCode ?? 0;
-      if (sc >= 400) return false;
+      final ct = resp.headers.value('content-type') ?? '';
+      _log?.call('pixiv checkLogin: sc=$sc ct="$ct" ua="${_uaShort()}"');
+
+      if (sc >= 400) {
+        // 常见：401/403
+        _log?.call('pixiv checkLogin: http>=400 -> false');
+        return false;
+      }
 
       final data = resp.data;
-      if (data is! Map) return false;
 
-      // Pixiv Ajax 通常结构：{ error: false, body: {...} }
+      // 兜底：有些情况下会被重定向到 HTML 或返回 String
+      if (data is String) {
+        final s = data.trim();
+        final head = s.length <= 80 ? s : s.substring(0, 80);
+        _log?.call('pixiv checkLogin: data is String (maybe HTML). head="$head" -> false');
+        return false;
+      }
+
+      if (data is! Map) {
+        _log?.call('pixiv checkLogin: data type=${data.runtimeType} not Map -> false');
+        return false;
+      }
+
+      // Pixiv Ajax 通常结构：{ error: false, body: {...}, message: ... }
       final errFlag = data['error'];
-      if (errFlag == true) return false;
+      if (errFlag == true) {
+        final msg = (data['message'] ?? data['msg'] ?? '').toString();
+        _log?.call('pixiv checkLogin: error=true message="$msg" -> false');
+        return false;
+      }
 
       final body = data['body'];
-      if (body is! Map) return false;
+      if (body is! Map) {
+        _log?.call('pixiv checkLogin: body type=${body.runtimeType} not Map -> false');
+        return false;
+      }
 
       final uid = (body['userId'] ?? body['user_id'] ?? '').toString().trim();
-      return uid.isNotEmpty;
-    } catch (_) {
+      if (uid.isEmpty) {
+        // 打印 body 的 keys，帮助定位字段变化（不打印具体敏感值）
+        final keys = body.keys.map((e) => e.toString()).take(24).toList();
+        _log?.call('pixiv checkLogin: uid empty. body.keys(sample)=$keys -> false');
+        return false;
+      }
+
+      _log?.call('pixiv checkLogin: ok userId="$uid"');
+      return true;
+    } catch (e) {
+      if (e is DioException) {
+        final sc = e.response?.statusCode;
+        final ct = e.response?.headers.value('content-type') ?? '';
+        _log?.call(
+          'pixiv checkLogin: DioException type=${e.type} sc=${sc ?? '-'} ct="$ct" msg="${e.message ?? e.error ?? ''}" -> false',
+        );
+        return false;
+      }
+
+      _log?.call('pixiv checkLogin: exception="$e" -> false');
       return false;
     }
   }
