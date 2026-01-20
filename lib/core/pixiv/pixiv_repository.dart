@@ -13,6 +13,10 @@ import 'pixiv_client.dart';
 /// ✅ 新增：登录态校验缓存（cookie 非空不代表已登录）
 /// ✅ 改进：降级逻辑改为基于 loginOk（而非 hasCookie）
 /// ✅ 日志：输出 cookie=1/0 login=1/0，便于定位
+///
+/// 新增对外能力：
+/// - getLoginOk(rule): 供 WallpaperService / UI 查询“是否有效登录态”
+/// - cachedLoginOk:   供 Service/调试读取缓存（可选）
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -42,8 +46,12 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
-  /// 🔥 [修复] 补回此方法，供 WallpaperService 调用
-  void setCookie(String? cookie) => _client.setCookie(cookie);
+  /// 🔥 [修复] 供 WallpaperService 调用
+  /// 重要：Cookie 变化会直接影响登录态缓存，因此这里需要清缓存
+  void setCookie(String? cookie) {
+    _client.setCookie(cookie);
+    _invalidateLoginCache();
+  }
 
   /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
@@ -58,8 +66,8 @@ class PixivRepository {
   // ---------- Login check cache ----------
 
   /// 登录态缓存：避免每次 fetch 都打 /ajax/user/self
-  /// - cookie 变化会导致登录态变化；但本 Repo 侧无法稳定拿到 cookie 值本体
-  /// - 因此策略为：短 TTL + cookie 为空直接视为未登录
+  /// - cookie 变化会导致登录态变化；Repo 侧无法稳定拿到 cookie 值本体
+  /// - 策略：短 TTL + cookie 为空直接视为未登录
   static const Duration _kLoginCacheTtl = Duration(minutes: 5);
 
   bool? _cachedLoginOk;
@@ -67,8 +75,15 @@ class PixivRepository {
   bool _checkingLogin = false;
   Future<bool>? _checkingLoginFuture;
 
+  bool? get cachedLoginOk => _cachedLoginOk;
+
+  void _invalidateLoginCache() {
+    _cachedLoginOk = null;
+    _cachedLoginAt = null;
+  }
+
   Future<bool> _getLoginOkCached() async {
-    // 无 cookie 直接 false，并清掉缓存
+    // 无 cookie 直接 false，并写入缓存（避免 UI/Service 频繁触发）
     if (!hasCookie) {
       _cachedLoginOk = false;
       _cachedLoginAt = DateTime.now();
@@ -110,6 +125,15 @@ class PixivRepository {
     return _checkingLoginFuture!;
   }
 
+  /// ✅ 对外：获取“有效登录态”
+  /// 说明：
+  /// - UI 必须通过 WallpaperService 调用到这里
+  /// - 这里会先同步 Rule 中的 Cookie/UA（如果有），再按缓存策略校验登录态
+  Future<bool> getLoginOk(dynamic rule) async {
+    _syncConfigFromRule(rule);
+    return _getLoginOkCached();
+  }
+
   // ---------- Config sync ----------
 
   /// 从 Rule 中提取 Cookie 和 User-Agent 并注入 Client
@@ -136,8 +160,7 @@ class PixivRepository {
         );
 
         // 配置变化后：登录态缓存可能失效，主动清掉，下一次按需重验
-        _cachedLoginOk = null;
-        _cachedLoginAt = null;
+        _invalidateLoginCache();
 
         if (ua != null && ua.isNotEmpty) {
           _logger?.log('pixiv config synced: UA updated');
