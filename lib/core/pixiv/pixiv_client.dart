@@ -1,25 +1,22 @@
 // lib/core/pixiv/pixiv_client.dart
+import 'dart:convert';
 import 'package:dio/dio.dart';
 
-/// Pixiv Ajax API Client（无需 key）
+/// Pixiv Ajax API Client
 ///
-/// - 搜索：/ajax/search/artworks/{word}?p=1...
-/// - 取大图/原图：/ajax/illust/{id}/pages
-///
-/// 注意：
-/// 1) i.pximg.net 图片通常要求 Referer: https://www.pixiv.net/
-/// 2) 部分内容可能需要登录 Cookie（可选）
-/// 3) User-Agent 必须与 Cookie 获取端的浏览器一致，否则会被判定为劫持
+/// 核心机制：
+/// 1. 主要是伪装成浏览器访问 https://www.pixiv.net/ajax/...
+/// 2. 图片加载(i.pximg.net)必须带 Referer: https://www.pixiv.net/
 class PixivClient {
   final Dio _dio;
   String? _cookie;
-
-  /// 可选日志回调（Repo 可注入 PrismLogger.log）
-  final void Function(String msg)? _log;
-
-  // 🔥 默认 UA，但会被 updateConfig 覆盖
+  
+  // 默认使用 PC 端 UA，兼容性最好。
+  // 提示：如果要用 Touch API (/touch/ajax/...)，建议在请求时临时切换 UA，或者全局模拟手机
   String _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  final void Function(String msg)? _log;
 
   PixivClient({
     Dio? dio,
@@ -28,303 +25,216 @@ class PixivClient {
   })  : _dio = dio ?? Dio(),
         _cookie = cookie,
         _log = logger {
-    // 初始化 Headers
-    _updateHeaders();
-
-    _dio.options = _dio.options.copyWith(
+    
+    // 基础配置
+    _dio.options = BaseOptions(
       baseUrl: 'https://www.pixiv.net',
-      connectTimeout: const Duration(seconds: 10),
-      sendTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 15),
+      connectTimeout: const Duration(seconds: 15),
+      sendTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 20),
       responseType: ResponseType.json,
-      validateStatus: (s) => s != null && s < 500,
+      // 允许 404 等状态码不抛错，便于手动处理业务逻辑
+      validateStatus: (status) => status != null && status < 500, 
     );
+    
+    _refreshHeaders();
   }
 
   bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
-  /// 🔥 核心方法：允许外部(Repo)同步更新 Cookie 和 UA
+  /// 外部调用：更新配置（登录后、切换账号时）
   void updateConfig({String? cookie, String? userAgent}) {
-    if (cookie != null) _cookie = cookie;
-    if (userAgent != null && userAgent.isNotEmpty) _userAgent = userAgent;
-    _updateHeaders();
+    bool changed = false;
+    if (cookie != null) {
+      _cookie = cookie;
+      changed = true;
+    }
+    if (userAgent != null && userAgent.isNotEmpty) {
+      _userAgent = userAgent;
+      changed = true;
+    }
+    if (changed) _refreshHeaders();
   }
 
-  /// 单独设置 Cookie (兼容旧接口)
-  void setCookie(String? cookie) {
-    _cookie = cookie;
-    _updateHeaders();
-  }
-
-  String _uaShort() {
-    final ua = _userAgent.trim();
-    if (ua.isEmpty) return '';
-    return ua.length <= 42 ? ua : ua.substring(0, 42);
-  }
-
-  /// 统一刷新 Dio Headers
-  void _updateHeaders() {
+  void _refreshHeaders() {
     _dio.options.headers = {
-      'User-Agent': _userAgent, // 🔥 动态 UA
-      'Referer': 'https://www.pixiv.net/',
-      'Accept': 'application/json',
-      if (_cookie != null && _cookie!.isNotEmpty) 'Cookie': _cookie!,
+      'User-Agent': _userAgent,
+      'Referer': 'https://www.pixiv.net/', // 关键：防盗链检查
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8', // 尽量让 P 站返回中文 tag
+      if (hasCookie) 'Cookie': _cookie!,
     };
   }
 
-  /// 给 i.pximg.net 图片加载用（CachedNetworkImage / Dio 下载）
-  /// 🔥 必须确保这里的 UA 和 Cookie 与请求 API 时的一致
+  /// 图片下载/缓存专用 Headers
   Map<String, String> buildImageHeaders() {
-    final h = <String, String>{
+    return {
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
+      if (hasCookie) 'Cookie': _cookie!,
     };
-    final c = _cookie?.trim() ?? '';
-    if (c.isNotEmpty) h['Cookie'] = c;
-    return h;
   }
 
-  /// ✅ 检查当前 Cookie + UA 是否为“有效登录态”
-  ///
-  /// 说明：
-  /// - 仅 hasCookie 为 true 不代表 Pixiv 认可已登录（过期/缺字段/风控/UA 不一致都可能失败）
-  /// - 该接口用于 Repo 侧做降级判断（popular / r18 等）
-  ///
-  /// 返回：
-  /// - true  : 登录有效（能解析到 userId）
-  /// - false : 未登录/失效/被拦截/网络错误
+  // =========================================================
+  // 核心 API 方法
+  // =========================================================
+
+  /// 检查登录状态
   Future<bool> checkLogin() async {
-    // 没 cookie 直接 false
-    if (!hasCookie) {
-      _log?.call('pixiv checkLogin: no cookie -> false');
-      return false;
-    }
+    if (!hasCookie) return false;
 
     try {
+      // 这里的 header 会自动使用 _dio.options.headers
       final resp = await _dio.get('/ajax/user/self');
-
-      final sc = resp.statusCode ?? 0;
-      final ct = resp.headers.value('content-type') ?? '';
-      _log?.call('pixiv checkLogin: sc=$sc ct="$ct" ua="${_uaShort()}"');
-
-      if (sc >= 400) {
-        // 常见：401/403
-        _log?.call('pixiv checkLogin: http>=400 -> false');
+      
+      if ((resp.statusCode ?? 0) >= 400) {
+        _log?.call('CheckLogin: HTTP ${resp.statusCode}');
         return false;
       }
 
       final data = resp.data;
+      if (data is! Map) return false;
 
-      // 兜底：有些情况下会被重定向到 HTML 或返回 String
-      if (data is String) {
-        final s = data.trim();
-        final head = s.length <= 80 ? s : s.substring(0, 80);
-        _log?.call('pixiv checkLogin: data is String (maybe HTML). head="$head" -> false');
-        return false;
+      // 1. 尝试解析 Desktop 结构
+      // {"body": {"userId": "123"}, "error": false}
+      if (data['body'] is Map) {
+        final uid = data['body']['userId']?.toString() ?? '';
+        if (uid.isNotEmpty) {
+          _log?.call('CheckLogin: Success (Desktop) UID=$uid');
+          return true;
+        }
       }
 
-      if (data is! Map) {
-        _log?.call('pixiv checkLogin: data type=${data.runtimeType} not Map -> false');
-        return false;
+      // 2. 尝试解析 Mobile 结构 (Touch API)
+      // {"userData": {"id": "123"}}
+      if (data['userData'] is Map) {
+        final uid = data['userData']['id']?.toString() ?? '';
+        if (uid.isNotEmpty) {
+          _log?.call('CheckLogin: Success (Mobile) UID=$uid');
+          return true;
+        }
       }
-
-      // Pixiv Ajax 通常结构：{ error: false, body: {...}, message: ... }
-      final errFlag = data['error'];
-      if (errFlag == true) {
-        final msg = (data['message'] ?? data['msg'] ?? '').toString();
-        _log?.call('pixiv checkLogin: error=true message="$msg" -> false');
-        return false;
-      }
-
-      final body = data['body'];
-      if (body is! Map) {
-        _log?.call('pixiv checkLogin: body type=${body.runtimeType} not Map -> false');
-        return false;
-      }
-
-      final uid = (body['userId'] ?? body['user_id'] ?? '').toString().trim();
-      if (uid.isEmpty) {
-        // 打印 body 的 keys，帮助定位字段变化（不打印具体敏感值）
-        final keys = body.keys.map((e) => e.toString()).take(24).toList();
-        _log?.call('pixiv checkLogin: uid empty. body.keys(sample)=$keys -> false');
-        return false;
-      }
-
-      _log?.call('pixiv checkLogin: ok userId="$uid"');
-      return true;
+      
+      _log?.call('CheckLogin: Unknown structure');
+      return false;
     } catch (e) {
-      if (e is DioException) {
-        final sc = e.response?.statusCode;
-        final ct = e.response?.headers.value('content-type') ?? '';
-        _log?.call(
-          'pixiv checkLogin: DioException type=${e.type} sc=${sc ?? '-'} ct="$ct" msg="${e.message ?? e.error ?? ''}" -> false',
-        );
-        return false;
-      }
-
-      _log?.call('pixiv checkLogin: exception="$e" -> false');
+      _log?.call('CheckLogin Error: $e');
       return false;
     }
   }
 
-  /// 搜索：返回 illust id + 搜索页给的缩略图
+  /// 搜索插画
   Future<List<PixivIllustBrief>> searchArtworks({
     required String word,
     int page = 1,
-    String order = 'date_d',
-    String mode = 'all',
-    String sMode = 's_tag',
+    String order = 'date_d', // date_d (新到旧) | popular_d (热门-需要会员)
+    String mode = 'all',     // all | r18 | safe
+    String sMode = 's_tag',  // s_tag (标签完全匹配) | s_tag_full (标签部分匹配)
   }) async {
-    final w = word.trim();
-    if (w.isEmpty) return [];
+    if (word.trim().isEmpty) return [];
 
-    final path = '/ajax/search/artworks/${Uri.encodeComponent(w)}';
-
-    // Headers 已经在 _updateHeaders 中设置到了 _dio.options，此处无需重复设置
-    final resp = await _dio.get(
-      path,
-      queryParameters: {
-        'order': order,
-        'mode': mode,
-        's_mode': sMode,
-        'p': page,
-      },
-    );
-
-    final sc = resp.statusCode ?? 0;
-    if (sc >= 400) {
-      throw DioException(
-        requestOptions: resp.requestOptions,
-        response: resp,
-        type: DioExceptionType.badResponse,
-        error: 'HTTP $sc',
+    try {
+      final resp = await _dio.get(
+        '/ajax/search/artworks/${Uri.encodeComponent(word)}',
+        queryParameters: {
+          'word': word,
+          'order': order,
+          'mode': mode,
+          's_mode': sMode,
+          'p': page,
+          'type': 'illust_and_ugoira', // 仅插画和动图，排除漫画
+        },
       );
+
+      if ((resp.statusCode ?? 0) >= 400) return [];
+
+      final body = resp.data['body'];
+      if (body == null || body is! Map) return [];
+
+      // 注意：Key 可能是 illustManga 也可能是 illust
+      final container = body['illustManga'] ?? body['illust'];
+      if (container == null || container is! Map) return [];
+
+      final list = container['data'];
+      if (list is! List) return [];
+
+      return list
+          .map((e) => PixivIllustBrief.fromJson(e))
+          .where((e) => e.id.isNotEmpty) // 过滤掉广告或无效数据
+          .toList();
+
+    } catch (e) {
+      _log?.call('Search Error: $e');
+      return [];
     }
-
-    final data = resp.data;
-    if (data is! Map) return [];
-
-    final body = data['body'];
-    if (body is! Map) return [];
-
-    final illustManga = body['illustManga'];
-    if (illustManga is! Map) return [];
-
-    final list = illustManga['data'];
-    if (list is! List) return [];
-
-    final out = <PixivIllustBrief>[];
-    for (final it in list) {
-      if (it is! Map) continue;
-
-      final id = (it['id'] ?? '').toString();
-      if (id.isEmpty) continue;
-
-      out.add(
-        PixivIllustBrief(
-          id: id,
-          title: (it['title'] ?? '').toString(),
-          thumbUrl: (it['url'] ?? '').toString(),
-          width: _toInt(it['width']),
-          height: _toInt(it['height']),
-          xRestrict: _toInt(it['xRestrict']),
-        ),
-      );
-    }
-    return out;
   }
 
-  /// 获取作品所有页 URL（含 original / regular / small）
+  /// 获取作品详情页的图片链接
   Future<List<PixivPageUrls>> getIllustPages(String illustId) async {
-    final id = illustId.trim();
-    if (id.isEmpty) return [];
+    if (illustId.isEmpty) return [];
+    
+    try {
+      final resp = await _dio.get('/ajax/illust/$illustId/pages');
+      
+      if ((resp.statusCode ?? 0) >= 400) return [];
+      
+      final body = resp.data['body'];
+      if (body is! List) return [];
 
-    final resp = await _dio.get('/ajax/illust/$id/pages');
-
-    final sc = resp.statusCode ?? 0;
-    if (sc >= 400) {
-      throw DioException(
-        requestOptions: resp.requestOptions,
-        response: resp,
-        type: DioExceptionType.badResponse,
-        error: 'HTTP $sc',
-      );
+      return body.map((e) => PixivPageUrls.fromJson(e)).toList();
+    } catch (e) {
+      _log?.call('GetPages Error: $e');
+      return [];
     }
-
-    final data = resp.data;
-    if (data is! Map) return [];
-
-    final body = data['body'];
-    if (body is! List) return [];
-
-    final out = <PixivPageUrls>[];
-    for (final it in body) {
-      if (it is! Map) continue;
-      final urls = it['urls'];
-      if (urls is! Map) continue;
-
-      out.add(
-        PixivPageUrls(
-          original: (urls['original'] ?? '').toString(),
-          regular: (urls['regular'] ?? '').toString(),
-          small: (urls['small'] ?? '').toString(),
-          thumbMini: (urls['thumb_mini'] ?? '').toString(),
-        ),
-      );
-    }
-    return out;
   }
 
-  // 新增：获取用户作品（兼容之前提到的扩展）
+  /// 获取指定用户的作品列表 (使用 Touch API)
   Future<List<PixivIllustBrief>> getUserArtworks({
     required String userId,
     int page = 1,
   }) async {
-    final uid = userId.trim();
-    if (uid.isEmpty) return [];
+    if (userId.isEmpty) return [];
 
-    // 注意：Touch API 可能需要特殊的 UA，但通常 Desktop UA 也能通过
-    final resp = await _dio.get(
-      '/touch/ajax/user/illusts',
-      queryParameters: {'user_id': uid, 'p': page},
-    );
+    try {
+      // Touch API 通常返回分页更方便
+      final resp = await _dio.get(
+        '/touch/ajax/user/illusts',
+        queryParameters: {
+          'user_id': userId,
+          'p': page,
+        },
+      );
 
-    final data = resp.data;
-    if (data is! Map) return [];
-    final body = data['body'];
-    if (body is! Map) return [];
-    final illusts = body['illusts'];
-    if (illusts is! List) return [];
+      final data = resp.data;
+      if (data is! Map) return [];
+      
+      // Touch API 结构: body -> illusts (List)
+      final body = data['body'];
+      if (body is! Map) return [];
+      
+      final list = body['illusts'];
+      if (list is! List) return [];
 
-    final out = <PixivIllustBrief>[];
-    for (final it in illusts) {
-      if (it is! Map) continue;
-      out.add(PixivIllustBrief(
-        id: (it['id'] ?? '').toString(),
-        title: (it['title'] ?? '').toString(),
-        thumbUrl: (it['url'] ?? '').toString(),
-        width: _toInt(it['width']),
-        height: _toInt(it['height']),
-        xRestrict: _toInt(it['x_restrict']),
-      ));
+      return list.map((e) => PixivIllustBrief.fromMap(e)).toList();
+
+    } catch (e) {
+      _log?.call('UserArtworks Error: $e');
+      return [];
     }
-    return out;
-  }
-
-  static int _toInt(dynamic v) {
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    return int.tryParse(v?.toString() ?? '') ?? 0;
   }
 }
+
+// =========================================================
+// 数据模型 (Model)
+// =========================================================
 
 class PixivIllustBrief {
   final String id;
   final String title;
-  final String thumbUrl;
+  final String thumbUrl; // 缩略图
   final int width;
   final int height;
-  final int xRestrict;
+  final int xRestrict; // 0: 全年龄, 1: R18, 2: R18G
+  final List<String> tags; // 新增：方便展示 tag
 
   const PixivIllustBrief({
     required this.id,
@@ -333,7 +243,60 @@ class PixivIllustBrief {
     required this.width,
     required this.height,
     required this.xRestrict,
+    this.tags = const [],
   });
+
+  /// 解析 Desktop Search API 的数据
+  factory PixivIllustBrief.fromJson(dynamic json) {
+    if (json is! Map) return _empty();
+    
+    // 广告位检测：有些 item 只有 adContainerUrl，没有 id
+    if (json['id'] == null) return _empty();
+
+    return PixivIllustBrief(
+      id: _parseString(json['id']),
+      title: _parseString(json['title']),
+      thumbUrl: _parseString(json['url']),
+      width: _parseInt(json['width']),
+      height: _parseInt(json['height']),
+      xRestrict: _parseInt(json['xRestrict']),
+      tags: _parseTags(json['tags']),
+    );
+  }
+
+  /// 解析 Touch/Mobile API 的数据 (字段风格不同，比如 snake_case)
+  factory PixivIllustBrief.fromMap(dynamic json) {
+     if (json is! Map) return _empty();
+     
+     return PixivIllustBrief(
+      id: _parseString(json['id']),
+      title: _parseString(json['title']),
+      thumbUrl: _parseString(json['url']), // Touch API 通常也是 url
+      width: _parseInt(json['width']),
+      height: _parseInt(json['height']),
+      xRestrict: _parseInt(json['x_restrict']), // 注意下划线
+      tags: _parseTags(json['tags']),
+    );
+  }
+
+  static PixivIllustBrief _empty() {
+    return const PixivIllustBrief(
+        id: '', title: '', thumbUrl: '', width: 0, height: 0, xRestrict: 0);
+  }
+
+  // --- 安全解析辅助函数 ---
+  static String _parseString(dynamic v) => v?.toString() ?? '';
+  
+  static int _parseInt(dynamic v) {
+    if (v is int) return v;
+    if (v is String) return int.tryParse(v) ?? 0;
+    return 0;
+  }
+  
+  static List<String> _parseTags(dynamic v) {
+    if (v is List) return v.map((e) => e.toString()).toList();
+    return [];
+  }
 }
 
 class PixivPageUrls {
@@ -348,4 +311,21 @@ class PixivPageUrls {
     required this.small,
     required this.thumbMini,
   });
+
+  factory PixivPageUrls.fromJson(dynamic json) {
+    if (json is! Map) return _empty();
+    final urls = json['urls'];
+    if (urls is! Map) return _empty();
+
+    return PixivPageUrls(
+      original: urls['original']?.toString() ?? '',
+      regular: urls['regular']?.toString() ?? '',
+      small: urls['small']?.toString() ?? '',
+      thumbMini: urls['thumb_mini']?.toString() ?? '',
+    );
+  }
+
+  static PixivPageUrls _empty() {
+    return const PixivPageUrls(original: '', regular: '', small: '', thumbMini: '');
+  }
 }
