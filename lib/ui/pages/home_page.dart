@@ -5,7 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// 🔥 确保引入了新库
+// 🔥 核心库
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
@@ -274,7 +274,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 终极调试版：全程弹窗，解决 Release 包看不到日志的问题
+  // 🔥 终极方案：自动检测 + 鲁棒的手动检测
   void _openPixivWebLogin(BuildContext context) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -290,7 +290,7 @@ class _HomePageState extends State<HomePage> {
     final cookieManager = CookieManager.instance();
     await cookieManager.deleteAllCookies();
 
-    // 辅助函数：显示强制弹窗
+    // 辅助：显示弹窗
     void showMsg(String title, String content) {
       if (!context.mounted) return;
       showDialog(
@@ -307,6 +307,24 @@ class _HomePageState extends State<HomePage> {
 
     String? foundCookie;
 
+    // 🔥 提取 Cookie 的核心逻辑，供自动和手动调用
+    Future<String?> checkCookies() async {
+      // 读取多域名
+      final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+      final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
+      
+      final allCookies = [...cookiesMain, ...cookiesAcc];
+      final uniqueCookies = <String, Cookie>{};
+      for (var c in allCookies) {
+        uniqueCookies[c.name] = c;
+      }
+
+      if (uniqueCookies.containsKey('PHPSESSID')) {
+        return uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
+      }
+      return null;
+    }
+
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -317,7 +335,7 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                // 1. 先弹个 Loading，证明点击生效了
+                // 手动检测：带 Loading 和 结果弹窗
                 showDialog(
                   context: ctx,
                   barrierDismissible: false,
@@ -325,39 +343,23 @@ class _HomePageState extends State<HomePage> {
                 );
 
                 try {
-                  // 🔥🔥🔥 修复：删除了报错的 flush() 调用 🔥🔥🔥
-                  // flutter_inappwebview v6 会自动处理同步
-
-                  // 2. 读取 (多域名)
-                  final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
-                  final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
+                  final cookieStr = await checkCookies();
                   
                   // 关闭 Loading
                   if (ctx.mounted) Navigator.pop(ctx); 
 
-                  // 3. 合并检查
-                  final allCookies = [...cookiesMain, ...cookiesAcc];
-                  final uniqueCookies = <String, Cookie>{};
-                  for (var c in allCookies) {
-                    uniqueCookies[c.name] = c;
-                  }
-
-                  final hasSession = uniqueCookies.containsKey('PHPSESSID');
-                  
-                  if (hasSession) {
-                    final cookieStr = uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
+                  if (cookieStr != null) {
                     foundCookie = cookieStr;
-                    Navigator.pop(ctx); // 关闭 Webview 页面
+                    if (ctx.mounted) Navigator.pop(ctx); // 成功，关闭页面
                   } else {
-                    // 💥 失败弹窗：展示所有读到的 Key
-                    final names = uniqueCookies.keys.join(', ');
-                    showMsg("未检测到 Session", "已读到: [$names]\n\n如果这里只有 device_token 或空，说明还没登录成功，或者网页没加载完。");
+                    // 读取失败，尝试获取一些调试信息
+                    final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                    final names = cookies.map((c) => c.name).join(', ');
+                    showMsg("未检测到 Session", "请确认已显示登录成功页面。\n\n当前已读到: [$names]");
                   }
                 } catch (e) {
-                  // 关闭 Loading
                   if (ctx.mounted) Navigator.pop(ctx);
-                  // 💥 异常弹窗
-                  showMsg("程序异常", e.toString());
+                  showMsg("异常", e.toString());
                 }
               },
               child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -374,10 +376,21 @@ class _HomePageState extends State<HomePage> {
             databaseEnabled: true,
             mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW, 
           ),
+          // 🔥 新增：页面加载完自动检测
+          onLoadStop: (controller, url) async {
+             try {
+               final cookieStr = await checkCookies();
+               if (cookieStr != null) {
+                 foundCookie = cookieStr;
+                 if (ctx.mounted) Navigator.pop(ctx); // 自动关闭
+               }
+             } catch (_) {}
+          },
         ),
       ),
     );
 
+    // 保存逻辑
     if (foundCookie != null && mounted) {
       final manager = context.read<SourceManager>();
       final rule = manager.activeRule;
@@ -389,7 +402,7 @@ class _HomePageState extends State<HomePage> {
       await prefs.setString(key, foundCookie!);
       context.read<WallpaperService>().setPixivCookie(foundCookie);
       
-      showMsg("成功", "登录成功！Cookie 已保存。");
+      showMsg("成功", "登录成功！Cookie 已自动保存。");
       _fetchData(refresh: true);
     }
   }
