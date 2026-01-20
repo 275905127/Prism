@@ -8,7 +8,8 @@ import '../utils/prism_logger.dart';
 import 'pixiv_client.dart';
 
 /// Pixiv 专用仓库
-/// ✅ 修复：强制同步 Rule 中的 User-Agent 和 Cookie，解决 Session 劫持问题
+/// ✅ 修复：补回 setCookie 和 copyWith 方法，解决构建报错
+/// ✅ 功能：强制同步 Rule 中的 User-Agent 和 Cookie
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -24,7 +25,7 @@ class PixivRepository {
   final PrismLogger? _logger;
 
   static const String kRuleId = 'pixiv_search_ajax';
-  static const String kUserRuleId = 'pixiv_user'; // 兼容用户ID搜索
+  static const String kUserRuleId = 'pixiv_user';
 
   bool supports(dynamic rule) {
     try {
@@ -38,6 +39,9 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
+  /// 🔥 [修复] 补回此方法，供 WallpaperService 调用
+  void setCookie(String? cookie) => _client.setCookie(cookie);
+
   /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
 
@@ -50,7 +54,7 @@ class PixivRepository {
 
   // ---------- Config sync ----------
 
-  /// ✅ 关键修复：从 Rule 中提取 Cookie 和 User-Agent 并注入 Client
+  /// 从 Rule 中提取 Cookie 和 User-Agent 并注入 Client
   void _syncConfigFromRule(dynamic rule) {
     try {
       final dynamic headers = (rule as dynamic).headers;
@@ -61,12 +65,12 @@ class PixivRepository {
       final dynamic c2 = headers['cookie'];
       final cookie = (c1 ?? c2)?.toString().trim();
 
-      // 提取 User-Agent (JSON 中 key 大小写敏感，通常是 User-Agent)
+      // 提取 User-Agent
       final dynamic ua1 = headers['User-Agent'];
       final dynamic ua2 = headers['user-agent'];
       final ua = (ua1 ?? ua2)?.toString().trim();
 
-      // 注入 Client (Client 会自动刷新 headers)
+      // 注入 Client
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
         _client.updateConfig(
           cookie: cookie,
@@ -96,7 +100,7 @@ class PixivRepository {
     final q = (query ?? '').trim();
     if (q.isEmpty) return const [];
 
-    // ✅ 1. 同步配置 (Cookie + UA)
+    // 1. 同步配置 (Cookie + UA)
     _syncConfigFromRule(rule);
 
     // 2. 读取 filters
@@ -131,15 +135,13 @@ class PixivRepository {
       'REQ pixiv q="$q" page=$page order=$order mode=$mode cookie=${hasCookie ? 1 : 0}',
     );
 
-    // 4. 执行搜索 (兼容关键词搜和用户ID搜)
+    // 4. 执行搜索
     final ruleId = (rule as dynamic).id?.toString() ?? '';
     List<PixivIllustBrief> briefs = [];
 
     if (ruleId == kUserRuleId) {
-       // 用户ID模式
        briefs = await _client.getUserArtworks(userId: q, page: page);
     } else {
-       // 关键词模式
        briefs = await _client.searchArtworks(
         word: q,
         page: page,
@@ -151,7 +153,6 @@ class PixivRepository {
     
     _logger?.log('RESP pixiv count=${briefs.length}');
 
-    // 验证排序是否生效
     if (briefs.isNotEmpty) {
       final first3 = briefs.take(3).map((e) => e.id).toList();
       _logger?.log('pixiv verify first3=$first3');
@@ -159,7 +160,7 @@ class PixivRepository {
 
     if (briefs.isEmpty) return const [];
 
-    // 5. 并发补全 (使用 URL 推算优化)
+    // 5. 并发补全
     final enriched = await _enrichWithPages(
       briefs,
       concurrency: _pagesConfig.concurrency,
@@ -218,12 +219,9 @@ class PixivRepository {
 
         final b = briefs[idx];
         String regular = '';
-        
-        // 🔥 优化：优先推算 URL，减少网络请求，避免 Timeout
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
 
-        // 只有推算失败才去请求网络
         if (original.isEmpty) {
           try {
             final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
@@ -233,10 +231,9 @@ class PixivRepository {
               if (p0.original.isNotEmpty) original = p0.original;
             }
           } catch (e) {
-            // ignore error
+            // ignore
           }
         } else {
-           // 推算成功，regular 也用 original 顶替，或者你需要自己推算 regular
            regular = original; 
         }
 
@@ -284,8 +281,6 @@ class PixivRepository {
           .replaceAll('_master1200', '')
           .replaceAll('_custom1200', '');
 
-      // ⚠️ 注意：推算的扩展名通常是 jpg/png，但这里不确定。
-      // 大部分情况直接用原链接即可，服务端会重定向或本身就是准的。
       return u.replace(path: newPath, query: '').toString();
     } catch (_) {
       return null;
@@ -305,6 +300,21 @@ class PixivPagesConfig {
     this.retryCount = 1,
     this.retryDelay = const Duration(milliseconds: 280),
   });
+
+  /// 🔥 [修复] 补回此方法，供 WallpaperService 调用
+  PixivPagesConfig copyWith({
+    int? concurrency,
+    Duration? timeoutPerItem,
+    int? retryCount,
+    Duration? retryDelay,
+  }) {
+    return PixivPagesConfig(
+      concurrency: concurrency ?? this.concurrency,
+      timeoutPerItem: timeoutPerItem ?? this.timeoutPerItem,
+      retryCount: retryCount ?? this.retryCount,
+      retryDelay: retryDelay ?? this.retryDelay,
+    );
+  }
 }
 
 class _PixivEnriched {
