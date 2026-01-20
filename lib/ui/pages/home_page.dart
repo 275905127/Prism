@@ -275,6 +275,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // 🔥 终极方案：自动检测 + 鲁棒的手动检测
+    // 🔥 修复版：加入重试轮询，确保 Cookie 落地后再关闭
   void _openPixivWebLogin(BuildContext context) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -290,7 +291,6 @@ class _HomePageState extends State<HomePage> {
     final cookieManager = CookieManager.instance();
     await cookieManager.deleteAllCookies();
 
-    // 辅助：显示弹窗
     void showMsg(String title, String content) {
       if (!context.mounted) return;
       showDialog(
@@ -309,6 +309,11 @@ class _HomePageState extends State<HomePage> {
 
     // 提取 Cookie 的逻辑
     Future<String?> checkCookies() async {
+      // 1. 尝试同步 (虽说 v6 自动同步，但在循环里调用一下不亏)
+      if (Theme.of(context).platform == TargetPlatform.android) {
+         // await cookieManager.flush(); // 如果编译报错 flush 未定义，请注释掉这行
+      }
+
       final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
       final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
       
@@ -318,6 +323,7 @@ class _HomePageState extends State<HomePage> {
         uniqueCookies[c.name] = c;
       }
 
+      // 必须包含 PHPSESSID 才算成功
       if (uniqueCookies.containsKey('PHPSESSID')) {
         return uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
       }
@@ -334,26 +340,20 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                // 手动检测：带 Loading 和 结果弹窗
+                // 手动检测按钮 (逻辑保持不变)
                 showDialog(
                   context: ctx,
                   barrierDismissible: false,
                   builder: (c) => const Center(child: CircularProgressIndicator()),
                 );
-
                 try {
-                  // 🔥 修复：已移除 flush()
-                  
                   final cookieStr = await checkCookies();
-                  
-                  // 关闭 Loading
                   if (ctx.mounted) Navigator.pop(ctx); 
 
                   if (cookieStr != null) {
                     foundCookie = cookieStr;
-                    if (ctx.mounted) Navigator.pop(ctx); // 成功，关闭页面
+                    if (ctx.mounted) Navigator.pop(ctx); 
                   } else {
-                    // 调试信息
                     final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
                     final names = cookies.map((c) => c.name).join(', ');
                     showMsg("未检测到 Session", "请确认已登录。\n\n当前读到: [$names]");
@@ -377,22 +377,33 @@ class _HomePageState extends State<HomePage> {
             databaseEnabled: true,
             mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW, 
           ),
-          // 🔥 关键修改：自动检测的门槛
+          // 🔥🔥🔥 核心修复：自动检测 + 轮询重试机制 🔥🔥🔥
           onLoadStop: (controller, url) async {
              try {
                final urlStr = url?.toString() ?? '';
                
-               // ⛔ 门槛：如果是登录页 (accounts.pixiv.net)，直接忽略，防止误判
+               // 1. 还在登录页？忽略
                if (urlStr.contains('accounts.pixiv.net')) return;
                
-               // ✅ 只有当域名包含了主站 (www.pixiv.net) 时，才去检查 Cookie
-               // 这意味着用户已经完成了登录跳转
+               // 2. 是主页？开始轮询检查！
                if (urlStr.contains('pixiv.net') && !urlStr.contains('login')) {
-                 final cookieStr = await checkCookies();
-                 if (cookieStr != null) {
-                   foundCookie = cookieStr;
-                   if (ctx.mounted) Navigator.pop(ctx); // 自动关闭
+                 
+                 // 循环检查 5 次，每次间隔 500ms
+                 // 也就是给系统 2.5秒 的时间去写入 Cookie
+                 for (int i = 0; i < 5; i++) {
+                   final cookieStr = await checkCookies();
+                   
+                   if (cookieStr != null) {
+                     // 找到了！保存并关闭
+                     foundCookie = cookieStr;
+                     if (ctx.mounted) Navigator.pop(ctx); 
+                     return; // 结束循环
+                   }
+                   
+                   // 没找到，等待 500ms 后重试
+                   await Future.delayed(const Duration(milliseconds: 500));
                  }
+                 // 如果循环结束还没找到，就不自动关闭，让用户手动点按钮
                }
              } catch (_) {}
           },
@@ -400,6 +411,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
+    // 保存逻辑
     if (foundCookie != null && mounted) {
       final manager = context.read<SourceManager>();
       final rule = manager.activeRule;
@@ -415,6 +427,7 @@ class _HomePageState extends State<HomePage> {
       _fetchData(refresh: true);
     }
   }
+
 
   Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
