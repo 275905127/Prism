@@ -276,13 +276,11 @@ class _HomePageState extends State<HomePage> {
 
   // 🔥 核心重写：使用 flutter_inappwebview 进行登录
   // 可以 100% 读取到 HttpOnly 的 Cookie (如 PHPSESSID)
-  void _openPixivWebLogin(BuildContext context) async {
-    // 1. 获取 UA 逻辑：优先用配置的，没有则用默认 Mobile UA
+    void _openPixivWebLogin(BuildContext context) async {
+    // 1. 获取 UA
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
-
-    String targetUA = PixivClient.kMobileUserAgent; 
-
+    String targetUA = PixivClient.kMobileUserAgent;
     if (rule != null && rule.headers != null) {
       final h = rule.headers!;
       final customUA = h['User-Agent'] ?? h['user-agent'];
@@ -290,10 +288,10 @@ class _HomePageState extends State<HomePage> {
         targetUA = customUA.trim();
       }
     }
-    
+
     // 2. 准备 CookieManager
     final cookieManager = CookieManager.instance();
-    // 清空旧 Cookie，防止干扰
+    // 建议：每次打开前清空，确保干净的登录态
     await cookieManager.deleteAllCookies();
 
     String? foundCookie;
@@ -309,28 +307,41 @@ class _HomePageState extends State<HomePage> {
             TextButton(
               onPressed: () async {
                 try {
-                  // 🔥 使用 CookieManager 直接从浏览器内核读取
-                  // 这里的 WebUri 是 inappwebview 特有的类
-                  final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                  // 🔥🔥🔥 修复开始：地毯式搜索 Cookie 🔥🔥🔥
                   
-                  // 检查是否包含关键的 session id
-                  final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
+                  // 1. 分别读取主站和账号站的 Cookie
+                  final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                  final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
 
-                  if (hasSession) {
-                    // 拼接 Cookie 字符串
-                    final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+                  // 2. 合并去重 (以 cookie name 为 key)
+                  final allCookies = [...cookiesMain, ...cookiesAcc];
+                  final uniqueCookies = <String, Cookie>{};
+                  for (var c in allCookies) {
+                    uniqueCookies[c.name] = c;
+                  }
+
+                  // 3. 寻找 PHPSESSID
+                  if (uniqueCookies.containsKey('PHPSESSID')) {
+                    // 拼接字符串
+                    final cookieStr = uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
                     foundCookie = cookieStr;
                     if (ctx.mounted) Navigator.pop(ctx);
                   } else {
+                    // ⚠️ 调试反馈：如果没有找到 Session，告诉我你找到了啥
+                    final foundNames = uniqueCookies.keys.join(', ');
                     if (ctx.mounted) {
                       ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(content: Text('未检测到 PHPSESSID，请确认已登录成功')),
+                        SnackBar(
+                          content: Text('未找到 Session。已读取到的 Cookie: $foundNames'),
+                          duration: const Duration(seconds: 4),
+                        ),
                       );
                     }
                   }
+                  // 🔥🔥🔥 修复结束 🔥🔥🔥
                 } catch (e) {
                   if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('获取 Cookie 失败: $e')));
+                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('读取失败: $e')));
                   }
                 }
               },
@@ -338,36 +349,36 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-        // 🔥 使用 InAppWebView 替换原有的 WebViewWidget
         body: InAppWebView(
           initialUrlRequest: URLRequest(url: WebUri('https://accounts.pixiv.net/login')),
           initialSettings: InAppWebViewSettings(
             userAgent: targetUA,
             javaScriptEnabled: true,
-            thirdPartyCookiesEnabled: true, // 允许第三方 Cookie，提高登录成功率
-            domStorageEnabled: true,        // 开启存储，确保 Android 能够持久化 Cookie
-            databaseEnabled: true,
+            thirdPartyCookiesEnabled: true,
+            domStorageEnabled: true, // 确保开启
+            databaseEnabled: true,   // 确保开启
           ),
         ),
       ),
     );
 
-    // 3. 保存逻辑
+    // 保存逻辑
     if (foundCookie != null && mounted) {
       final manager = context.read<SourceManager>();
       final rule = manager.activeRule;
       if (rule == null) return;
-      
+
       final prefs = await SharedPreferences.getInstance();
       final key = _pixivCookiePrefsKey(rule.id);
-      
+
       await prefs.setString(key, foundCookie!);
       context.read<WallpaperService>().setPixivCookie(foundCookie);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 登录成功，Cookie 已更新')));
       _fetchData(refresh: true);
     }
   }
+
 
   Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
