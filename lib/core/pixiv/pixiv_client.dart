@@ -4,8 +4,14 @@ import 'package:dio/dio.dart';
 class PixivClient {
   final Dio _dio;
   String? _cookie;
-  String _userAgent =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  // 🔥 优化：定义全局统一的 Mobile UA (Android Chrome)
+  // 供 Webview 和 API 请求默认使用，确保指纹一致
+  static const String kMobileUserAgent =
+      'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+  // 默认使用上面的常量
+  String _userAgent = kMobileUserAgent;
 
   final void Function(String msg)? _log;
 
@@ -79,12 +85,10 @@ class PixivClient {
       final data = resp.data;
       if (data is! Map) return false;
 
-      // 1. Desktop
       if (data['body'] is Map) {
         final uid = data['body']['userId']?.toString() ?? '';
         if (uid.isNotEmpty) return true;
       }
-      // 2. Mobile
       if (data['userData'] is Map) {
         final uid = data['userData']['id']?.toString() ?? '';
         if (uid.isNotEmpty) return true;
@@ -140,18 +144,16 @@ class PixivClient {
     }
   }
 
-  // 🔥 新增：排行榜 API
   Future<List<PixivIllustBrief>> getRanking({
-    required String mode, // daily, weekly, monthly, rookie, original, male, female
+    required String mode,
     int page = 1,
   }) async {
     try {
-      // 使用 touch API 比较容易解析，返回结构类似 getUserArtworks
       final resp = await _dio.get(
         '/touch/ajax/ranking',
         queryParameters: {
           'mode': mode,
-          'type': 'all', // illust + ugoira
+          'type': 'all',
           'p': page,
           'format': 'json',
         },
@@ -160,9 +162,8 @@ class PixivClient {
       if ((resp.statusCode ?? 0) >= 400) return [];
       
       final body = resp.data;
-      if (body is! Map) return []; // touch api直接返回根对象，有时在 body 里
+      if (body is! Map) return [];
       
-      // 兼容 touch API 的不同响应结构
       final rankings = body['ranking'] ?? (body['body']?['ranking']);
       if (rankings is! List) return [];
 
@@ -227,9 +228,8 @@ class PixivIllustBrief {
   final int height;
   final int xRestrict;
   final List<String> tags;
-  // 🔥 新增字段
-  final int illustType; // 0,1=illust, 2=ugoira(动图)
-  final int aiType;     // 1=non-AI, 2=AI-generated
+  final int illustType;
+  final int aiType;
 
   const PixivIllustBrief({
     required this.id,
@@ -273,7 +273,7 @@ class PixivIllustBrief {
       height: _parseInt(json['height']),
       xRestrict: _parseInt(json['x_restrict']),
       tags: _parseTags(json['tags']),
-      illustType: _parseInt(json['illust_type']), // map里通常是下划线
+      illustType: _parseInt(json['illust_type']),
       aiType: _parseInt(json['ai_type']),
     );
   }
