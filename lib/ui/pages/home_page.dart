@@ -276,6 +276,7 @@ class _HomePageState extends State<HomePage> {
 
   // 🔥 核心重写：使用 flutter_inappwebview 进行登录
   // 可以 100% 读取到 HttpOnly 的 Cookie (如 PHPSESSID)
+  // 🔥 终极调试版：带日志 + 强制弹窗 + Android Cookie 刷新
   void _openPixivWebLogin(BuildContext context) async {
     // 1. 获取 UA
     final manager = context.read<SourceManager>();
@@ -289,10 +290,23 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // 2. 准备 CookieManager
     final cookieManager = CookieManager.instance();
-    // 建议：每次打开前清空，确保干净的登录态
     await cookieManager.deleteAllCookies();
+
+    // 定义一个显示弹窗的辅助函数（因为 SnackBar 可能会没反应）
+    void showDebugDialog(String title, String content) {
+      if (!context.mounted) return;
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          content: SingleChildScrollView(child: Text(content, style: const TextStyle(fontSize: 12))),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("确定")),
+          ],
+        ),
+      );
+    }
 
     String? foundCookie;
 
@@ -306,43 +320,42 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
+                print("👉 按钮被点击了！开始读取 Cookie..."); // 1. 确认点击有效
+                
                 try {
-                  // 🔥🔥🔥 修复开始：地毯式搜索 Cookie 🔥🔥🔥
+                  // 2. 强制 Android 写入/同步 Cookie (关键)
+                  // 在某些机型上，Webview 的 Cookie 还在内存里，没存到 CookieManager 能读到的地方
+                  if (Theme.of(context).platform == TargetPlatform.android) {
+                     await cookieManager.flush(); 
+                  }
+
+                  // 3. 读取 Cookie (目标必须是 .pixiv.net 根域)
+                  final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
                   
-                  // 1. 分别读取主站和账号站的 Cookie
-                  final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
-                  final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
-
-                  // 2. 合并去重 (以 cookie name 为 key)
-                  final allCookies = [...cookiesMain, ...cookiesAcc];
-                  final uniqueCookies = <String, Cookie>{};
-                  for (var c in allCookies) {
-                    uniqueCookies[c.name] = c;
-                  }
-
-                  // 3. 寻找 PHPSESSID
-                  if (uniqueCookies.containsKey('PHPSESSID')) {
-                    // 拼接字符串
-                    final cookieStr = uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
+                  print("👉 读取到的 Cookie 数量: ${cookies.length}"); // 2. 确认是否读到了东西
+                  
+                  final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
+                  
+                  if (hasSession) {
+                    print("👉 ✅ 成功找到 PHPSESSID");
+                    final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
                     foundCookie = cookieStr;
-                    if (ctx.mounted) Navigator.pop(ctx);
+                    Navigator.pop(ctx);
                   } else {
-                    // ⚠️ 调试反馈：如果没有找到 Session，告诉我你找到了啥
-                    final foundNames = uniqueCookies.keys.join(', ');
-                    if (ctx.mounted) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        SnackBar(
-                          content: Text('未找到 Session。已读取到的 Cookie: $foundNames'),
-                          duration: const Duration(seconds: 4),
-                        ),
-                      );
-                    }
+                    // 调试：打印出所有读到的 Cookie 名字
+                    final names = cookies.map((c) => c.name).join(', ');
+                    print("👉 ❌ 没找到 Session。当前 Cookie 列表: $names");
+                    
+                    // 强制弹窗报错
+                    showDebugDialog(
+                      "未检测到登录状态",
+                      "已读取 Cookie ($names)\n\n如果这里是空的，或者只有 device_token，说明：\n1. 网页还没加载完\n2. 还没完成登录\n3. 需要重启 App 让新插件生效",
+                    );
                   }
-                  // 🔥🔥🔥 修复结束 🔥🔥🔥
-                } catch (e) {
-                  if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('读取失败: $e')));
-                  }
+                } catch (e, stack) {
+                  print("👉 💥 发生异常: $e");
+                  print(stack);
+                  showDebugDialog("程序错误", e.toString());
                 }
               },
               child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -355,9 +368,15 @@ class _HomePageState extends State<HomePage> {
             userAgent: targetUA,
             javaScriptEnabled: true,
             thirdPartyCookiesEnabled: true,
-            domStorageEnabled: true, // 确保开启
-            databaseEnabled: true,   // 确保开启
+            domStorageEnabled: true,
+            databaseEnabled: true,
+            // 允许混合内容，防止部分资源加载失败
+            mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW, 
           ),
+          // 监听加载进度，确保页面真的载入了
+          onLoadStop: (controller, url) {
+            print("👉 页面加载完成: $url");
+          },
         ),
       ),
     );
@@ -374,10 +393,11 @@ class _HomePageState extends State<HomePage> {
       await prefs.setString(key, foundCookie!);
       context.read<WallpaperService>().setPixivCookie(foundCookie);
 
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 登录成功，Cookie 已更新')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 登录成功')));
       _fetchData(refresh: true);
     }
   }
+
 
 
   Future<void> _showPixivSettingsDialog() async {
