@@ -25,6 +25,9 @@ class FilterSheet extends StatefulWidget {
 class _FilterSheetState extends State<FilterSheet> {
   late Map<String, dynamic> _tempValues;
 
+  Future<bool>? _pixivLoginFuture;
+  bool? _pixivLoginOk; // null = 未完成校验；true/false = 已完成
+
   @override
   void initState() {
     super.initState();
@@ -38,19 +41,37 @@ class _FilterSheetState extends State<FilterSheet> {
     });
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+
+    // 只在首次进入或依赖变化时触发一次 login 校验（避免 build 里反复请求）
+    final activeRule = context.read<SourceManager>().activeRule;
+    final service = context.read<WallpaperService>();
+
+    final isPixiv = service.isPixivRule(activeRule);
+    if (!isPixiv || activeRule == null) return;
+
+    if (_pixivLoginFuture != null) return;
+
+    _pixivLoginFuture = service.getPixivLoginOk(activeRule).then((ok) {
+      if (!mounted) return ok;
+      setState(() => _pixivLoginOk = ok);
+      return ok;
+    }).catchError((_) {
+      if (!mounted) return false;
+      setState(() => _pixivLoginOk = false);
+      return false;
+    });
+  }
+
   bool _isPixivActiveSource(BuildContext context) {
     final activeRule = context.read<SourceManager>().activeRule;
     return context.read<WallpaperService>().isPixivRule(activeRule);
   }
 
-  /// ✅ Pixiv Cookie 判定必须包含“规则 headers 自带 Cookie”
-  ///
-  /// 新实现：直接读取 Service 计算后的最终图片请求头（会触发 _syncPixivCookieFromRule）
-  /// 只要最终 headers 里存在 Cookie，即视为“已设置 Cookie”
-  ///
-  /// 注意：
-  /// - Cookie 非空不代表一定已登录（可能过期），但 UI 侧用于“是否允许选择”已足够。
-  /// - 登录态由 Repo 侧进一步判定（loginOk），会自动降级 popular/r18 等筛选。
+  /// Pixiv Cookie 判定包含“规则 headers 自带 Cookie”
+  /// 这里只判断“是否提供了 cookie 字符串”，不等价于“有效登录态”
   bool _hasPixivCookie(BuildContext context) {
     final activeRule = context.read<SourceManager>().activeRule;
     if (activeRule == null) return false;
@@ -64,20 +85,25 @@ class _FilterSheetState extends State<FilterSheet> {
     required String filterKey,
     required String optionValue,
     required bool hasCookie,
+    required bool loginOk,
+    required bool loginResolved,
   }) {
-    if (hasCookie) return false;
-
     final k = filterKey.trim().toLowerCase();
     final v = optionValue.trim().toLowerCase();
 
-    // 按 Pixiv 官方形态做两档：
-    // - 热门排序：需登录
-    if (k == 'order' && v.contains('popular')) return true;
+    final bool isPrivileged =
+        (k == 'order' && v.contains('popular')) || (k == 'mode' && v == 'r18');
 
-    // - R-18：通常需登录（且未登录常导致空/失败/不可见）
-    if (k == 'mode' && v == 'r18') return true;
+    if (!isPrivileged) return false;
 
-    return false;
+    // 规则：
+    // - 未提供 cookie：一定锁
+    // - 提供 cookie 但 login 未完成校验：保守锁（避免 UI 放行但最终无效）
+    // - 校验完成但 loginOk=false：锁
+    // - loginOk=true：放行
+    if (!hasCookie) return true;
+    if (!loginResolved) return true;
+    return !loginOk;
   }
 
   void _toastLocked() {
@@ -156,6 +182,14 @@ class _FilterSheetState extends State<FilterSheet> {
     final bool isPixiv = _isPixivActiveSource(context);
     final bool hasCookie = _hasPixivCookie(context);
 
+    final bool loginResolved = _pixivLoginOk != null;
+    final bool loginOk = _pixivLoginOk == true;
+
+    // “部分需登录”的提示：如果是 Pixiv 且热门/R18 受限（未登录或未完成校验）就显示
+    final bool shouldShowLoginHint = isPixiv &&
+        (filter.key.toLowerCase() == 'order' || filter.key.toLowerCase() == 'mode') &&
+        (!hasCookie || !loginResolved || !loginOk);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -171,7 +205,7 @@ class _FilterSheetState extends State<FilterSheet> {
                   decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(4)),
                   child: const Text("多选", style: TextStyle(fontSize: 10, color: Colors.grey)),
                 ),
-              if (isPixiv && !hasCookie && (filter.key.toLowerCase() == 'order' || filter.key.toLowerCase() == 'mode'))
+              if (shouldShowLoginHint)
                 Container(
                   margin: const EdgeInsets.only(left: 8),
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -201,10 +235,11 @@ class _FilterSheetState extends State<FilterSheet> {
                       filterKey: filter.key,
                       optionValue: option.value,
                       hasCookie: hasCookie,
+                      loginOk: loginOk,
+                      loginResolved: loginResolved,
                     )
                   : false;
 
-              // 置灰：禁用 onSelected，但保留点击提示
               final FilterChip chip = FilterChip(
                 label: Row(
                   mainAxisSize: MainAxisSize.min,
