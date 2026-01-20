@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// 🔥 核心库
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
@@ -273,7 +274,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 终极修复：增加 URL 门槛，防止未登录就自动关闭
+  // 🔥 终极方案：自动检测 + 鲁棒的手动检测
   void _openPixivWebLogin(BuildContext context) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
@@ -289,6 +290,7 @@ class _HomePageState extends State<HomePage> {
     final cookieManager = CookieManager.instance();
     await cookieManager.deleteAllCookies();
 
+    // 辅助：显示弹窗
     void showMsg(String title, String content) {
       if (!context.mounted) return;
       showDialog(
@@ -332,6 +334,7 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
+                // 手动检测：带 Loading 和 结果弹窗
                 showDialog(
                   context: ctx,
                   barrierDismissible: false,
@@ -339,13 +342,16 @@ class _HomePageState extends State<HomePage> {
                 );
 
                 try {
+                  // 🔥 修复：已移除 flush()
+                  
                   final cookieStr = await checkCookies();
                   
-                  if (ctx.mounted) Navigator.pop(ctx); // 关Loading
+                  // 关闭 Loading
+                  if (ctx.mounted) Navigator.pop(ctx); 
 
                   if (cookieStr != null) {
                     foundCookie = cookieStr;
-                    if (ctx.mounted) Navigator.pop(ctx); // 关Webview
+                    if (ctx.mounted) Navigator.pop(ctx); // 成功，关闭页面
                   } else {
                     // 调试信息
                     final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
@@ -591,6 +597,24 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+
+    // 🔥 修复：补回丢失的 badges 定义
+    final List<Widget> badges = [];
+    if (paper.isUgoira) {
+      badges.add(Container(
+        margin: const EdgeInsets.only(right: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), borderRadius: BorderRadius.circular(4)),
+        child: const Text('GIF', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+      ));
+    }
+    if (paper.isAi) {
+      badges.add(Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(color: Colors.blueAccent.withOpacity(0.7), borderRadius: BorderRadius.circular(4)),
+        child: const Text('AI', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+      ));
+    }
 
     final content = Container(
       decoration: BoxDecoration(
