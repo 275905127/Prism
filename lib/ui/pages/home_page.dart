@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// 🔥 核心库
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
@@ -13,7 +12,6 @@ import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
 import '../../core/pixiv/pixiv_client.dart';
-
 import '../../core/utils/prism_logger.dart';
 
 import '../widgets/foggy_app_bar.dart';
@@ -43,9 +41,6 @@ class _HomePageState extends State<HomePage> {
 
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
-
-  // ✅ 保存防抖：必须放 State 级别
-  bool _pixivSaving = false;
 
   @override
   void initState() {
@@ -77,10 +72,10 @@ class _HomePageState extends State<HomePage> {
       if (jsonStr != null) {
         final m = jsonDecode(jsonStr);
         context.read<WallpaperService>().setPixivPreferences(
-          imageQuality: m['quality'],
-          showAi: m['show_ai'],
-          mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
-        );
+              imageQuality: m['quality'],
+              showAi: m['show_ai'],
+              mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
+            );
       }
     } catch (_) {}
   }
@@ -99,18 +94,45 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
+  // ✅ 修复：优先 prefs，其次 rule.headers；两者都无才 clear
   Future<void> _applyPixivCookieIfNeeded() async {
+    final PrismLogger logger = const AppLogLogger();
+
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
-
     if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final c = prefs.getString(_pixivCookiePrefsKey(rule.id))?.trim() ?? '';
-      context.read<WallpaperService>().setPixivCookie(c.isEmpty ? null : c);
-    } catch (_) {}
+
+      // 1) prefs
+      final fromPrefs = (prefs.getString(_pixivCookiePrefsKey(rule.id)) ?? '').trim();
+
+      // 2) rule.headers fallback
+      String fromHeaders = '';
+      final h = rule.headers;
+      if (h != null) {
+        fromHeaders = ((h['Cookie'] ?? h['cookie'])?.toString() ?? '').trim();
+      }
+
+      final selected = fromPrefs.isNotEmpty ? fromPrefs : fromHeaders;
+
+      // 3) 注入 service（只在两者都空时清空）
+      context.read<WallpaperService>().setPixivCookie(selected.isEmpty ? null : selected);
+
+      logger.log(
+        'Pixiv apply cookie (UI) rule=${rule.id} prefsLen=${fromPrefs.length} headersLen=${fromHeaders.length} selectedLen=${selected.length}',
+      );
+
+      // 4) headers -> prefs 回填，避免下次 prefs 空又清空
+      if (fromPrefs.isEmpty && fromHeaders.isNotEmpty) {
+        await prefs.setString(_pixivCookiePrefsKey(rule.id), fromHeaders);
+        logger.log('Pixiv apply cookie (UI) backfilled prefs from rule.headers');
+      }
+    } catch (e) {
+      const AppLogLogger().log('Pixiv apply cookie (UI) failed: $e');
+    }
   }
 
   Future<void> _loadFilters() async {
@@ -130,7 +152,7 @@ class _HomePageState extends State<HomePage> {
           _currentFilters = {};
         }
       });
-    } catch (e) {}
+    } catch (_) {}
   }
 
   Future<void> _saveFilters(Map<String, dynamic> filters) async {
@@ -145,7 +167,7 @@ class _HomePageState extends State<HomePage> {
       } else {
         await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
       }
-    } catch (e) {}
+    } catch (_) {}
   }
 
   void _onScroll() {
@@ -174,10 +196,10 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final data = await context.read<WallpaperService>().fetch(
-        rule,
-        page: _page,
-        filterParams: _currentFilters,
-      );
+            rule,
+            page: _page,
+            filterParams: _currentFilters,
+          );
 
       if (!mounted) return;
 
@@ -263,7 +285,7 @@ class _HomePageState extends State<HomePage> {
               try {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
-              } catch (e) {
+              } catch (_) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
               }
             },
@@ -275,14 +297,19 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // Pixiv Web 登录：BottomSheet 只负责检测并返回 cookie
-  // 保存：优先写入 service + rule.headers（强制生效），prefs 作为后台备份不阻塞
+  // Pixiv Web 登录（方案2：必须手动点保存；保存动作在 Sheet 内完成）
+  // 关键点：
+  // 1) 检测 Cookie 仍然写日志 + UI 提示
+  // 2) 点击“保存”时：立刻注入 WallpaperService + 写回 rule.headers + prefs 备份
+  // 3) 保存成功后才关闭 Sheet，避免“pop 后续逻辑不执行”
   // =========================================================
   void _openPixivWebLogin(BuildContext context) async {
     final PrismLogger logger = const AppLogLogger();
 
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
+    final sourceManager = context.read<SourceManager>();
+    final wallpaperService = context.read<WallpaperService>();
+
+    final rule = sourceManager.activeRule;
 
     String targetUA = PixivClient.kMobileUserAgent;
     if (rule != null && rule.headers != null) {
@@ -294,10 +321,13 @@ class _HomePageState extends State<HomePage> {
     }
 
     final cookieManager = CookieManager.instance();
-    logger.log('Pixiv web login opened (UI) UA=${targetUA.length > 60 ? '${targetUA.substring(0, 60)}...' : targetUA}');
+    logger.log(
+      'Pixiv web login opened (UI) UA=${targetUA.length > 60 ? '${targetUA.substring(0, 60)}...' : targetUA}',
+    );
 
+    // 只清 WebView Cookie，不清 app 内持久化；否则你会看到 “cookie cleared (UI)” 误判为丢登录
     await cookieManager.deleteAllCookies();
-    logger.log('Pixiv cookie cleared (UI)');
+    logger.log('Pixiv webview cookies cleared (UI)');
 
     void snack(BuildContext ctx, String msg) {
       if (!ctx.mounted) return;
@@ -338,8 +368,9 @@ class _HomePageState extends State<HomePage> {
     // ✅ 状态变量放 builder 外，避免重建清空
     bool sheetDetected = false;
     String sheetCookie = '';
+    bool saving = false;
 
-    final String? cookieToSave = await showModalBottomSheet<String?>(
+    await showModalBottomSheet<void>(
       context: context,
       isDismissible: false,
       enableDrag: false,
@@ -377,6 +408,66 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
+          Future<void> doSave() async {
+            if (saving) return;
+
+            final cookie = sheetCookie.trim();
+            if (cookie.isEmpty) {
+              logger.log('Pixiv save blocked (UI): cookie empty');
+              snack(ctx, 'Cookie 为空，无法保存');
+              return;
+            }
+
+            final active = sourceManager.activeRule;
+            if (active == null) {
+              logger.log('Pixiv save failed (UI): activeRule null');
+              snack(ctx, '保存失败：activeRule 为空');
+              return;
+            }
+
+            saving = true;
+            if (ctx.mounted) setModalState(() {});
+
+            logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
+
+            try {
+              // 1) 立刻注入 Service：决定 login=1/0 的关键
+              wallpaperService.setPixivCookie(cookie);
+              logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
+
+              // 2) 写回 rule.headers：持久化（优先级高于 prefs）
+              await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
+              logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
+
+              // 3) prefs 备份：后台，不阻塞
+              () async {
+                try {
+                  final prefs = await SharedPreferences.getInstance();
+                  final key = _pixivCookiePrefsKey(active.id);
+                  await prefs.setString(key, cookie);
+                  logger.log('Pixiv cookie backup saved to prefs key=$key');
+                } catch (e) {
+                  logger.log('Pixiv cookie backup prefs failed: $e');
+                }
+              }();
+
+              snack(ctx, '已保存，正在刷新…');
+
+              // 关闭 sheet
+              if (ctx.mounted) Navigator.pop(ctx);
+
+              // 刷新列表
+              if (mounted) _fetchData(refresh: true);
+
+              logger.log('Pixiv save success (UI)');
+            } catch (e) {
+              logger.log('Pixiv save failed (UI): $e');
+              snack(ctx, '保存失败：$e');
+              saving = false;
+              if (ctx.mounted) setModalState(() {});
+            }
+          }
+
           final bool saveEnabled = sheetDetected && sheetCookie.isNotEmpty;
 
           return Scaffold(
@@ -384,28 +475,31 @@ class _HomePageState extends State<HomePage> {
               title: const Text('登录 Pixiv', style: TextStyle(fontSize: 16)),
               leading: IconButton(
                 icon: const Icon(Icons.close),
-                onPressed: () {
-                  logger.log('Pixiv web login closed by user (UI) detected=$sheetDetected');
-                  Navigator.pop(ctx, null);
-                },
+                onPressed: saving
+                    ? null
+                    : () {
+                        logger.log('Pixiv web login closed by user (UI) detected=$sheetDetected');
+                        Navigator.pop(ctx);
+                      },
               ),
               actions: [
                 TextButton(
-                  onPressed: manualCheck,
+                  onPressed: saving ? null : manualCheck,
                   child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
                 const SizedBox(width: 6),
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
                   child: FilledButton(
-                    onPressed: saveEnabled
-                        ? () {
-                            logger.log('Pixiv save pressed (UI) detected=$sheetDetected cookieLen=${sheetCookie.length}');
-                            Navigator.pop(ctx, sheetCookie);
-                          }
-                        : null,
+                    onPressed: (!saveEnabled || saving) ? null : doSave,
                     style: FilledButton.styleFrom(backgroundColor: Colors.black),
-                    child: const Text('保存'),
+                    child: saving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Text('保存'),
                   ),
                 ),
               ],
@@ -475,86 +569,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    logger.log('Pixiv web login sheet closed (UI) cookieReturned=${cookieToSave != null}');
-
-    final cookie = (cookieToSave ?? '').trim();
-    if (cookie.isEmpty) {
-      logger.log('Pixiv cookie detected but NOT saved (UI): user closed without returning cookie');
-      return;
-    }
-
-    // ✅ 保存阶段：sheet 外执行，防抖 + timeout + 日志
-    if (_pixivSaving) {
-      logger.log('Pixiv save skipped: already saving (UI)');
-      return;
-    }
-    _pixivSaving = true;
-
-    try {
-      final m = context.read<SourceManager>();
-      final r = m.activeRule;
-      if (r == null) {
-        logger.log('Pixiv save failed: activeRule null');
-        return;
-      }
-
-      Future<T> withTimeout<T>(Future<T> f, String step, Duration d) async {
-        logger.log('Pixiv save step start: $step');
-        try {
-          final v = await f.timeout(d);
-          logger.log('Pixiv save step done: $step');
-          return v;
-        } catch (e) {
-          logger.log('Pixiv save step failed/timeout: $step error=$e');
-          rethrow;
-        }
-      }
-
-      // ✅ 版本戳：确认新代码已进入保存阶段
-      logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length}');
-
-      // ✅ 1) 先注入到 Service：立刻生效（login=1 的关键）
-      context.read<WallpaperService>().setPixivCookie(cookie);
-      logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
-
-      // ✅ 2) 写回 rule.headers：持久化（下次启动仍有效）
-      await withTimeout(
-        m.updateRuleHeader(r.id, 'Cookie', cookie),
-        'SourceManager.updateRuleHeader(Cookie)',
-        const Duration(seconds: 3),
-      );
-      logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
-
-      // ✅ 3) SharedPreferences 作为备份：后台保存，不 await，不阻塞主流程
-      () async {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final key = _pixivCookiePrefsKey(r.id);
-          await prefs.setString(key, cookie);
-          logger.log('Pixiv cookie backup saved to prefs key=$key');
-        } catch (e) {
-          logger.log('Pixiv cookie backup prefs failed: $e');
-        }
-      }();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Pixiv Cookie 已保存，正在刷新…')),
-        );
-      }
-      _fetchData(refresh: true);
-
-      logger.log('Pixiv save success (UI)');
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败或超时：$e')),
-        );
-      }
-      logger.log('Pixiv save failed (final): $e');
-    } finally {
-      _pixivSaving = false;
-    }
+    logger.log('Pixiv web login sheet closed (UI)');
   }
 
   Future<void> _showPixivSettingsDialog() async {
@@ -804,7 +819,8 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    const AppLogLogger().log('HOME_PAGE_VERSION=2026-01-21_SAVE_STAGE_V3');
+    const AppLogLogger().log('HOME_PAGE_VERSION=2026-01-21_SAVE_IN_SHEET_V1');
+
     final manager = context.watch<SourceManager>();
     final activeRule = manager.activeRule;
     final hasFilters = activeRule != null && activeRule.filters.isNotEmpty;
