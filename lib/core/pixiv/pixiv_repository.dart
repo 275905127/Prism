@@ -1,22 +1,35 @@
 // lib/core/pixiv/pixiv_repository.dart
 import 'dart:async';
-
 import 'package:dio/dio.dart';
-
 import '../models/uni_wallpaper.dart';
 import '../utils/prism_logger.dart';
 import 'pixiv_client.dart';
 
-/// Pixiv 专用仓库
-/// ✅ 修复：补回 setCookie 和 copyWith 方法，解决构建报错
-/// ✅ 功能：强制同步 Rule 中的 User-Agent 和 Cookie
-/// ✅ 新增：登录态校验缓存（cookie 非空不代表已登录）
-/// ✅ 改进：降级逻辑改为基于 loginOk（而非 hasCookie）
-/// ✅ 日志：输出 cookie=1/0 login=1/0，便于定位
-///
-/// 新增对外能力：
-/// - getLoginOk(rule): 供 WallpaperService / UI 查询“是否有效登录态”
-/// - cachedLoginOk:   供 Service/调试读取缓存（可选）
+// 🔥 新增：Pixiv 偏好设置类
+class PixivPreferences {
+  final String imageQuality; // 'original', 'regular', 'small'
+  final List<String> mutedTags; // 屏蔽标签列表
+  final bool showAi; // 是否显示 AI 作品 (false = 屏蔽 aiType==2)
+
+  const PixivPreferences({
+    this.imageQuality = 'original',
+    this.mutedTags = const [],
+    this.showAi = true,
+  });
+
+  PixivPreferences copyWith({
+    String? imageQuality,
+    List<String>? mutedTags,
+    bool? showAi,
+  }) {
+    return PixivPreferences(
+      imageQuality: imageQuality ?? this.imageQuality,
+      mutedTags: mutedTags ?? this.mutedTags,
+      showAi: showAi ?? this.showAi,
+    );
+  }
+}
+
 class PixivRepository {
   PixivRepository({
     String? cookie,
@@ -30,6 +43,11 @@ class PixivRepository {
 
   final PixivClient _client;
   final PrismLogger? _logger;
+  
+  // 🔥 新增：偏好设置状态
+  PixivPreferences _prefs = const PixivPreferences();
+  PixivPreferences get prefs => _prefs;
+  void updatePreferences(PixivPreferences p) => _prefs = p;
 
   static const String kRuleId = 'pixiv_search_ajax';
   static const String kUserRuleId = 'pixiv_user';
@@ -46,14 +64,11 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
-  /// 🔥 [修复] 供 WallpaperService 调用
-  /// 重要：Cookie 变化会直接影响登录态缓存，因此这里需要清缓存
   void setCookie(String? cookie) {
     _client.setCookie(cookie);
     _invalidateLoginCache();
   }
 
-  /// 给 CachedNetworkImage / Dio 下载图片用
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
 
   PixivPagesConfig _pagesConfig;
@@ -64,17 +79,11 @@ class PixivRepository {
   }
 
   // ---------- Login check cache ----------
-
-  /// 登录态缓存：避免每次 fetch 都打 /ajax/user/self
-  /// - cookie 变化会导致登录态变化；Repo 侧无法稳定拿到 cookie 值本体
-  /// - 策略：短 TTL + cookie 为空直接视为未登录
   static const Duration _kLoginCacheTtl = Duration(minutes: 5);
-
   bool? _cachedLoginOk;
   DateTime? _cachedLoginAt;
   bool _checkingLogin = false;
   Future<bool>? _checkingLoginFuture;
-
   bool? get cachedLoginOk => _cachedLoginOk;
 
   void _invalidateLoginCache() {
@@ -83,27 +92,20 @@ class PixivRepository {
   }
 
   Future<bool> _getLoginOkCached() async {
-    // 无 cookie 直接 false，并写入缓存（避免 UI/Service 频繁触发）
     if (!hasCookie) {
       _cachedLoginOk = false;
       _cachedLoginAt = DateTime.now();
       return false;
     }
-
     final now = DateTime.now();
     final lastAt = _cachedLoginAt;
     if (lastAt != null && _cachedLoginOk != null) {
       final age = now.difference(lastAt);
-      if (age <= _kLoginCacheTtl) {
-        return _cachedLoginOk!;
-      }
+      if (age <= _kLoginCacheTtl) return _cachedLoginOk!;
     }
-
-    // 防止并发多次触发 checkLogin
     if (_checkingLogin && _checkingLoginFuture != null) {
       return _checkingLoginFuture!;
     }
-
     _checkingLogin = true;
     _checkingLoginFuture = () async {
       try {
@@ -112,7 +114,6 @@ class PixivRepository {
         _cachedLoginAt = DateTime.now();
         return ok;
       } catch (_) {
-        // 网络异常时：保守返回 false，避免 popular/r18 误用导致异常或空
         _cachedLoginOk = false;
         _cachedLoginAt = DateTime.now();
         return false;
@@ -121,50 +122,30 @@ class PixivRepository {
         _checkingLoginFuture = null;
       }
     }();
-
     return _checkingLoginFuture!;
   }
 
-  /// ✅ 对外：获取“有效登录态”
-  /// 说明：
-  /// - UI 必须通过 WallpaperService 调用到这里
-  /// - 这里会先同步 Rule 中的 Cookie/UA（如果有），再按缓存策略校验登录态
   Future<bool> getLoginOk(dynamic rule) async {
     _syncConfigFromRule(rule);
     return _getLoginOkCached();
   }
 
   // ---------- Config sync ----------
-
-  /// 从 Rule 中提取 Cookie 和 User-Agent 并注入 Client
   void _syncConfigFromRule(dynamic rule) {
     try {
       final dynamic headers = (rule as dynamic).headers;
       if (headers == null || headers is! Map) return;
-
-      // 提取 Cookie
       final dynamic c1 = headers['Cookie'];
       final dynamic c2 = headers['cookie'];
       final cookie = (c1 ?? c2)?.toString().trim();
-
-      // 提取 User-Agent
       final dynamic ua1 = headers['User-Agent'];
       final dynamic ua2 = headers['user-agent'];
       final ua = (ua1 ?? ua2)?.toString().trim();
 
-      // 注入 Client
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
-        _client.updateConfig(
-          cookie: cookie,
-          userAgent: ua,
-        );
-
-        // 配置变化后：登录态缓存可能失效，主动清掉，下一次按需重验
+        _client.updateConfig(cookie: cookie, userAgent: ua);
         _invalidateLoginCache();
-
-        if (ua != null && ua.isNotEmpty) {
-          _logger?.log('pixiv config synced: UA updated');
-        }
+        if (ua != null && ua.isNotEmpty) _logger?.log('pixiv config synced: UA updated');
         if (cookie != null && cookie.isNotEmpty) {
           final prefix = cookie.length <= 12 ? cookie : cookie.substring(0, 12);
           _logger?.log('pixiv config synced: Cookie injected ($prefix...)');
@@ -182,16 +163,19 @@ class PixivRepository {
     String? query,
     Map<String, dynamic>? filterParams,
   }) async {
-    final q = (query ?? '').trim();
-    if (q.isEmpty) return const [];
-
-    // 1. 同步配置 (Cookie + UA)
+    final String baseQuery = (query ?? '').trim();
+    // 🔥 如果没有 query，且不是排行榜模式，就给个默认
+    // 排行榜模式下 query 可能为空，不应直接 return
+    
+    // 1. 同步配置
     _syncConfigFromRule(rule);
 
     // 2. 读取 filters
     String order = 'date_d';
     String mode = 'all';
     String sMode = 's_tag';
+    // 🔥 新增：最小收藏数
+    int minBookmarks = 0;
 
     final fp = filterParams ?? const <String, dynamic>{};
     String _pickStr(String k, String fallback) {
@@ -199,40 +183,71 @@ class PixivRepository {
       final s = (v ?? '').toString().trim();
       return s.isEmpty ? fallback : s;
     }
-
+    
     order = _pickStr('order', order);
     mode = _pickStr('mode', mode);
     sMode = _pickStr('s_mode', sMode);
+    
+    // 读取 min_bookmarks
+    final mbRaw = fp['min_bookmarks'];
+    if (mbRaw != null) {
+      minBookmarks = int.tryParse(mbRaw.toString()) ?? 0;
+    }
 
-    // 3. 登录态判断（cookie 非空不代表已登录）
+    // 3. 登录态判断
     final bool loginOk = await _getLoginOkCached();
 
-    // 4. 降级逻辑：未登录时阻止 popular / r18
+    // 4. 降级与权限
+    // 识别是否是排行榜模式 (mode 以 ranking_ 开头，或者 UI 传了 'daily' 等)
+    bool isRanking = false;
+    String rankingMode = '';
+    
+    if (mode.startsWith('ranking_')) {
+      isRanking = true;
+      rankingMode = mode.replaceFirst('ranking_', ''); // daily, weekly...
+    } else if (['daily', 'weekly', 'monthly', 'rookie', 'original', 'male', 'female'].contains(mode)) {
+      // 兼容直接传 ranking mode 的情况
+      isRanking = true;
+      rankingMode = mode;
+    }
+
     if (!loginOk) {
       if (order.toLowerCase().contains('popular')) {
-        _logger?.log('pixiv filter blocked (not logged in): order=$order -> date_d');
+        _logger?.log('pixiv blocked: order=$order -> date_d');
         order = 'date_d';
       }
       if (mode.toLowerCase() == 'r18') {
-        _logger?.log('pixiv filter blocked (not logged in): mode=r18 -> safe');
+        _logger?.log('pixiv blocked: mode=r18 -> safe');
         mode = 'safe';
       }
+      // 排行榜通常不需要登录，或者是 public 的，暂时放行
+    }
+
+    // 🔥 5. 构造最终 Query (搜索模式下)
+    String finalQuery = baseQuery;
+    if (!isRanking && baseQuery.isNotEmpty && minBookmarks > 0) {
+      // 自动拼接 users入り
+      finalQuery = '$baseQuery ${minBookmarks}users入り';
     }
 
     _logger?.log(
-      'REQ pixiv q="$q" page=$page order=$order mode=$mode cookie=${hasCookie ? 1 : 0} login=${loginOk ? 1 : 0}',
+      'REQ pixiv q="$finalQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0}',
     );
 
-    // 5. 执行搜索
+    // 6. 执行 API
     final ruleId = (rule as dynamic).id?.toString() ?? '';
     List<PixivIllustBrief> briefs = [];
 
     try {
-      if (ruleId == kUserRuleId) {
-        briefs = await _client.getUserArtworks(userId: q, page: page);
+      if (isRanking) {
+        // 🔥 走排行榜 API
+        briefs = await _client.getRanking(mode: rankingMode, page: page);
+      } else if (ruleId == kUserRuleId) {
+        briefs = await _client.getUserArtworks(userId: finalQuery, page: page);
       } else {
+        if (finalQuery.isEmpty) return const []; // 搜索模式下空 query 还是不发的
         briefs = await _client.searchArtworks(
-          word: q,
+          word: finalQuery,
           page: page,
           order: order,
           mode: mode,
@@ -240,20 +255,33 @@ class PixivRepository {
         );
       }
     } catch (e) {
-      _logger?.log('ERR pixiv search: $e');
+      _logger?.log('ERR pixiv fetch: $e');
       rethrow;
     }
 
-    _logger?.log('RESP pixiv count=${briefs.length}');
-
-    if (briefs.isNotEmpty) {
-      final first3 = briefs.take(3).map((e) => e.id).toList();
-      _logger?.log('pixiv verify first3=$first3');
+    // 🔥 7. 客户端过滤 (屏蔽 AI / 屏蔽标签)
+    final int beforeCount = briefs.length;
+    briefs = briefs.where((b) {
+      // AI 过滤
+      if (!_prefs.showAi && b.isAi) return false;
+      
+      // 标签屏蔽
+      if (_prefs.mutedTags.isNotEmpty) {
+        for (final t in b.tags) {
+          if (_prefs.mutedTags.contains(t)) return false;
+        }
+      }
+      return true;
+    }).toList();
+    
+    if (briefs.length != beforeCount) {
+      _logger?.log('pixiv filter muted: ${beforeCount - briefs.length} items removed');
     }
 
+    _logger?.log('RESP pixiv count=${briefs.length}');
     if (briefs.isEmpty) return const [];
 
-    // 6. 并发补全
+    // 8. 并发补全
     final enriched = await _enrichWithPages(
       briefs,
       concurrency: _pagesConfig.concurrency,
@@ -262,24 +290,39 @@ class PixivRepository {
       retryDelay: _pagesConfig.retryDelay,
     );
 
-    // 7. 转换结果
+    // 9. 转换结果
     final out = <UniWallpaper>[];
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
 
-      final best = e.originalUrl.isNotEmpty
-          ? e.originalUrl
-          : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
+      // 🔥 画质选择逻辑 (在 _enrichWithPages 已处理 URL 获取，这里选哪个字段)
+      // enriched 结构里已经把 originalUrl 等都填好了，这里根据 prefs 做最终决策
+      String bestUrl = e.thumbUrl;
+      
+      switch (_prefs.imageQuality) {
+        case 'original':
+          bestUrl = e.originalUrl.isNotEmpty ? e.originalUrl : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
+          break;
+        case 'small':
+          bestUrl = e.thumbUrl;
+          break;
+        case 'regular':
+        default:
+          bestUrl = e.regularUrl.isNotEmpty ? e.regularUrl : (e.originalUrl.isNotEmpty ? e.originalUrl : e.thumbUrl);
+          break;
+      }
 
       out.add(
         UniWallpaper(
           id: e.id,
           sourceId: 'pixiv',
           thumbUrl: e.thumbUrl,
-          fullUrl: best,
+          fullUrl: bestUrl,
           width: e.width.toDouble(),
           height: e.height.toDouble(),
           grade: e.grade,
+          isUgoira: e.isUgoira, // 传递动图标识
+          isAi: e.isAi,         // 传递 AI 标识
         ),
       );
     }
@@ -315,8 +358,11 @@ class PixivRepository {
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
 
-        if (original.isEmpty) {
-          // 这里 pages 请求失败不应影响主列表，保持吞错
+        // 🔥 优化：如果是小图模式，或者 original 已经能推导出来，就没必要发 pages 请求
+        // 只有当 'original' 或 'regular' 且推导失败时，才必须请求
+        final bool needFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
+
+        if (needFetch) {
           try {
             final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
             if (pages.isNotEmpty) {
@@ -329,7 +375,7 @@ class PixivRepository {
           }
         } else {
           // thumb 能推导 original：直接用同一个
-          regular = original;
+          if (regular.isEmpty) regular = original;
         }
 
         results[idx] = _PixivEnriched(
@@ -340,6 +386,8 @@ class PixivRepository {
           width: b.width,
           height: b.height,
           grade: grade,
+          isUgoira: b.isUgoira,
+          isAi: b.isAi,
         );
       }
     }
@@ -396,7 +444,6 @@ class PixivPagesConfig {
     this.retryDelay = const Duration(milliseconds: 280),
   });
 
-  /// 🔥 [修复] 补回此方法，供 WallpaperService 调用
   PixivPagesConfig copyWith({
     int? concurrency,
     Duration? timeoutPerItem,
@@ -420,6 +467,8 @@ class _PixivEnriched {
   final int width;
   final int height;
   final String? grade;
+  final bool isUgoira;
+  final bool isAi;
 
   const _PixivEnriched({
     required this.id,
@@ -429,5 +478,7 @@ class _PixivEnriched {
     required this.width,
     required this.height,
     required this.grade,
+    required this.isUgoira,
+    required this.isAi,
   });
 }
