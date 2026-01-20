@@ -585,8 +585,8 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setState) {
           return AlertDialog(
-            backgroundColor: const Color(0xFFE5E5E5), // 🔥 E5E5E5
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // 🔥 Radius 8
+            backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
             title: const Text('Pixiv 设置'),
             content: SingleChildScrollView(
               child: Column(
@@ -647,7 +647,7 @@ class _HomePageState extends State<HomePage> {
                       filled: true,
                       fillColor: const Color(0xFFF3F3F3), // 🔥 F3F3F3
                       border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8), // 🔥 Radius 8
+                        borderRadius: BorderRadius.circular(10), // 🔥 Radius 10
                         borderSide: BorderSide.none, // 🔥 No border
                       ),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
