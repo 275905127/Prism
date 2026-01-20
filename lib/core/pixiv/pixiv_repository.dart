@@ -5,7 +5,7 @@ import '../models/uni_wallpaper.dart';
 import '../utils/prism_logger.dart';
 import 'pixiv_client.dart';
 
-// 🔥 新增：Pixiv 偏好设置类
+// Pixiv 偏好设置类
 class PixivPreferences {
   final String imageQuality; // 'original', 'regular', 'small'
   final List<String> mutedTags; // 屏蔽标签列表
@@ -44,13 +44,16 @@ class PixivRepository {
   final PixivClient _client;
   final PrismLogger? _logger;
   
-  // 🔥 新增：偏好设置状态
+  // 偏好设置状态
   PixivPreferences _prefs = const PixivPreferences();
   PixivPreferences get prefs => _prefs;
   void updatePreferences(PixivPreferences p) => _prefs = p;
 
   static const String kRuleId = 'pixiv_search_ajax';
   static const String kUserRuleId = 'pixiv_user';
+
+  // 🔥 暴露 Client，供 Service 调用（例如 buildImageHeaders）
+  PixivClient get client => _client;
 
   bool supports(dynamic rule) {
     try {
@@ -64,6 +67,7 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
+  // 🔥 核心方法：更新 Cookie
   void setCookie(String? cookie) {
     _client.setCookie(cookie);
     _invalidateLoginCache();
@@ -164,8 +168,6 @@ class PixivRepository {
     Map<String, dynamic>? filterParams,
   }) async {
     final String baseQuery = (query ?? '').trim();
-    // 🔥 如果没有 query，且不是排行榜模式，就给个默认
-    // 排行榜模式下 query 可能为空，不应直接 return
     
     // 1. 同步配置
     _syncConfigFromRule(rule);
@@ -174,7 +176,7 @@ class PixivRepository {
     String order = 'date_d';
     String mode = 'all';
     String sMode = 's_tag';
-    // 🔥 新增：最小收藏数
+    // 最小收藏数
     int minBookmarks = 0;
 
     final fp = filterParams ?? const <String, dynamic>{};
@@ -223,7 +225,7 @@ class PixivRepository {
       // 排行榜通常不需要登录，或者是 public 的，暂时放行
     }
 
-    // 🔥 5. 构造最终 Query (搜索模式下)
+    // 5. 构造最终 Query (搜索模式下)
     String finalQuery = baseQuery;
     if (!isRanking && baseQuery.isNotEmpty && minBookmarks > 0) {
       // 自动拼接 users入り
@@ -240,7 +242,7 @@ class PixivRepository {
 
     try {
       if (isRanking) {
-        // 🔥 走排行榜 API
+        // 走排行榜 API
         briefs = await _client.getRanking(mode: rankingMode, page: page);
       } else if (ruleId == kUserRuleId) {
         briefs = await _client.getUserArtworks(userId: finalQuery, page: page);
@@ -259,7 +261,7 @@ class PixivRepository {
       rethrow;
     }
 
-    // 🔥 7. 客户端过滤 (屏蔽 AI / 屏蔽标签)
+    // 7. 客户端过滤 (屏蔽 AI / 屏蔽标签)
     final int beforeCount = briefs.length;
     briefs = briefs.where((b) {
       // AI 过滤
@@ -295,8 +297,7 @@ class PixivRepository {
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
 
-      // 🔥 画质选择逻辑 (在 _enrichWithPages 已处理 URL 获取，这里选哪个字段)
-      // enriched 结构里已经把 originalUrl 等都填好了，这里根据 prefs 做最终决策
+      // 画质选择逻辑 (在 _enrichWithPages 已处理 URL 获取，这里选哪个字段)
       String bestUrl = e.thumbUrl;
       
       switch (_prefs.imageQuality) {
@@ -358,7 +359,7 @@ class PixivRepository {
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
 
-        // 🔥 优化：如果是小图模式，或者 original 已经能推导出来，就没必要发 pages 请求
+        // 优化：如果是小图模式，或者 original 已经能推导出来，就没必要发 pages 请求
         // 只有当 'original' 或 'regular' 且推导失败时，才必须请求
         final bool needFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
 
