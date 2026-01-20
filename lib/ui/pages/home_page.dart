@@ -259,6 +259,7 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20), 
         title: const Text('导入图源规则'),
         content: TextField(
           controller: controller,
@@ -587,6 +588,7 @@ class _HomePageState extends State<HomePage> {
           return AlertDialog(
             backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
+            insetPadding: const EdgeInsets.symmetric(horizontal: 20),
             title: const Text('Pixiv 设置'),
             content: SingleChildScrollView(
               child: Column(
