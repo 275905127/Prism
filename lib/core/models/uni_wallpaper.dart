@@ -6,8 +6,11 @@ class UniWallpaper {
   final String fullUrl;
   final double width;
   final double height;
-  // 🔥 新增：图片等级 (如 "nsfw", "sketchy", "sfw")
-  final String? grade;
+  final String? grade; // "nsfw", "sketchy", "sfw"
+  
+  // 🔥 新增：功能性标识
+  final bool isUgoira; // 是否为动图
+  final bool isAi;     // 是否为 AI 生成
 
   const UniWallpaper({
     required this.id,
@@ -16,7 +19,9 @@ class UniWallpaper {
     required this.fullUrl,
     this.width = 0,
     this.height = 0,
-    this.grade, // 新增
+    this.grade,
+    this.isUgoira = false, // default false
+    this.isAi = false,     // default false
   });
 
   double get aspectRatio {
