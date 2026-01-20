@@ -11,11 +11,14 @@ class PixivClient {
 
   String _userAgent = kMobileUserAgent;
 
-  /// 普通日志（关键业务）
+  /// 普通日志（关键业务 / 结论 / 错误）
   final void Function(String msg)? _log;
 
-  /// Debug 日志（高频）
+  /// Debug 日志（高频 / 打点）
   final void Function(String msg)? _debug;
+
+  // 只注入一次，避免重复 add 导致刷屏/臃肿
+  late final Interceptor _debugInterceptor;
 
   PixivClient({
     Dio? dio,
@@ -23,7 +26,7 @@ class PixivClient {
     void Function(String msg)? logger,
     void Function(String msg)? debugLogger,
   })  : _dio = dio ?? Dio(),
-        _cookie = cookie,
+        _cookie = (cookie ?? '').trim().isEmpty ? null : cookie!.trim(),
         _log = logger,
         _debug = debugLogger {
     _dio.options = _dio.options.copyWith(
@@ -35,40 +38,71 @@ class PixivClient {
       validateStatus: (status) => status != null && status < 500,
     );
 
+    _debugInterceptor = InterceptorsWrapper(
+      onRequest: (options, handler) {
+        // 高频：只走 debug
+        final hasC = (options.headers['Cookie']?.toString().trim().isNotEmpty ?? false);
+        _debug?.call(
+          'PixivClient REQ ${options.method} ${options.baseUrl}${options.path} hasCookie=${hasC ? 1 : 0}',
+        );
+        handler.next(options);
+      },
+      onResponse: (resp, handler) {
+        // 高频：只走 debug
+        _debug?.call('PixivClient RESP ${resp.statusCode} ${resp.requestOptions.path}');
+        handler.next(resp);
+      },
+      onError: (e, handler) {
+        // 关键：错误必须保留在普通日志
+        final sc = e.response?.statusCode;
+        _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} status=${sc ?? 'N/A'} $e');
+        handler.next(e);
+      },
+    );
+
     _installDebugInterceptors();
-    _refreshHeaders();
+    _refreshHeaders(forceLog: true);
   }
 
   bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
+  /// 仅当 cookie/ua 实际变化时才刷新 headers，减少“点位日志”频率
   void updateConfig({String? cookie, String? userAgent}) {
     bool changed = false;
 
     if (cookie != null) {
       final c = cookie.trim();
-      _cookie = c.isEmpty ? null : c;
-      changed = true;
+      final next = c.isEmpty ? null : c;
+      if (next != _cookie) {
+        _cookie = next;
+        changed = true;
+      }
     }
 
-    if (userAgent != null && userAgent.trim().isNotEmpty) {
-      _userAgent = userAgent.trim();
-      changed = true;
+    if (userAgent != null) {
+      final ua = userAgent.trim();
+      if (ua.isNotEmpty && ua != _userAgent) {
+        _userAgent = ua;
+        changed = true;
+      }
     }
 
-    if (changed) {
-      _refreshHeaders();
-      _debug?.call(
-        'PixivClient.updateConfig changed: hasCookie=$hasCookie '
-        'cookieLen=${(_cookie ?? '').length} uaLen=${_userAgent.length}',
-      );
-    }
+    if (!changed) return;
+
+    _refreshHeaders(forceLog: false);
+
+    // 这里不再输出“每次变更详情”，避免臃肿
+    // 需要定位时再开 debug 即可
+    _debug?.call(
+      'PixivClient.updateConfig applied hasCookie=${hasCookie ? 1 : 0} cookieLen=${(_cookie ?? '').length} uaLen=${_userAgent.length}',
+    );
   }
 
   void setCookie(String? cookie) {
-    updateConfig(cookie: cookie);
+    updateConfig(cookie: cookie ?? '');
   }
 
-  void _refreshHeaders() {
+  void _refreshHeaders({required bool forceLog}) {
     final headers = <String, dynamic>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
@@ -77,10 +111,16 @@ class PixivClient {
     if (hasCookie) headers['Cookie'] = _cookie!;
     _dio.options.headers = headers;
 
-    _debug?.call(
-      'PixivClient.refreshHeaders: hasCookie=$hasCookie '
-      'headers=${headers.keys.toList()}',
-    );
+    // 初始化时打一条，之后只走 debug（避免刷屏）
+    if (forceLog) {
+      _log?.call(
+        'PixivClient headers ready hasCookie=${hasCookie ? 1 : 0} uaLen=${_userAgent.length}',
+      );
+    } else {
+      _debug?.call(
+        'PixivClient.refreshHeaders hasCookie=${hasCookie ? 1 : 0} keys=${headers.keys.toList()}',
+      );
+    }
   }
 
   Map<String, String> buildImageHeaders() {
@@ -93,29 +133,12 @@ class PixivClient {
   }
 
   void _installDebugInterceptors() {
-    _dio.interceptors.removeWhere((i) => i is InterceptorsWrapper);
-
-    _dio.interceptors.add(
-      InterceptorsWrapper(
-        onRequest: (options, handler) {
-          final hasC = (options.headers['Cookie']?.toString().trim().isNotEmpty ?? false);
-          _debug?.call(
-            'PixivClient REQ ${options.method} ${options.baseUrl}${options.path} hasCookie=$hasC',
-          );
-          handler.next(options);
-        },
-        onResponse: (resp, handler) {
-          _debug?.call(
-            'PixivClient RESP ${resp.statusCode} ${resp.requestOptions.path}',
-          );
-          handler.next(resp);
-        },
-        onError: (e, handler) {
-          _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} $e');
-          handler.next(e);
-        },
-      ),
-    );
+    // 不要 removeWhere(InterceptorsWrapper)，会误伤其他模块的拦截器
+    // 只保证“本拦截器”只注入一次
+    final exists = _dio.interceptors.any((i) => identical(i, _debugInterceptor));
+    if (!exists) {
+      _dio.interceptors.add(_debugInterceptor);
+    }
   }
 
   // =========================================================
@@ -123,8 +146,9 @@ class PixivClient {
   // =========================================================
 
   Future<bool> checkLogin() async {
+    // 没 cookie 属于常态，不打普通日志；需要定位再开 debug
     if (!hasCookie) {
-      _log?.call('PixivClient.checkLogin: no cookie');
+      _debug?.call('PixivClient.checkLogin skip (no cookie)');
       return false;
     }
 
@@ -133,35 +157,37 @@ class PixivClient {
       final sc = resp.statusCode ?? 0;
 
       if (sc >= 400) {
-        _log?.call('PixivClient.checkLogin: status=$sc');
+        // 可能是过期/无权限：不算“错误”，只记 debug
+        _debug?.call('PixivClient.checkLogin status=$sc -> false');
         return false;
       }
 
       final data = resp.data;
       if (data is! Map) {
-        _log?.call('PixivClient.checkLogin: invalid response');
+        _debug?.call('PixivClient.checkLogin invalid data type=${data.runtimeType}');
         return false;
       }
 
       if (data['body'] is Map) {
-        final uid = data['body']['userId']?.toString() ?? '';
+        final uid = (data['body']['userId']?.toString() ?? '').trim();
         if (uid.isNotEmpty) {
-          _log?.call('PixivClient.checkLogin: ok userId=$uid');
+          _debug?.call('PixivClient.checkLogin ok userId=$uid');
           return true;
         }
       }
 
       if (data['userData'] is Map) {
-        final uid = data['userData']['id']?.toString() ?? '';
+        final uid = (data['userData']['id']?.toString() ?? '').trim();
         if (uid.isNotEmpty) {
-          _log?.call('PixivClient.checkLogin: ok userId=$uid');
+          _debug?.call('PixivClient.checkLogin ok userId=$uid');
           return true;
         }
       }
 
-      _log?.call('PixivClient.checkLogin: userId not found');
+      _debug?.call('PixivClient.checkLogin userId not found');
       return false;
     } catch (e) {
+      // 真异常：必须进普通日志
       _log?.call('PixivClient.checkLogin exception: $e');
       return false;
     }
@@ -208,6 +234,7 @@ class PixivClient {
           .where((e) => e.id.isNotEmpty)
           .toList();
     } catch (e) {
+      // 这里不刷屏：保留异常到普通日志（便于定位网络/解析问题）
       _log?.call('PixivClient.searchArtworks exception: $e');
       return [];
     }
