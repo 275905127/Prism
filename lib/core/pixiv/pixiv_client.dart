@@ -11,14 +11,11 @@ class PixivClient {
 
   String _userAgent = kMobileUserAgent;
 
-  /// 普通日志（关键业务 / 结论 / 错误）
+  /// 普通日志（关键业务）
   final void Function(String msg)? _log;
 
-  /// Debug 日志（高频 / 打点）
+  /// Debug 日志（高频）
   final void Function(String msg)? _debug;
-
-  // 只注入一次，避免重复 add 导致刷屏/臃肿
-  late final Interceptor _debugInterceptor;
 
   PixivClient({
     Dio? dio,
@@ -26,7 +23,7 @@ class PixivClient {
     void Function(String msg)? logger,
     void Function(String msg)? debugLogger,
   })  : _dio = dio ?? Dio(),
-        _cookie = (cookie ?? '').trim().isEmpty ? null : cookie!.trim(),
+        _cookie = cookie,
         _log = logger,
         _debug = debugLogger {
     _dio.options = _dio.options.copyWith(
@@ -38,71 +35,40 @@ class PixivClient {
       validateStatus: (status) => status != null && status < 500,
     );
 
-    _debugInterceptor = InterceptorsWrapper(
-      onRequest: (options, handler) {
-        // 高频：只走 debug
-        final hasC = (options.headers['Cookie']?.toString().trim().isNotEmpty ?? false);
-        _debug?.call(
-          'PixivClient REQ ${options.method} ${options.baseUrl}${options.path} hasCookie=${hasC ? 1 : 0}',
-        );
-        handler.next(options);
-      },
-      onResponse: (resp, handler) {
-        // 高频：只走 debug
-        _debug?.call('PixivClient RESP ${resp.statusCode} ${resp.requestOptions.path}');
-        handler.next(resp);
-      },
-      onError: (e, handler) {
-        // 关键：错误必须保留在普通日志
-        final sc = e.response?.statusCode;
-        _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} status=${sc ?? 'N/A'} $e');
-        handler.next(e);
-      },
-    );
-
     _installDebugInterceptors();
-    _refreshHeaders(forceLog: true);
+    _refreshHeaders();
   }
 
   bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
-  /// 仅当 cookie/ua 实际变化时才刷新 headers，减少“点位日志”频率
   void updateConfig({String? cookie, String? userAgent}) {
     bool changed = false;
 
     if (cookie != null) {
       final c = cookie.trim();
-      final next = c.isEmpty ? null : c;
-      if (next != _cookie) {
-        _cookie = next;
-        changed = true;
-      }
+      _cookie = c.isEmpty ? null : c;
+      changed = true;
     }
 
-    if (userAgent != null) {
-      final ua = userAgent.trim();
-      if (ua.isNotEmpty && ua != _userAgent) {
-        _userAgent = ua;
-        changed = true;
-      }
+    if (userAgent != null && userAgent.trim().isNotEmpty) {
+      _userAgent = userAgent.trim();
+      changed = true;
     }
 
-    if (!changed) return;
-
-    _refreshHeaders(forceLog: false);
-
-    // 这里不再输出“每次变更详情”，避免臃肿
-    // 需要定位时再开 debug 即可
-    _debug?.call(
-      'PixivClient.updateConfig applied hasCookie=${hasCookie ? 1 : 0} cookieLen=${(_cookie ?? '').length} uaLen=${_userAgent.length}',
-    );
+    if (changed) {
+      _refreshHeaders();
+      _debug?.call(
+        'PixivClient.updateConfig changed: hasCookie=$hasCookie '
+        'cookieLen=${(_cookie ?? '').length} uaLen=${_userAgent.length}',
+      );
+    }
   }
 
   void setCookie(String? cookie) {
-    updateConfig(cookie: cookie ?? '');
+    updateConfig(cookie: cookie);
   }
 
-  void _refreshHeaders({required bool forceLog}) {
+  void _refreshHeaders() {
     final headers = <String, dynamic>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
@@ -111,16 +77,9 @@ class PixivClient {
     if (hasCookie) headers['Cookie'] = _cookie!;
     _dio.options.headers = headers;
 
-    // 初始化时打一条，之后只走 debug（避免刷屏）
-    if (forceLog) {
-      _log?.call(
-        'PixivClient headers ready hasCookie=${hasCookie ? 1 : 0} uaLen=${_userAgent.length}',
-      );
-    } else {
-      _debug?.call(
-        'PixivClient.refreshHeaders hasCookie=${hasCookie ? 1 : 0} keys=${headers.keys.toList()}',
-      );
-    }
+    _debug?.call(
+      'PixivClient.refreshHeaders: hasCookie=$hasCookie headers=${headers.keys.toList()}',
+    );
   }
 
   Map<String, String> buildImageHeaders() {
@@ -133,12 +92,32 @@ class PixivClient {
   }
 
   void _installDebugInterceptors() {
-    // 不要 removeWhere(InterceptorsWrapper)，会误伤其他模块的拦截器
-    // 只保证“本拦截器”只注入一次
-    final exists = _dio.interceptors.any((i) => identical(i, _debugInterceptor));
-    if (!exists) {
-      _dio.interceptors.add(_debugInterceptor);
-    }
+    // 注意：这里会移除已有的 InterceptorsWrapper（你目前项目就是这么写的）
+    // 如果你后续在 Dio 上也用 InterceptorsWrapper 做别的事，建议改成只移除“PixivClient 自己加的”那一个。
+    _dio.interceptors.removeWhere((i) => i is InterceptorsWrapper);
+
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          final hasC = (options.headers['Cookie']?.toString().trim().isNotEmpty ?? false);
+          _debug?.call(
+            'PixivClient REQ ${options.method} ${options.baseUrl}${options.path} hasCookie=$hasC',
+          );
+          handler.next(options);
+        },
+        onResponse: (resp, handler) {
+          _debug?.call(
+            'PixivClient RESP ${resp.statusCode} ${resp.requestOptions.path}',
+          );
+          handler.next(resp);
+        },
+        onError: (e, handler) {
+          // 错误属于关键信息：走 _log
+          _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} $e');
+          handler.next(e);
+        },
+      ),
+    );
   }
 
   // =========================================================
@@ -146,9 +125,8 @@ class PixivClient {
   // =========================================================
 
   Future<bool> checkLogin() async {
-    // 没 cookie 属于常态，不打普通日志；需要定位再开 debug
     if (!hasCookie) {
-      _debug?.call('PixivClient.checkLogin skip (no cookie)');
+      _log?.call('PixivClient.checkLogin: no cookie');
       return false;
     }
 
@@ -157,37 +135,35 @@ class PixivClient {
       final sc = resp.statusCode ?? 0;
 
       if (sc >= 400) {
-        // 可能是过期/无权限：不算“错误”，只记 debug
-        _debug?.call('PixivClient.checkLogin status=$sc -> false');
+        _log?.call('PixivClient.checkLogin: status=$sc');
         return false;
       }
 
       final data = resp.data;
       if (data is! Map) {
-        _debug?.call('PixivClient.checkLogin invalid data type=${data.runtimeType}');
+        _log?.call('PixivClient.checkLogin: invalid response');
         return false;
       }
 
       if (data['body'] is Map) {
-        final uid = (data['body']['userId']?.toString() ?? '').trim();
-        if (uid.isNotEmpty) {
-          _debug?.call('PixivClient.checkLogin ok userId=$uid');
+        final uid = data['body']['userId']?.toString() ?? '';
+        if (uid.trim().isNotEmpty) {
+          _log?.call('PixivClient.checkLogin: ok userId=$uid');
           return true;
         }
       }
 
       if (data['userData'] is Map) {
-        final uid = (data['userData']['id']?.toString() ?? '').trim();
-        if (uid.isNotEmpty) {
-          _debug?.call('PixivClient.checkLogin ok userId=$uid');
+        final uid = data['userData']['id']?.toString() ?? '';
+        if (uid.trim().isNotEmpty) {
+          _log?.call('PixivClient.checkLogin: ok userData.id=$uid');
           return true;
         }
       }
 
-      _debug?.call('PixivClient.checkLogin userId not found');
+      _log?.call('PixivClient.checkLogin: userId not found');
       return false;
     } catch (e) {
-      // 真异常：必须进普通日志
       _log?.call('PixivClient.checkLogin exception: $e');
       return false;
     }
@@ -234,7 +210,6 @@ class PixivClient {
           .where((e) => e.id.isNotEmpty)
           .toList();
     } catch (e) {
-      // 这里不刷屏：保留异常到普通日志（便于定位网络/解析问题）
       _log?.call('PixivClient.searchArtworks exception: $e');
       return [];
     }
@@ -313,4 +288,119 @@ class PixivClient {
       return [];
     }
   }
+}
+
+// =========================================================
+// Data Models  (必须存在，否则 Repository 侧全崩)
+// =========================================================
+
+class PixivIllustBrief {
+  final String id;
+  final String title;
+  final String thumbUrl;
+  final int width;
+  final int height;
+  final int xRestrict;
+  final List<String> tags;
+  final int illustType;
+  final int aiType;
+
+  const PixivIllustBrief({
+    required this.id,
+    required this.title,
+    required this.thumbUrl,
+    required this.width,
+    required this.height,
+    required this.xRestrict,
+    this.tags = const [],
+    this.illustType = 0,
+    this.aiType = 0,
+  });
+
+  bool get isUgoira => illustType == 2;
+  bool get isAi => aiType == 2;
+
+  factory PixivIllustBrief.fromJson(dynamic json) {
+    if (json is! Map) return _empty();
+    if (json['id'] == null) return _empty();
+
+    return PixivIllustBrief(
+      id: _parseString(json['id']),
+      title: _parseString(json['title']),
+      thumbUrl: _parseString(json['url']),
+      width: _parseInt(json['width']),
+      height: _parseInt(json['height']),
+      xRestrict: _parseInt(json['xRestrict']),
+      tags: _parseTags(json['tags']),
+      illustType: _parseInt(json['illustType']),
+      aiType: _parseInt(json['aiType']),
+    );
+  }
+
+  factory PixivIllustBrief.fromMap(dynamic json) {
+    if (json is! Map) return _empty();
+    return PixivIllustBrief(
+      id: _parseString(json['id']),
+      title: _parseString(json['title']),
+      thumbUrl: _parseString(json['url']),
+      width: _parseInt(json['width']),
+      height: _parseInt(json['height']),
+      xRestrict: _parseInt(json['x_restrict']),
+      tags: _parseTags(json['tags']),
+      illustType: _parseInt(json['illust_type']),
+      aiType: _parseInt(json['ai_type']),
+    );
+  }
+
+  static PixivIllustBrief _empty() => const PixivIllustBrief(
+        id: '',
+        title: '',
+        thumbUrl: '',
+        width: 0,
+        height: 0,
+        xRestrict: 0,
+      );
+
+  static String _parseString(dynamic v) => v?.toString() ?? '';
+  static int _parseInt(dynamic v) {
+    if (v is int) return v;
+    if (v is String) return int.tryParse(v) ?? 0;
+    return 0;
+  }
+
+  static List<String> _parseTags(dynamic v) => (v is List) ? v.map((e) => e.toString()).toList() : [];
+}
+
+class PixivPageUrls {
+  final String original;
+  final String regular;
+  final String small;
+  final String thumbMini;
+
+  const PixivPageUrls({
+    required this.original,
+    required this.regular,
+    required this.small,
+    required this.thumbMini,
+  });
+
+  factory PixivPageUrls.fromJson(dynamic json) {
+    if (json is! Map) return _empty();
+    final urls = json['urls'];
+    if (urls is! Map) return _empty();
+
+    return PixivPageUrls(
+      original: urls['original']?.toString() ?? '',
+      regular: urls['regular']?.toString() ?? '',
+      small: urls['small']?.toString() ?? '',
+      thumbMini: urls['thumb_mini']?.toString() ?? '',
+    );
+  }
+
+  static PixivPageUrls _empty() => const PixivPageUrls(
+        original: '',
+        regular: '',
+        small: '',
+        thumbMini: '',
+      );
 }
