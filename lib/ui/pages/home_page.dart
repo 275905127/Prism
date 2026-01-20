@@ -14,7 +14,7 @@ import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
 import '../../core/pixiv/pixiv_client.dart';
 
-import '../../core/utils/prism_logger.dart'; // ✅ App 内日志（LogPage）
+import '../../core/utils/prism_logger.dart';
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -44,7 +44,7 @@ class _HomePageState extends State<HomePage> {
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
 
-  // ✅ 保存防抖：必须放在 State 级别
+  // ✅ 保存防抖：必须放 State 级别
   bool _pixivSaving = false;
 
   @override
@@ -275,10 +275,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // Pixiv Web 登录：修复“保存按钮灰/状态丢失”
-  // - BottomSheet 内只返回 cookie
-  // - 状态变量放在 builder 外（避免重建清空）
-  // - 保存逻辑放在 sheet 关闭后执行（带 timeout + 日志）
+  // Pixiv Web 登录：BottomSheet 只负责检测并返回 cookie
+  // 保存：优先写入 service + rule.headers（强制生效），prefs 作为后台备份不阻塞
   // =========================================================
   void _openPixivWebLogin(BuildContext context) async {
     final PrismLogger logger = const AppLogLogger();
@@ -337,7 +335,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // ✅ 关键：状态变量放在 builder 外，重建不会清空
+    // ✅ 状态变量放 builder 外，避免重建清空
     bool sheetDetected = false;
     String sheetCookie = '';
 
@@ -477,7 +475,6 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length}');
     logger.log('Pixiv web login sheet closed (UI) cookieReturned=${cookieToSave != null}');
 
     final cookie = (cookieToSave ?? '').trim();
@@ -513,29 +510,32 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      // ✅ 先注入内存态：立刻生效（决定 login=1 的关键）
-context.read<WallpaperService>().setPixivCookie(cookie);
-logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
+      // ✅ 版本戳：确认新代码已进入保存阶段
+      logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length}');
 
-// ✅ 写回规则 headers：持久化（下次启动仍有效）
-await withTimeout(
-  m.updateRuleHeader(r.id, 'Cookie', cookie),
-  'SourceManager.updateRuleHeader(Cookie)',
-  const Duration(seconds: 3),
-);
-logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
+      // ✅ 1) 先注入到 Service：立刻生效（login=1 的关键）
+      context.read<WallpaperService>().setPixivCookie(cookie);
+      logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
 
-// ✅ SharedPreferences 作为备份：不 await，避免阻塞（可选）
-() async {
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    final key = _pixivCookiePrefsKey(r.id);
-    await prefs.setString(key, cookie);
-    logger.log('Pixiv cookie backup saved to prefs key=$key');
-  } catch (e) {
-    logger.log('Pixiv cookie backup prefs failed: $e');
-  }
-}();
+      // ✅ 2) 写回 rule.headers：持久化（下次启动仍有效）
+      await withTimeout(
+        m.updateRuleHeader(r.id, 'Cookie', cookie),
+        'SourceManager.updateRuleHeader(Cookie)',
+        const Duration(seconds: 3),
+      );
+      logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
+
+      // ✅ 3) SharedPreferences 作为备份：后台保存，不 await，不阻塞主流程
+      () async {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final key = _pixivCookiePrefsKey(r.id);
+          await prefs.setString(key, cookie);
+          logger.log('Pixiv cookie backup saved to prefs key=$key');
+        } catch (e) {
+          logger.log('Pixiv cookie backup prefs failed: $e');
+        }
+      }();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
