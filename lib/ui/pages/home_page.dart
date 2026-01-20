@@ -5,13 +5,14 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+// 🔥 修改引用的包
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
-import '../../core/pixiv/pixiv_client.dart'; // 🔥 必须引入，用于访问 kMobileUserAgent 常量
+import '../../core/pixiv/pixiv_client.dart'; 
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -55,7 +56,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
-    await _loadPixivPreferences();
+    await _loadPixivPreferences(); 
     await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
   }
@@ -273,7 +274,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 核心优化：动态 UA + 原生 Cookie 抓取
+  // 🔥 核心重写：使用 flutter_inappwebview 进行登录
   void _openPixivWebLogin(BuildContext context) async {
     // 1. 获取当前规则中的 UA
     final manager = context.read<SourceManager>();
@@ -282,21 +283,18 @@ class _HomePageState extends State<HomePage> {
     // 默认使用兼容性最好的 Android Chrome UA
     String targetUA = PixivClient.kMobileUserAgent; 
 
-    // 如果规则里配置了特殊的 UA (比如 Edge/iPhone)，则覆盖默认值
     if (rule != null && rule.headers != null) {
       final h = rule.headers!;
-      // 查找 User-Agent (忽略大小写)
       final customUA = h['User-Agent'] ?? h['user-agent'];
       if (customUA != null && customUA.trim().isNotEmpty) {
         targetUA = customUA.trim();
       }
     }
     
-    // 2. 初始化 Webview，强制使用 targetUA
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(targetUA) 
-      ..loadRequest(Uri.parse('https://accounts.pixiv.net/login'));
+    // CookieManager 单例
+    final cookieManager = CookieManager.instance();
+    // 每次打开前清空旧 Cookie，防止状态混淆
+    await cookieManager.deleteAllCookies();
 
     String? foundCookie;
 
@@ -310,38 +308,46 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                // 🔥🔥🔥 核心修复：改用原生 CookieManager 读取 HttpOnly Cookie
+                // 🔥 核心修复：使用 InAppWebView 的 CookieManager 获取所有 Cookie
+                // 它能无视 HttpOnly 限制，完美获取 PHPSESSID
                 try {
-                  final cookieManager = WebViewCookieManager();
-                  final cookies = await cookieManager.getCookies('https://www.pixiv.net');
-
-                  // 检查关键的 PHPSESSID
+                  final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                  
+                  // 寻找 PHPSESSID
                   final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
 
                   if (hasSession) {
-                    // 手动拼接 Cookie 字符串 (key=value; key=value; ...)
+                    // 手动拼接 Cookie 字符串
                     final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
                     foundCookie = cookieStr;
-                    Navigator.pop(ctx);
+                    if (ctx.mounted) Navigator.pop(ctx);
                   } else {
-                    if (mounted) {
+                    if (ctx.mounted) {
                       ScaffoldMessenger.of(ctx).showSnackBar(
                         const SnackBar(content: Text('未检测到 PHPSESSID，请确认已登录成功')),
                       );
                     }
                   }
                 } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('读取 Cookie 失败: $e')));
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('获取 Cookie 失败: $e')));
                   }
                 }
-                // 🔥🔥🔥 核心修复结束
               },
               child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
           ],
         ),
-        body: WebViewWidget(controller: controller),
+        // 🔥 使用 InAppWebView 替换 WebViewWidget
+        body: InAppWebView(
+          initialUrlRequest: URLRequest(url: WebUri('https://accounts.pixiv.net/login')),
+          initialSettings: InAppWebViewSettings(
+            userAgent: targetUA,
+            javaScriptEnabled: true,
+            // 允许第三方 Cookie，减少登录问题
+            thirdPartyCookiesEnabled: true, 
+          ),
+        ),
       ),
     );
 
