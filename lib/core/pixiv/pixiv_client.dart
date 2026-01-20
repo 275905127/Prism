@@ -5,12 +5,10 @@ class PixivClient {
   final Dio _dio;
   String? _cookie;
 
-  // 🔥 优化：定义全局统一的 Mobile UA (Android Chrome)
-  // 供 Webview 和 API 请求默认使用，确保指纹一致
+  // 🔥 全局统一的 Mobile UA (Android Chrome)
   static const String kMobileUserAgent =
       'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 
-  // 默认使用上面的常量
   String _userAgent = kMobileUserAgent;
 
   final void Function(String msg)? _log;
@@ -22,16 +20,16 @@ class PixivClient {
   })  : _dio = dio ?? Dio(),
         _cookie = cookie,
         _log = logger {
-    
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 15),
       sendTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 20),
       responseType: ResponseType.json,
-      validateStatus: (status) => status != null && status < 500, 
+      validateStatus: (status) => status != null && status < 500,
     );
-    
+
+    _installDebugInterceptors();
     _refreshHeaders();
   }
 
@@ -39,36 +37,82 @@ class PixivClient {
 
   void updateConfig({String? cookie, String? userAgent}) {
     bool changed = false;
+
+    // cookie 允许传 null（表示清空），但空字符串也当作清空
     if (cookie != null) {
-      _cookie = cookie;
+      final c = cookie.trim();
+      _cookie = c.isEmpty ? null : c;
       changed = true;
     }
-    if (userAgent != null && userAgent.isNotEmpty) {
-      _userAgent = userAgent;
+
+    if (userAgent != null && userAgent.trim().isNotEmpty) {
+      _userAgent = userAgent.trim();
       changed = true;
     }
-    if (changed) _refreshHeaders();
+
+    if (changed) {
+      _refreshHeaders();
+      _log?.call(
+        'PixivClient.updateConfig changed: hasCookie=$hasCookie cookieLen=${(_cookie ?? '').length} uaLen=${_userAgent.length}',
+      );
+    }
   }
 
   void setCookie(String? cookie) {
-    updateConfig(cookie: cookie);
+    updateConfig(cookie: cookie ?? '');
   }
 
   void _refreshHeaders() {
-    _dio.options.headers = {
+    final headers = <String, dynamic>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      if (hasCookie) 'Cookie': _cookie!,
     };
+    if (hasCookie) headers['Cookie'] = _cookie!;
+    _dio.options.headers = headers;
+
+    _log?.call(
+      'PixivClient._refreshHeaders: hasCookie=$hasCookie cookieLen=${(_cookie ?? '').length} headersKeys=${headers.keys.toList()}',
+    );
   }
 
   Map<String, String> buildImageHeaders() {
-    return {
+    final out = <String, String>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
-      if (hasCookie) 'Cookie': _cookie!,
     };
+    if (hasCookie) out['Cookie'] = _cookie!;
+    return out;
+  }
+
+  void _installDebugInterceptors() {
+    _dio.interceptors.removeWhere((i) => i is InterceptorsWrapper);
+
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          final hasC = (options.headers['Cookie']?.toString().trim().isNotEmpty ?? false);
+          final cLen = options.headers['Cookie']?.toString().length ?? 0;
+          final uaLen = options.headers['User-Agent']?.toString().length ?? 0;
+          _log?.call(
+            'PixivClient REQ ${options.method} ${options.baseUrl}${options.path} '
+            'hasCookie=$hasC cookieLen=$cLen uaLen=$uaLen',
+          );
+          handler.next(options);
+        },
+        onResponse: (resp, handler) {
+          _log?.call(
+            'PixivClient RESP ${resp.statusCode} ${resp.requestOptions.path} '
+            'type=${resp.data.runtimeType}',
+          );
+          handler.next(resp);
+        },
+        onError: (e, handler) {
+          _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} $e');
+          handler.next(e);
+        },
+      ),
+    );
   }
 
   // =========================================================
@@ -76,26 +120,48 @@ class PixivClient {
   // =========================================================
 
   Future<bool> checkLogin() async {
-    if (!hasCookie) return false;
+    if (!hasCookie) {
+      _log?.call('PixivClient.checkLogin: no cookie -> false');
+      return false;
+    }
 
     try {
       final resp = await _dio.get('/ajax/user/self');
-      if ((resp.statusCode ?? 0) >= 400) return false;
+      final sc = resp.statusCode ?? 0;
+
+      if (sc >= 400) {
+        _log?.call('PixivClient.checkLogin: status=$sc -> false');
+        return false;
+      }
 
       final data = resp.data;
-      if (data is! Map) return false;
+      if (data is! Map) {
+        _log?.call('PixivClient.checkLogin: data not Map (${data.runtimeType}) -> false');
+        return false;
+      }
+
+      final keys = data.keys.map((e) => e.toString()).toList()..sort();
+      _log?.call('PixivClient.checkLogin: bodyKeys=$keys');
 
       if (data['body'] is Map) {
-        final uid = data['body']['userId']?.toString() ?? '';
-        if (uid.isNotEmpty) return true;
+        final uid = (data['body']['userId']?.toString() ?? '').trim();
+        if (uid.isNotEmpty) {
+          _log?.call('PixivClient.checkLogin: ok userId=$uid');
+          return true;
+        }
       }
       if (data['userData'] is Map) {
-        final uid = data['userData']['id']?.toString() ?? '';
-        if (uid.isNotEmpty) return true;
+        final uid = (data['userData']['id']?.toString() ?? '').trim();
+        if (uid.isNotEmpty) {
+          _log?.call('PixivClient.checkLogin: ok userData.id=$uid');
+          return true;
+        }
       }
+
+      _log?.call('PixivClient.checkLogin: userId not found -> false');
       return false;
     } catch (e) {
-      _log?.call('CheckLogin Error: $e');
+      _log?.call('PixivClient.checkLogin exception: $e');
       return false;
     }
   }
@@ -124,7 +190,10 @@ class PixivClient {
 
       if ((resp.statusCode ?? 0) >= 400) return [];
 
-      final body = resp.data['body'];
+      final data = resp.data;
+      if (data is! Map) return [];
+
+      final body = data['body'];
       if (body is! Map) return [];
 
       final container = body['illustManga'] ?? body['illust'];
@@ -137,9 +206,8 @@ class PixivClient {
           .map((e) => PixivIllustBrief.fromJson(e))
           .where((e) => e.id.isNotEmpty)
           .toList();
-
     } catch (e) {
-      _log?.call('Search Error: $e');
+      _log?.call('PixivClient.searchArtworks exception: $e');
       return [];
     }
   }
@@ -160,16 +228,16 @@ class PixivClient {
       );
 
       if ((resp.statusCode ?? 0) >= 400) return [];
-      
+
       final body = resp.data;
       if (body is! Map) return [];
-      
+
       final rankings = body['ranking'] ?? (body['body']?['ranking']);
       if (rankings is! List) return [];
 
       return rankings.map((e) => PixivIllustBrief.fromMap(e)).toList();
     } catch (e) {
-      _log?.call('Ranking Error: $e');
+      _log?.call('PixivClient.getRanking exception: $e');
       return [];
     }
   }
@@ -179,13 +247,16 @@ class PixivClient {
     try {
       final resp = await _dio.get('/ajax/illust/$illustId/pages');
       if ((resp.statusCode ?? 0) >= 400) return [];
-      
-      final body = resp.data['body'];
+
+      final data = resp.data;
+      if (data is! Map) return [];
+
+      final body = data['body'];
       if (body is! List) return [];
 
       return body.map((e) => PixivPageUrls.fromJson(e)).toList();
     } catch (e) {
-      _log?.call('GetPages Error: $e');
+      _log?.call('PixivClient.getIllustPages exception: $e');
       return [];
     }
   }
@@ -210,7 +281,7 @@ class PixivClient {
 
       return list.map((e) => PixivIllustBrief.fromMap(e)).toList();
     } catch (e) {
-      _log?.call('UserArtworks Error: $e');
+      _log?.call('PixivClient.getUserArtworks exception: $e');
       return [];
     }
   }
@@ -264,8 +335,8 @@ class PixivIllustBrief {
   }
 
   factory PixivIllustBrief.fromMap(dynamic json) {
-     if (json is! Map) return _empty();
-     return PixivIllustBrief(
+    if (json is! Map) return _empty();
+    return PixivIllustBrief(
       id: _parseString(json['id']),
       title: _parseString(json['title']),
       thumbUrl: _parseString(json['url']),
@@ -279,7 +350,13 @@ class PixivIllustBrief {
   }
 
   static PixivIllustBrief _empty() => const PixivIllustBrief(
-      id: '', title: '', thumbUrl: '', width: 0, height: 0, xRestrict: 0);
+        id: '',
+        title: '',
+        thumbUrl: '',
+        width: 0,
+        height: 0,
+        xRestrict: 0,
+      );
 
   static String _parseString(dynamic v) => v?.toString() ?? '';
   static int _parseInt(dynamic v) {
@@ -287,8 +364,8 @@ class PixivIllustBrief {
     if (v is String) return int.tryParse(v) ?? 0;
     return 0;
   }
-  static List<String> _parseTags(dynamic v) => 
-      (v is List) ? v.map((e) => e.toString()).toList() : [];
+
+  static List<String> _parseTags(dynamic v) => (v is List) ? v.map((e) => e.toString()).toList() : [];
 }
 
 class PixivPageUrls {
@@ -317,6 +394,5 @@ class PixivPageUrls {
     );
   }
 
-  static PixivPageUrls _empty() => 
-      const PixivPageUrls(original: '', regular: '', small: '', thumbMini: '');
+  static PixivPageUrls _empty() => const PixivPageUrls(original: '', regular: '', small: '', thumbMini: '');
 }
