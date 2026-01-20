@@ -37,13 +37,18 @@ class PixivRepository {
     Dio? dio,
     PrismLogger? logger,
     PixivPagesConfig? pagesConfig,
-  })  : _client = client ?? PixivClient(dio: dio, cookie: cookie),
-        _logger = logger,
+  })  : _logger = logger,
+        _client = client ??
+            PixivClient(
+              dio: dio,
+              cookie: cookie,
+              logger: (msg) => logger?.log(msg),
+            ),
         _pagesConfig = pagesConfig ?? const PixivPagesConfig();
 
   final PixivClient _client;
   final PrismLogger? _logger;
-  
+
   // 偏好设置状态
   PixivPreferences _prefs = const PixivPreferences();
   PixivPreferences get prefs => _prefs;
@@ -52,7 +57,7 @@ class PixivRepository {
   static const String kRuleId = 'pixiv_search_ajax';
   static const String kUserRuleId = 'pixiv_user';
 
-  // 🔥 修复1：暴露 Client 给 Service 使用
+  // 暴露 Client 给 Service 使用
   PixivClient get client => _client;
 
   bool supports(dynamic rule) {
@@ -67,16 +72,18 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
-  // 🔥 修复2：增强 Cookie 设置逻辑，添加日志
+  // Cookie 设置逻辑 + 调试日志
   void setCookie(String? cookie) {
     _client.setCookie(cookie);
     _invalidateLoginCache();
-    // 关键调试日志：确认 Repo 是否真的收到了 Cookie
-    if (cookie != null && cookie.isNotEmpty) {
-       _logger?.log('PixivRepo: setCookie updated (len=${cookie.length})');
+
+    final len = (cookie ?? '').trim().length;
+    if (len > 0) {
+      _logger?.log('PixivRepo: setCookie updated (len=$len)');
     } else {
-       _logger?.log('PixivRepo: setCookie cleared');
+      _logger?.log('PixivRepo: setCookie cleared');
     }
+    _logger?.log('PixivRepo: client.hasCookie=${_client.hasCookie}');
   }
 
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
@@ -105,33 +112,45 @@ class PixivRepository {
     if (!hasCookie) {
       _cachedLoginOk = false;
       _cachedLoginAt = DateTime.now();
+      _logger?.log('PixivRepo: login cache -> false (no cookie)');
       return false;
     }
+
     final now = DateTime.now();
     final lastAt = _cachedLoginAt;
     if (lastAt != null && _cachedLoginOk != null) {
       final age = now.difference(lastAt);
-      if (age <= _kLoginCacheTtl) return _cachedLoginOk!;
+      if (age <= _kLoginCacheTtl) {
+        _logger?.log('PixivRepo: login cache hit -> ${_cachedLoginOk!} age=${age.inSeconds}s');
+        return _cachedLoginOk!;
+      }
     }
+
     if (_checkingLogin && _checkingLoginFuture != null) {
+      _logger?.log('PixivRepo: login check already running -> await same future');
       return _checkingLoginFuture!;
     }
+
     _checkingLogin = true;
     _checkingLoginFuture = () async {
       try {
+        _logger?.log('PixivRepo: login check start (/ajax/user/self)');
         final ok = await _client.checkLogin();
         _cachedLoginOk = ok;
         _cachedLoginAt = DateTime.now();
+        _logger?.log('PixivRepo: login check done -> $ok');
         return ok;
-      } catch (_) {
+      } catch (e) {
         _cachedLoginOk = false;
         _cachedLoginAt = DateTime.now();
+        _logger?.log('PixivRepo: login check exception -> false error=$e');
         return false;
       } finally {
         _checkingLogin = false;
         _checkingLoginFuture = null;
       }
     }();
+
     return _checkingLoginFuture!;
   }
 
@@ -145,26 +164,25 @@ class PixivRepository {
     try {
       final dynamic headers = (rule as dynamic).headers;
       if (headers == null || headers is! Map) return;
+
       final dynamic c1 = headers['Cookie'];
       final dynamic c2 = headers['cookie'];
       final cookie = (c1 ?? c2)?.toString().trim();
+
       final dynamic ua1 = headers['User-Agent'];
       final dynamic ua2 = headers['user-agent'];
       final ua = (ua1 ?? ua2)?.toString().trim();
 
-      // 🔥 修复3：只有当规则里真的有 cookie 时才覆盖，否则保持当前的登录态
+      // 只有当规则里真的有 cookie/ua 时才覆盖，否则保持当前态
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
-        _client.updateConfig(cookie: cookie, userAgent: ua);
+        _client.updateConfig(cookie: cookie ?? '', userAgent: ua);
         _invalidateLoginCache();
-        
-        if (ua != null && ua.isNotEmpty) _logger?.log('pixiv config synced: UA updated');
-        if (cookie != null && cookie.isNotEmpty) {
-          final prefix = cookie.length <= 12 ? cookie : cookie.substring(0, 12);
-          _logger?.log('pixiv config synced: Cookie injected ($prefix...)');
-        }
+
+        if (ua != null && ua.isNotEmpty) _logger?.log('PixivRepo: config synced: UA updated (len=${ua.length})');
+        if (cookie != null && cookie.isNotEmpty) _logger?.log('PixivRepo: config synced: Cookie injected (len=${cookie.length})');
       }
     } catch (e) {
-      _logger?.log('pixiv config sync failed: $e');
+      _logger?.log('PixivRepo: config sync failed: $e');
     }
   }
 
@@ -176,7 +194,7 @@ class PixivRepository {
     Map<String, dynamic>? filterParams,
   }) async {
     final String baseQuery = (query ?? '').trim();
-    
+
     // 1. 同步配置
     _syncConfigFromRule(rule);
 
@@ -192,11 +210,11 @@ class PixivRepository {
       final s = (v ?? '').toString().trim();
       return s.isEmpty ? fallback : s;
     }
-    
+
     order = _pickStr('order', order);
     mode = _pickStr('mode', mode);
     sMode = _pickStr('s_mode', sMode);
-    
+
     final mbRaw = fp['min_bookmarks'];
     if (mbRaw != null) {
       minBookmarks = int.tryParse(mbRaw.toString()) ?? 0;
@@ -208,10 +226,10 @@ class PixivRepository {
     // 4. 降级与权限
     bool isRanking = false;
     String rankingMode = '';
-    
+
     if (mode.startsWith('ranking_')) {
       isRanking = true;
-      rankingMode = mode.replaceFirst('ranking_', ''); 
+      rankingMode = mode.replaceFirst('ranking_', '');
     } else if (['daily', 'weekly', 'monthly', 'rookie', 'original', 'male', 'female'].contains(mode)) {
       isRanking = true;
       rankingMode = mode;
@@ -219,11 +237,11 @@ class PixivRepository {
 
     if (!loginOk) {
       if (order.toLowerCase().contains('popular')) {
-        _logger?.log('pixiv blocked: order=$order -> date_d');
+        _logger?.log('PixivRepo: blocked: order=$order -> date_d');
         order = 'date_d';
       }
       if (mode.toLowerCase() == 'r18') {
-        _logger?.log('pixiv blocked: mode=r18 -> safe');
+        _logger?.log('PixivRepo: blocked: mode=r18 -> safe');
         mode = 'safe';
       }
     }
@@ -235,7 +253,7 @@ class PixivRepository {
     }
 
     _logger?.log(
-      'REQ pixiv q="$finalQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0}',
+      'REQ pixiv q="$finalQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0} cookie=${hasCookie ? 1 : 0}',
     );
 
     // 6. 执行 API
@@ -273,9 +291,9 @@ class PixivRepository {
       }
       return true;
     }).toList();
-    
+
     if (briefs.length != beforeCount) {
-      _logger?.log('pixiv filter muted: ${beforeCount - briefs.length} items removed');
+      _logger?.log('PixivRepo: muted filtered: ${beforeCount - briefs.length} removed');
     }
 
     _logger?.log('RESP pixiv count=${briefs.length}');
@@ -335,8 +353,7 @@ class PixivRepository {
   }) async {
     if (briefs.isEmpty) return const [];
 
-    final List<_PixivEnriched?> results =
-        List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
+    final List<_PixivEnriched?> results = List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
 
     var nextIndex = 0;
     int takeIndex() {
@@ -413,10 +430,7 @@ class PixivRepository {
       final tail = p.substring(idx + '/img-master/'.length);
       var newPath = '/img-original/$tail';
 
-      newPath = newPath
-          .replaceAll('_square1200', '')
-          .replaceAll('_master1200', '')
-          .replaceAll('_custom1200', '');
+      newPath = newPath.replaceAll('_square1200', '').replaceAll('_master1200', '').replaceAll('_custom1200', '');
 
       return u.replace(path: newPath, query: '').toString();
     } catch (_) {
