@@ -477,6 +477,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
+    logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length}');
     logger.log('Pixiv web login sheet closed (UI) cookieReturned=${cookieToSave != null}');
 
     final cookie = (cookieToSave ?? '').trim();
@@ -512,29 +513,29 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      final prefs = await withTimeout(
-        SharedPreferences.getInstance(),
-        'SharedPreferences.getInstance',
-        const Duration(seconds: 3),
-      );
+      // ✅ 先注入内存态：立刻生效（决定 login=1 的关键）
+context.read<WallpaperService>().setPixivCookie(cookie);
+logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
 
-      final key = _pixivCookiePrefsKey(r.id);
-      await withTimeout(
-        prefs.setString(key, cookie),
-        'prefs.setString($key)',
-        const Duration(seconds: 3),
-      );
-      logger.log('Pixiv cookie saved to prefs key=$key len=${cookie.length}');
+// ✅ 写回规则 headers：持久化（下次启动仍有效）
+await withTimeout(
+  m.updateRuleHeader(r.id, 'Cookie', cookie),
+  'SourceManager.updateRuleHeader(Cookie)',
+  const Duration(seconds: 3),
+);
+logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
 
-      context.read<WallpaperService>().setPixivCookie(cookie);
-      logger.log('Pixiv cookie injected into WallpaperService (UI)');
-
-      await withTimeout(
-        m.updateRuleHeader(r.id, 'Cookie', cookie),
-        'SourceManager.updateRuleHeader(Cookie)',
-        const Duration(seconds: 3),
-      );
-      logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
+// ✅ SharedPreferences 作为备份：不 await，避免阻塞（可选）
+() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final key = _pixivCookiePrefsKey(r.id);
+    await prefs.setString(key, cookie);
+    logger.log('Pixiv cookie backup saved to prefs key=$key');
+  } catch (e) {
+    logger.log('Pixiv cookie backup prefs failed: $e');
+  }
+}();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
