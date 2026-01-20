@@ -4,8 +4,6 @@ import 'package:dio/dio.dart';
 class PixivClient {
   final Dio _dio;
   String? _cookie;
-  
-  // 默认使用 PC 端 UA
   String _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -19,7 +17,6 @@ class PixivClient {
         _cookie = cookie,
         _log = logger {
     
-    // 基础配置
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 15),
@@ -34,7 +31,6 @@ class PixivClient {
 
   bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
-  /// 更新配置（Cookie 或 UA）
   void updateConfig({String? cookie, String? userAgent}) {
     bool changed = false;
     if (cookie != null) {
@@ -48,7 +44,6 @@ class PixivClient {
     if (changed) _refreshHeaders();
   }
 
-  /// 🔥 修复点：加回这个方法以兼容 PixivRepository
   void setCookie(String? cookie) {
     updateConfig(cookie: cookie);
   }
@@ -89,13 +84,11 @@ class PixivClient {
         final uid = data['body']['userId']?.toString() ?? '';
         if (uid.isNotEmpty) return true;
       }
-
       // 2. Mobile
       if (data['userData'] is Map) {
         final uid = data['userData']['id']?.toString() ?? '';
         if (uid.isNotEmpty) return true;
       }
-      
       return false;
     } catch (e) {
       _log?.call('CheckLogin Error: $e');
@@ -143,6 +136,39 @@ class PixivClient {
 
     } catch (e) {
       _log?.call('Search Error: $e');
+      return [];
+    }
+  }
+
+  // 🔥 新增：排行榜 API
+  Future<List<PixivIllustBrief>> getRanking({
+    required String mode, // daily, weekly, monthly, rookie, original, male, female
+    int page = 1,
+  }) async {
+    try {
+      // 使用 touch API 比较容易解析，返回结构类似 getUserArtworks
+      final resp = await _dio.get(
+        '/touch/ajax/ranking',
+        queryParameters: {
+          'mode': mode,
+          'type': 'all', // illust + ugoira
+          'p': page,
+          'format': 'json',
+        },
+      );
+
+      if ((resp.statusCode ?? 0) >= 400) return [];
+      
+      final body = resp.data;
+      if (body is! Map) return []; // touch api直接返回根对象，有时在 body 里
+      
+      // 兼容 touch API 的不同响应结构
+      final rankings = body['ranking'] ?? (body['body']?['ranking']);
+      if (rankings is! List) return [];
+
+      return rankings.map((e) => PixivIllustBrief.fromMap(e)).toList();
+    } catch (e) {
+      _log?.call('Ranking Error: $e');
       return [];
     }
   }
@@ -201,6 +227,9 @@ class PixivIllustBrief {
   final int height;
   final int xRestrict;
   final List<String> tags;
+  // 🔥 新增字段
+  final int illustType; // 0,1=illust, 2=ugoira(动图)
+  final int aiType;     // 1=non-AI, 2=AI-generated
 
   const PixivIllustBrief({
     required this.id,
@@ -210,11 +239,16 @@ class PixivIllustBrief {
     required this.height,
     required this.xRestrict,
     this.tags = const [],
+    this.illustType = 0,
+    this.aiType = 0,
   });
+
+  bool get isUgoira => illustType == 2;
+  bool get isAi => aiType == 2;
 
   factory PixivIllustBrief.fromJson(dynamic json) {
     if (json is! Map) return _empty();
-    if (json['id'] == null) return _empty(); // Filter ads
+    if (json['id'] == null) return _empty();
 
     return PixivIllustBrief(
       id: _parseString(json['id']),
@@ -224,6 +258,8 @@ class PixivIllustBrief {
       height: _parseInt(json['height']),
       xRestrict: _parseInt(json['xRestrict']),
       tags: _parseTags(json['tags']),
+      illustType: _parseInt(json['illustType']),
+      aiType: _parseInt(json['aiType']),
     );
   }
 
@@ -237,6 +273,8 @@ class PixivIllustBrief {
       height: _parseInt(json['height']),
       xRestrict: _parseInt(json['x_restrict']),
       tags: _parseTags(json['tags']),
+      illustType: _parseInt(json['illust_type']), // map里通常是下划线
+      aiType: _parseInt(json['ai_type']),
     );
   }
 
