@@ -43,8 +43,19 @@ class _FilterSheetState extends State<FilterSheet> {
     return context.read<WallpaperService>().isPixivRule(activeRule);
   }
 
+  /// ✅ 修复：Pixiv Cookie 判定必须包含“规则 headers 自带 Cookie”
+  /// 原实现只看 WallpaperService.hasPixivCookie（UI 注入 cookie），会导致：
+  /// - 规则里明明写了 Cookie，Repo 也能注入，但 FilterSheet 仍显示“需登录/锁定”
+  ///
+  /// 新实现：直接读取 Service 计算后的最终图片请求头（会触发 _syncPixivCookieFromRule）
+  /// 只要最终 headers 里存在 Cookie，即视为“已设置 Cookie”
   bool _hasPixivCookie(BuildContext context) {
-    return context.read<WallpaperService>().hasPixivCookie;
+    final activeRule = context.read<SourceManager>().activeRule;
+    if (activeRule == null) return false;
+
+    final headers = context.read<WallpaperService>().getImageHeaders(activeRule);
+    final cookie = (headers?['Cookie'] ?? headers?['cookie'] ?? '').trim();
+    return cookie.isNotEmpty;
   }
 
   bool _isOptionLockedForPixiv({
@@ -92,6 +103,7 @@ class _FilterSheetState extends State<FilterSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
             child: Row(
+              mainAxisAlignment: MainAxisSize.max,
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text("筛选", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -206,9 +218,7 @@ class _FilterSheetState extends State<FilterSheet> {
                 selectedColor: Colors.black,
                 checkmarkColor: Colors.white,
                 labelStyle: TextStyle(
-                  color: locked
-                      ? Colors.grey
-                      : (isSelected ? Colors.white : Colors.black),
+                  color: locked ? Colors.grey : (isSelected ? Colors.white : Colors.black),
                   fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                 ),
                 backgroundColor: Colors.grey[100],
