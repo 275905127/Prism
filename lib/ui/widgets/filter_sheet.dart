@@ -43,12 +43,14 @@ class _FilterSheetState extends State<FilterSheet> {
     return context.read<WallpaperService>().isPixivRule(activeRule);
   }
 
-  /// ✅ 修复：Pixiv Cookie 判定必须包含“规则 headers 自带 Cookie”
-  /// 原实现只看 WallpaperService.hasPixivCookie（UI 注入 cookie），会导致：
-  /// - 规则里明明写了 Cookie，Repo 也能注入，但 FilterSheet 仍显示“需登录/锁定”
+  /// ✅ Pixiv Cookie 判定必须包含“规则 headers 自带 Cookie”
   ///
   /// 新实现：直接读取 Service 计算后的最终图片请求头（会触发 _syncPixivCookieFromRule）
   /// 只要最终 headers 里存在 Cookie，即视为“已设置 Cookie”
+  ///
+  /// 注意：
+  /// - Cookie 非空不代表一定已登录（可能过期），但 UI 侧用于“是否允许选择”已足够。
+  /// - 登录态由 Repo 侧进一步判定（loginOk），会自动降级 popular/r18 等筛选。
   bool _hasPixivCookie(BuildContext context) {
     final activeRule = context.read<SourceManager>().activeRule;
     if (activeRule == null) return false;
@@ -81,8 +83,8 @@ class _FilterSheetState extends State<FilterSheet> {
   void _toastLocked() {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('该筛选项需要设置 Pixiv Cookie 才能使用'),
-        duration: Duration(milliseconds: 1200),
+        content: Text('该筛选项需要有效的 Pixiv 登录 Cookie（未登录/过期会无效）'),
+        duration: Duration(milliseconds: 1400),
       ),
     );
   }
@@ -103,7 +105,7 @@ class _FilterSheetState extends State<FilterSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
             child: Row(
-              mainAxisAlignment: MainAxisSize.max,
+              mainAxisSize: MainAxisSize.max,
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text("筛选", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
