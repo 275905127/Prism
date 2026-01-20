@@ -20,6 +20,8 @@ class WallpaperService {
   );
 
   late final Dio _pixivDio = _createPixivDioFrom(_dio);
+
+  /// 统一日志：关键路径用 log，高频细节用 debug（由 AppLogLogger.debugEnabled 控制）
   final PrismLogger _logger = const AppLogLogger();
 
   late final RuleEngine _standardEngine = RuleEngine(dio: _dio, logger: _logger);
@@ -28,15 +30,34 @@ class WallpaperService {
   String? _pixivCookie;
   bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
 
-  // UI 设置 Cookie：同步给 Repo + 打日志
+  // 用于去重：避免重复 setCookie 造成日志与链路抖动
+  String _lastAppliedCookie = '';
+
+  void _applyPixivCookieToRepo(String? cookie, {required String reason}) {
+    final c = (cookie ?? '').trim();
+    if (c == _lastAppliedCookie) {
+      _logger.debug('WallpaperService: skip setCookie (unchanged) reason=$reason len=${c.length}');
+      return;
+    }
+    _lastAppliedCookie = c;
+
+    _pixivRepo.setCookie(c.isEmpty ? null : c);
+    _logger.debug('WallpaperService: repo.setCookie applied reason=$reason len=${c.length}');
+  }
+
+  // UI 设置 Cookie：同步给 Repo + 关键日志
   void setPixivCookie(String? cookie) {
     final c = cookie?.trim() ?? '';
     _pixivCookie = c.isEmpty ? null : c;
 
-    _pixivRepo.setCookie(_pixivCookie);
+    // 立刻生效
+    _applyPixivCookieToRepo(_pixivCookie, reason: 'UI.setPixivCookie');
 
+    // 关键点保留一条即可
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
-    _logger.log('WallpaperService: _pixivCookieLen=${(_pixivCookie ?? '').length}');
+
+    // 高频细节下沉到 debug
+    _logger.debug('WallpaperService: _pixivCookieLen=${(_pixivCookie ?? '').length}');
   }
 
   void setPixivPagesConfig({
@@ -110,30 +131,34 @@ class WallpaperService {
   void _syncPixivCookieFromRule(SourceRule rule) {
     final headers = rule.headers;
 
+    // 1) rule.headers 为 null：只能用全局 cookie
     if (headers == null) {
       if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
-        _logger.log('WallpaperService: sync cookie from global (rule.headers null)');
-        _pixivRepo.setCookie(_pixivCookie);
+        _applyPixivCookieToRepo(_pixivCookie, reason: 'sync(rule.headers null -> global)');
+        _logger.debug('WallpaperService: sync cookie from global (rule.headers null)');
       } else {
-        _logger.log('WallpaperService: sync cookie -> none (rule.headers null & global empty)');
-        _pixivRepo.setCookie(null);
+        _applyPixivCookieToRepo(null, reason: 'sync(rule.headers null -> none)');
+        _logger.debug('WallpaperService: sync cookie -> none (rule.headers null & global empty)');
       }
       return;
     }
 
+    // 2) rule.headers 有 Cookie：优先使用规则 Cookie
     final cookie = (headers['Cookie'] ?? headers['cookie'])?.toString().trim() ?? '';
     if (cookie.isNotEmpty) {
-      _pixivRepo.setCookie(cookie);
-      _logger.log('Pixiv cookie injected from rule');
+      _applyPixivCookieToRepo(cookie, reason: 'sync(rule.headers Cookie)');
+      // 这条在你日志里最吵：降为 debug
+      _logger.debug('Pixiv cookie injected from rule');
       return;
     }
 
+    // 3) rule.headers 没 Cookie：回退到全局 cookie，否则清空
     if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
-      _logger.log('WallpaperService: sync cookie from global (rule cookie empty)');
-      _pixivRepo.setCookie(_pixivCookie);
+      _applyPixivCookieToRepo(_pixivCookie, reason: 'sync(rule cookie empty -> global)');
+      _logger.debug('WallpaperService: sync cookie from global (rule cookie empty)');
     } else {
-      _logger.log('WallpaperService: sync cookie -> clear (rule cookie empty & global empty)');
-      _pixivRepo.setCookie(null);
+      _applyPixivCookieToRepo(null, reason: 'sync(rule cookie empty -> clear)');
+      _logger.debug('WallpaperService: sync cookie -> clear (rule cookie empty & global empty)');
     }
   }
 
@@ -143,7 +168,8 @@ class WallpaperService {
     String? query, {
     Map<String, dynamic>? filterParams,
   }) async {
-    final String q = (query != null && query.trim().isNotEmpty) ? query : (rule.defaultKeyword ?? '').trim();
+    final String q =
+        (query != null && query.trim().isNotEmpty) ? query : (rule.defaultKeyword ?? '').trim();
 
     return _pixivRepo.fetch(
       rule,
