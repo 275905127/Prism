@@ -94,7 +94,6 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
-  // ✅ 修复：优先 prefs，其次 rule.headers；两者都无才 clear
   Future<void> _applyPixivCookieIfNeeded() async {
     final PrismLogger logger = const AppLogLogger();
 
@@ -106,10 +105,8 @@ class _HomePageState extends State<HomePage> {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      // 1) prefs
       final fromPrefs = (prefs.getString(_pixivCookiePrefsKey(rule.id)) ?? '').trim();
 
-      // 2) rule.headers fallback
       String fromHeaders = '';
       final h = rule.headers;
       if (h != null) {
@@ -118,14 +115,12 @@ class _HomePageState extends State<HomePage> {
 
       final selected = fromPrefs.isNotEmpty ? fromPrefs : fromHeaders;
 
-      // 3) 注入 service（只在两者都空时清空）
       context.read<WallpaperService>().setPixivCookie(selected.isEmpty ? null : selected);
 
       logger.log(
         'Pixiv apply cookie (UI) rule=${rule.id} prefsLen=${fromPrefs.length} headersLen=${fromHeaders.length} selectedLen=${selected.length}',
       );
 
-      // 4) headers -> prefs 回填，避免下次 prefs 空又清空
       if (fromPrefs.isEmpty && fromHeaders.isNotEmpty) {
         await prefs.setString(_pixivCookiePrefsKey(rule.id), fromHeaders);
         logger.log('Pixiv apply cookie (UI) backfilled prefs from rule.headers');
@@ -262,14 +257,21 @@ class _HomePageState extends State<HomePage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
+        backgroundColor: const Color(0xFFE5E5E5), // 🔥 E5E5E5
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // 🔥 Radius 8
         title: const Text('导入图源规则'),
         content: TextField(
           controller: controller,
           maxLines: 10,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             hintText: '在此粘贴 JSON 内容...',
-            border: OutlineInputBorder(),
+            filled: true,
+            fillColor: const Color(0xFFF3F3F3), // 🔥 F3F3F3
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8), // 🔥 Radius 8
+              borderSide: BorderSide.none, // 🔥 No border
+            ),
+            contentPadding: const EdgeInsets.all(12),
           ),
           style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
         ),
@@ -279,7 +281,10 @@ class _HomePageState extends State<HomePage> {
             child: const Text('取消', style: TextStyle(color: Colors.grey)),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.black),
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.black,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+            ),
             onPressed: () {
               if (controller.text.isEmpty) return;
               try {
@@ -296,13 +301,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // =========================================================
-  // Pixiv Web 登录（方案2：必须手动点保存；保存动作在 Sheet 内完成）
-  // 关键点：
-  // 1) 检测 Cookie 仍然写日志 + UI 提示
-  // 2) 点击“保存”时：立刻注入 WallpaperService + 写回 rule.headers + prefs 备份
-  // 3) 保存成功后才关闭 Sheet，避免“pop 后续逻辑不执行”
-  // =========================================================
   void _openPixivWebLogin(BuildContext context) async {
     final PrismLogger logger = const AppLogLogger();
 
@@ -325,7 +323,6 @@ class _HomePageState extends State<HomePage> {
       'Pixiv web login opened (UI) UA=${targetUA.length > 60 ? '${targetUA.substring(0, 60)}...' : targetUA}',
     );
 
-    // 只清 WebView Cookie，不清 app 内持久化；否则你会看到 “cookie cleared (UI)” 误判为丢登录
     await cookieManager.deleteAllCookies();
     logger.log('Pixiv webview cookies cleared (UI)');
 
@@ -365,7 +362,6 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // ✅ 状态变量放 builder 外，避免重建清空
     bool sheetDetected = false;
     String sheetCookie = '';
     bool saving = false;
@@ -431,15 +427,12 @@ class _HomePageState extends State<HomePage> {
             logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
 
             try {
-              // 1) 立刻注入 Service：决定 login=1/0 的关键
               wallpaperService.setPixivCookie(cookie);
               logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
 
-              // 2) 写回 rule.headers：持久化（优先级高于 prefs）
               await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
               logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
 
-              // 3) prefs 备份：后台，不阻塞
               () async {
                 try {
                   final prefs = await SharedPreferences.getInstance();
@@ -453,10 +446,8 @@ class _HomePageState extends State<HomePage> {
 
               snack(ctx, '已保存，正在刷新…');
 
-              // 关闭 sheet
               if (ctx.mounted) Navigator.pop(ctx);
 
-              // 刷新列表
               if (mounted) _fetchData(refresh: true);
 
               logger.log('Pixiv save success (UI)');
@@ -492,7 +483,10 @@ class _HomePageState extends State<HomePage> {
                   padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
                   child: FilledButton(
                     onPressed: (!saveEnabled || saving) ? null : doSave,
-                    style: FilledButton.styleFrom(backgroundColor: Colors.black),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.black,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                     child: saving
                         ? const SizedBox(
                             width: 16,
@@ -591,7 +585,8 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setState) {
           return AlertDialog(
-            backgroundColor: Colors.white,
+            backgroundColor: const Color(0xFFE5E5E5), // 🔥 E5E5E5
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // 🔥 Radius 8
             title: const Text('Pixiv 设置'),
             content: SingleChildScrollView(
               child: Column(
@@ -605,6 +600,9 @@ class _HomePageState extends State<HomePage> {
                     title: Text(service.hasPixivCookie ? '已设置 Cookie' : '未登录', style: const TextStyle(fontSize: 14)),
                     subtitle: const Text('建议使用 Web 登录自动抓取', style: TextStyle(fontSize: 12)),
                     trailing: FilledButton.tonal(
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+                      ),
                       onPressed: () {
                         Navigator.pop(ctx);
                         _openPixivWebLogin(context);
@@ -644,10 +642,15 @@ class _HomePageState extends State<HomePage> {
                   const SizedBox(height: 8),
                   TextField(
                     controller: mutedController,
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       hintText: '例如: R-18G AI生成 ...',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                      filled: true,
+                      fillColor: const Color(0xFFF3F3F3), // 🔥 F3F3F3
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8), // 🔥 Radius 8
+                        borderSide: BorderSide.none, // 🔥 No border
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
                     ),
                     style: const TextStyle(fontSize: 13),
                     maxLines: 2,
@@ -661,7 +664,10 @@ class _HomePageState extends State<HomePage> {
                 child: const Text('取消', style: TextStyle(color: Colors.grey)),
               ),
               FilledButton(
-                style: FilledButton.styleFrom(backgroundColor: Colors.black),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+                ),
                 onPressed: () {
                   final tags = mutedController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
 
@@ -860,6 +866,13 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       drawer: Drawer(
+        // 🔥 Radius 8 for right corners
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.only(
+            topRight: Radius.circular(8),
+            bottomRight: Radius.circular(8),
+          ),
+        ),
         child: Column(
           children: [
             DrawerHeader(
