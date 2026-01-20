@@ -74,6 +74,19 @@ class WallpaperService {
     return _pixivRepo.supports(rule);
   }
 
+  /// ✅ 新增：供 UI 查询 Pixiv“是否有效登录态”
+  /// - UI 必须通过 Service 访问 Repo
+  /// - 内部会先同步规则 Cookie，再调用 Repo 的登录态缓存校验
+  Future<bool> getPixivLoginOk(SourceRule rule) async {
+    if (!_pixivRepo.supports(rule)) return false;
+
+    // 先保证 cookie 同步（用于“规则自带 cookie”或“UI 注入 cookie 回退”场景）
+    _syncPixivCookieFromRule(rule);
+
+    // Repo 会再根据 rule.headers 同步 UA/Cookie，并走登录校验缓存
+    return _pixivRepo.getLoginOk(rule);
+  }
+
   /// 核心方法：获取壁纸列表
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
