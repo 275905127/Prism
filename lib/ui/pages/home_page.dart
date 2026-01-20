@@ -11,6 +11,7 @@ import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
+import '../../core/pixiv/pixiv_client.dart'; // 🔥 必须引入，用于访问 kMobileUserAgent 常量
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -37,9 +38,6 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic> _currentFilters = {};
   String? _currentRuleId;
 
-  // 🔥 优化：已删除 static bool _isPixivRuleId(...) 方法
-  // 逻辑重复判定已移除，现在统一通过 WallpaperService.isPixivRule() 进行判断。
-
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
 
@@ -65,8 +63,6 @@ class _HomePageState extends State<HomePage> {
   Future<void> _loadPixivPreferences() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
-    
-    // 🔥 优化：调用 Service 判断
     if (rule == null || !context.read<WallpaperService>().isPixivRule(rule)) return;
 
     try {
@@ -102,7 +98,6 @@ class _HomePageState extends State<HomePage> {
     final rule = manager.activeRule;
     if (rule == null) return;
 
-    // 🔥 优化：调用 Service 判断
     if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     try {
@@ -278,10 +273,30 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // 🔥 优化：动态适配 UA 登录逻辑
   void _openPixivWebLogin(BuildContext context) async {
+    // 1. 获取当前规则
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+
+    // 2. 确定目标 UA
+    // 默认使用兼容性最好的 Android Chrome UA (即 PixivClient 定义的常量)
+    String targetUA = PixivClient.kMobileUserAgent; 
+
+    // 如果规则里配置了特殊的 UA (比如 Edge/iPhone)，则覆盖默认值
+    if (rule != null && rule.headers != null) {
+      final h = rule.headers!;
+      // 查找 User-Agent (忽略大小写)
+      final customUA = h['User-Agent'] ?? h['user-agent'];
+      if (customUA != null && customUA.trim().isNotEmpty) {
+        targetUA = customUA.trim();
+      }
+    }
+    
+    // 3. 初始化 Webview，强制使用 targetUA
     final controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent('Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36')
+      ..setUserAgent(targetUA) 
       ..loadRequest(Uri.parse('https://accounts.pixiv.net/login'));
 
     String? foundCookie;
@@ -333,7 +348,6 @@ class _HomePageState extends State<HomePage> {
     final rule = manager.activeRule;
     if (rule == null) return;
     
-    // 🔥 优化：调用 Service 判断
     if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     final service = context.read<WallpaperService>();
@@ -592,7 +606,6 @@ class _HomePageState extends State<HomePage> {
 
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
     
-    // 🔥 优化：使用 Service 判断，不再依赖本地硬编码逻辑
     final showPixivSettings = context.read<WallpaperService>().isPixivRule(activeRule);
 
     return Scaffold(
