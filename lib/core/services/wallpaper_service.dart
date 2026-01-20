@@ -52,7 +52,7 @@ class WallpaperService {
     _pixivRepo.updatePagesConfig(next);
   }
 
-  // 🔥 新增：设置 Pixiv 偏好 (画质/屏蔽)
+  // 设置 Pixiv 偏好 (画质/屏蔽)
   void setPixivPreferences({
     String? imageQuality,
     List<String>? mutedTags,
@@ -135,7 +135,7 @@ class WallpaperService {
   }) async {
     final String q = (query != null && query.trim().isNotEmpty)
         ? query
-        : (rule.defaultKeyword ?? '').trim(); // 🔥 允许空 query (排行榜模式)
+        : (rule.defaultKeyword ?? '').trim();
 
     return _pixivRepo.fetch(
       rule,
@@ -167,6 +167,13 @@ class WallpaperService {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       ...?headers,
     };
+
+    // 🔥 优化：下载逻辑健壮性增强
+    // 自动检测是否为 Pixiv 图片域名 (i.pximg.net)，如果是且没传 Referer，自动补全。
+    // 这样无论 UI 层是否漏传 header，下载都能成功，避免 403 Forbidden。
+    if (u.contains('pximg.net') && !finalHeaders.containsKey('Referer')) {
+      finalHeaders['Referer'] = 'https://www.pixiv.net/';
+    }
 
     final resp = await _dio.get(
       u,
