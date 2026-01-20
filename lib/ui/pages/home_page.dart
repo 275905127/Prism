@@ -257,7 +257,7 @@ class _HomePageState extends State<HomePage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFFE5E5E5), // 🔥 E5E5E5
+        backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // 🔥 Radius 8
         title: const Text('导入图源规则'),
         content: TextField(
