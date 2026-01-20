@@ -1,6 +1,5 @@
 // lib/core/services/wallpaper_service.dart
 import 'dart:typed_data';
-
 import 'package:dio/dio.dart';
 
 import '../engine/rule_engine.dart';
@@ -29,15 +28,15 @@ class WallpaperService {
   String? _pixivCookie;
   bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
 
-  // 🔥 核心修复：确保 UI 设置的 Cookie 能传递给 Repo
+  // UI 设置 Cookie：同步给 Repo + 打日志
   void setPixivCookie(String? cookie) {
     final c = cookie?.trim() ?? '';
     _pixivCookie = c.isEmpty ? null : c;
-    
-    // 关键：同步给 Repository
+
     _pixivRepo.setCookie(_pixivCookie);
-    
+
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
+    _logger.log('WallpaperService: _pixivCookieLen=${(_pixivCookie ?? '').length}');
   }
 
   void setPixivPagesConfig({
@@ -110,27 +109,30 @@ class WallpaperService {
 
   void _syncPixivCookieFromRule(SourceRule rule) {
     final headers = rule.headers;
+
     if (headers == null) {
-      // 规则无特殊 Cookie，确保 Repo 使用全局 UI Cookie
-      if (_pixivCookie != null) {
+      if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
+        _logger.log('WallpaperService: sync cookie from global (rule.headers null)');
         _pixivRepo.setCookie(_pixivCookie);
+      } else {
+        _logger.log('WallpaperService: sync cookie -> none (rule.headers null & global empty)');
+        _pixivRepo.setCookie(null);
       }
       return;
     }
 
-    // 如果规则里硬编码了 Cookie，优先使用规则的
-    final cookie = (headers['Cookie'] ?? headers['cookie'])?.trim() ?? '';
+    final cookie = (headers['Cookie'] ?? headers['cookie'])?.toString().trim() ?? '';
     if (cookie.isNotEmpty) {
       _pixivRepo.setCookie(cookie);
       _logger.log('Pixiv cookie injected from rule');
       return;
     }
 
-    // 否则回退到全局 UI Cookie
     if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
+      _logger.log('WallpaperService: sync cookie from global (rule cookie empty)');
       _pixivRepo.setCookie(_pixivCookie);
     } else {
-      // 都没有，则清除
+      _logger.log('WallpaperService: sync cookie -> clear (rule cookie empty & global empty)');
       _pixivRepo.setCookie(null);
     }
   }
@@ -141,9 +143,7 @@ class WallpaperService {
     String? query, {
     Map<String, dynamic>? filterParams,
   }) async {
-    final String q = (query != null && query.trim().isNotEmpty)
-        ? query
-        : (rule.defaultKeyword ?? '').trim();
+    final String q = (query != null && query.trim().isNotEmpty) ? query : (rule.defaultKeyword ?? '').trim();
 
     return _pixivRepo.fetch(
       rule,
@@ -158,7 +158,6 @@ class WallpaperService {
 
     if (_pixivRepo.supports(rule)) {
       _syncPixivCookieFromRule(rule);
-      // 🔥 直接使用 Repo 暴露的 client 方法
       return _pixivRepo.client.buildImageHeaders();
     }
     return rule.buildRequestHeaders();
@@ -177,7 +176,6 @@ class WallpaperService {
       ...?headers,
     };
 
-    // 🔥 自动补全 Referer，防止 403
     if (u.contains('pximg.net') && !finalHeaders.containsKey('Referer')) {
       finalHeaders['Referer'] = 'https://www.pixiv.net/';
     }
