@@ -1,44 +1,38 @@
-// lib/core/utils/app_log.dart
 import 'dart:collection';
+
+enum AppLogLevel { info, debug }
 
 class AppLog {
   static final AppLog I = AppLog._();
   AppLog._();
 
-  static const int _max = 200;
+  static const int _max = 400;
   final Queue<String> _lines = Queue<String>();
 
-  /// 冻结写入（兜底保护）
-  bool _frozen = false;
+  bool _enabled = true;
+  bool _debugEnabled = false;
+
+  bool get enabled => _enabled;
+  bool get debugEnabled => _debugEnabled;
+
+  void setEnabled(bool v) => _enabled = v;
+  void setDebugEnabled(bool v) => _debugEnabled = v;
 
   List<String> get lines => List.unmodifiable(_lines);
 
-  /// 冻结日志写入（通常由 Logger 层控制，这里是保险）
-  void freeze() => _frozen = true;
+  void addInfo(String line) => _add(AppLogLevel.info, line);
+  void addDebug(String line) => _add(AppLogLevel.debug, line);
 
-  /// 恢复日志写入
-  void resume() => _frozen = false;
-
-  /// 写入单条日志
-  void add(String line) {
-    if (_frozen) return;
-
-    final l = line.trim();
-    if (l.isEmpty) return;
+  void _add(AppLogLevel level, String line) {
+    if (!_enabled) return;
+    if (level == AppLogLevel.debug && !_debugEnabled) return;
 
     final ts = DateTime.now().toIso8601String().substring(11, 19);
-    _lines.addFirst('[$ts] $l');
+    final prefix = (level == AppLogLevel.debug) ? '[D]' : '[I]';
+    _lines.addFirst('[$ts] $prefix $line');
 
     while (_lines.length > _max) {
       _lines.removeLast();
-    }
-  }
-
-  /// 批量写入（给 interceptor / debug dump 使用）
-  void addAll(Iterable<String> lines) {
-    if (_frozen) return;
-    for (final l in lines) {
-      add(l);
     }
   }
 
