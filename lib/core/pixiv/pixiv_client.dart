@@ -9,20 +9,22 @@ import 'package:dio/dio.dart';
 /// 注意：
 /// 1) i.pximg.net 图片通常要求 Referer: https://www.pixiv.net/
 /// 2) 部分内容可能需要登录 Cookie（可选）
-/// 3) 这里只负责请求 Pixiv Ajax，不掺进 RuleEngine
-///
-/// ✅ 允许注入 Dio（由 WallpaperService 统一注入拦截器/代理/证书等网络策略）
-/// ⚠️ 建议注入“Pixiv 专用 Dio”（baseUrl=Pixiv），避免污染通用 Dio 的 baseUrl/options
+/// 3) User-Agent 必须与 Cookie 获取端的浏览器一致，否则会被判定为劫持
 class PixivClient {
   final Dio _dio;
   String? _cookie;
+  
+  // 🔥 默认 UA，但会被 updateConfig 覆盖
+  String _userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   PixivClient({
     Dio? dio,
     String? cookie,
   })  : _dio = dio ?? Dio(),
         _cookie = cookie {
-    // ✅ 注意：这里会设置 baseUrl 与超时，适合“Pixiv 专用 Dio”
+    // 初始化 Headers
+    _updateHeaders();
+    
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 10),
@@ -30,21 +32,39 @@ class PixivClient {
       receiveTimeout: const Duration(seconds: 15),
       responseType: ResponseType.json,
       validateStatus: (s) => s != null && s < 500,
-      headers: _baseApiHeaders(cookie: cookie),
     );
   }
 
   bool get hasCookie => (_cookie?.trim().isNotEmpty ?? false);
 
+  /// 🔥 核心方法：允许外部(Repo)同步更新 Cookie 和 UA
+  void updateConfig({String? cookie, String? userAgent}) {
+    if (cookie != null) _cookie = cookie;
+    if (userAgent != null && userAgent.isNotEmpty) _userAgent = userAgent;
+    _updateHeaders();
+  }
+
+  /// 单独设置 Cookie (兼容旧接口)
   void setCookie(String? cookie) {
     _cookie = cookie;
-    _dio.options.headers = _baseApiHeaders(cookie: cookie);
+    _updateHeaders();
+  }
+
+  /// 统一刷新 Dio Headers
+  void _updateHeaders() {
+    _dio.options.headers = {
+      'User-Agent': _userAgent, // 🔥 动态 UA
+      'Referer': 'https://www.pixiv.net/',
+      'Accept': 'application/json',
+      if (_cookie != null && _cookie!.isNotEmpty) 'Cookie': _cookie!,
+    };
   }
 
   /// 给 i.pximg.net 图片加载用（CachedNetworkImage / Dio 下载）
+  /// 🔥 必须确保这里的 UA 和 Cookie 与请求 API 时的一致
   Map<String, String> buildImageHeaders() {
     final h = <String, String>{
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
     };
     final c = _cookie?.trim() ?? '';
@@ -52,19 +72,7 @@ class PixivClient {
     return h;
   }
 
-  static Map<String, dynamic> _baseApiHeaders({String? cookie}) {
-    final h = <String, dynamic>{
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-      'Referer': 'https://www.pixiv.net/',
-      'Accept': 'application/json',
-    };
-    final c = cookie?.trim() ?? '';
-    if (c.isNotEmpty) h['Cookie'] = c;
-    return h;
-  }
-
-  /// 搜索：返回 illust id + 搜索页给的缩略图（square1200 / img-master）
-  /// GET /ajax/search/artworks/{word}?order=date_d&mode=all&s_mode=s_tag&p=1
+  /// 搜索：返回 illust id + 搜索页给的缩略图
   Future<List<PixivIllustBrief>> searchArtworks({
     required String word,
     int page = 1,
@@ -77,6 +85,7 @@ class PixivClient {
 
     final path = '/ajax/search/artworks/${Uri.encodeComponent(w)}';
 
+    // Headers 已经在 _updateHeaders 中设置到了 _dio.options，此处无需重复设置
     final resp = await _dio.get(
       path,
       queryParameters: {
@@ -85,7 +94,6 @@ class PixivClient {
         's_mode': sMode,
         'p': page,
       },
-      options: Options(headers: _baseApiHeaders(cookie: _cookie)),
     );
 
     final sc = resp.statusCode ?? 0;
@@ -132,15 +140,11 @@ class PixivClient {
   }
 
   /// 获取作品所有页 URL（含 original / regular / small）
-  /// GET /ajax/illust/{id}/pages
   Future<List<PixivPageUrls>> getIllustPages(String illustId) async {
     final id = illustId.trim();
     if (id.isEmpty) return [];
 
-    final resp = await _dio.get(
-      '/ajax/illust/$id/pages',
-      options: Options(headers: _baseApiHeaders(cookie: _cookie)),
-    );
+    final resp = await _dio.get('/ajax/illust/$id/pages');
 
     final sc = resp.statusCode ?? 0;
     if (sc >= 400) {
@@ -175,6 +179,42 @@ class PixivClient {
     }
     return out;
   }
+  
+  // 新增：获取用户作品（兼容之前提到的扩展）
+  Future<List<PixivIllustBrief>> getUserArtworks({
+    required String userId,
+    int page = 1,
+  }) async {
+    final uid = userId.trim();
+    if (uid.isEmpty) return [];
+
+    // 注意：Touch API 可能需要特殊的 UA，但通常 Desktop UA 也能通过
+    final resp = await _dio.get(
+      '/touch/ajax/user/illusts',
+      queryParameters: {'user_id': uid, 'p': page},
+    );
+
+    final data = resp.data;
+    if (data is! Map) return [];
+    final body = data['body'];
+    if (body is! Map) return [];
+    final illusts = body['illusts'];
+    if (illusts is! List) return [];
+
+    final out = <PixivIllustBrief>[];
+    for (final it in illusts) {
+      if (it is! Map) continue;
+      out.add(PixivIllustBrief(
+        id: (it['id'] ?? '').toString(),
+        title: (it['title'] ?? '').toString(),
+        thumbUrl: (it['url'] ?? '').toString(),
+        width: _toInt(it['width']),
+        height: _toInt(it['height']),
+        xRestrict: _toInt(it['x_restrict']),
+      ));
+    }
+    return out;
+  }
 
   static int _toInt(dynamic v) {
     if (v is int) return v;
@@ -189,8 +229,6 @@ class PixivIllustBrief {
   final String thumbUrl;
   final int width;
   final int height;
-
-  /// 0=全年龄，1/2=限制（大概）
   final int xRestrict;
 
   const PixivIllustBrief({
