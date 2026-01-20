@@ -52,7 +52,7 @@ class PixivRepository {
   static const String kRuleId = 'pixiv_search_ajax';
   static const String kUserRuleId = 'pixiv_user';
 
-  // 🔥 暴露 Client，供 Service 调用（例如 buildImageHeaders）
+  // 🔥 修复1：暴露 Client 给 Service 使用
   PixivClient get client => _client;
 
   bool supports(dynamic rule) {
@@ -67,10 +67,16 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
-  // 🔥 核心方法：更新 Cookie
+  // 🔥 修复2：增强 Cookie 设置逻辑，添加日志
   void setCookie(String? cookie) {
     _client.setCookie(cookie);
     _invalidateLoginCache();
+    // 关键调试日志：确认 Repo 是否真的收到了 Cookie
+    if (cookie != null && cookie.isNotEmpty) {
+       _logger?.log('PixivRepo: setCookie updated (len=${cookie.length})');
+    } else {
+       _logger?.log('PixivRepo: setCookie cleared');
+    }
   }
 
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
@@ -146,9 +152,11 @@ class PixivRepository {
       final dynamic ua2 = headers['user-agent'];
       final ua = (ua1 ?? ua2)?.toString().trim();
 
+      // 🔥 修复3：只有当规则里真的有 cookie 时才覆盖，否则保持当前的登录态
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
         _client.updateConfig(cookie: cookie, userAgent: ua);
         _invalidateLoginCache();
+        
         if (ua != null && ua.isNotEmpty) _logger?.log('pixiv config synced: UA updated');
         if (cookie != null && cookie.isNotEmpty) {
           final prefix = cookie.length <= 12 ? cookie : cookie.substring(0, 12);
@@ -176,7 +184,6 @@ class PixivRepository {
     String order = 'date_d';
     String mode = 'all';
     String sMode = 's_tag';
-    // 最小收藏数
     int minBookmarks = 0;
 
     final fp = filterParams ?? const <String, dynamic>{};
@@ -190,7 +197,6 @@ class PixivRepository {
     mode = _pickStr('mode', mode);
     sMode = _pickStr('s_mode', sMode);
     
-    // 读取 min_bookmarks
     final mbRaw = fp['min_bookmarks'];
     if (mbRaw != null) {
       minBookmarks = int.tryParse(mbRaw.toString()) ?? 0;
@@ -200,15 +206,13 @@ class PixivRepository {
     final bool loginOk = await _getLoginOkCached();
 
     // 4. 降级与权限
-    // 识别是否是排行榜模式 (mode 以 ranking_ 开头，或者 UI 传了 'daily' 等)
     bool isRanking = false;
     String rankingMode = '';
     
     if (mode.startsWith('ranking_')) {
       isRanking = true;
-      rankingMode = mode.replaceFirst('ranking_', ''); // daily, weekly...
+      rankingMode = mode.replaceFirst('ranking_', ''); 
     } else if (['daily', 'weekly', 'monthly', 'rookie', 'original', 'male', 'female'].contains(mode)) {
-      // 兼容直接传 ranking mode 的情况
       isRanking = true;
       rankingMode = mode;
     }
@@ -222,13 +226,11 @@ class PixivRepository {
         _logger?.log('pixiv blocked: mode=r18 -> safe');
         mode = 'safe';
       }
-      // 排行榜通常不需要登录，或者是 public 的，暂时放行
     }
 
-    // 5. 构造最终 Query (搜索模式下)
+    // 5. 构造最终 Query
     String finalQuery = baseQuery;
     if (!isRanking && baseQuery.isNotEmpty && minBookmarks > 0) {
-      // 自动拼接 users入り
       finalQuery = '$baseQuery ${minBookmarks}users入り';
     }
 
@@ -242,12 +244,11 @@ class PixivRepository {
 
     try {
       if (isRanking) {
-        // 走排行榜 API
         briefs = await _client.getRanking(mode: rankingMode, page: page);
       } else if (ruleId == kUserRuleId) {
         briefs = await _client.getUserArtworks(userId: finalQuery, page: page);
       } else {
-        if (finalQuery.isEmpty) return const []; // 搜索模式下空 query 还是不发的
+        if (finalQuery.isEmpty) return const [];
         briefs = await _client.searchArtworks(
           word: finalQuery,
           page: page,
@@ -261,13 +262,10 @@ class PixivRepository {
       rethrow;
     }
 
-    // 7. 客户端过滤 (屏蔽 AI / 屏蔽标签)
+    // 7. 客户端过滤
     final int beforeCount = briefs.length;
     briefs = briefs.where((b) {
-      // AI 过滤
       if (!_prefs.showAi && b.isAi) return false;
-      
-      // 标签屏蔽
       if (_prefs.mutedTags.isNotEmpty) {
         for (final t in b.tags) {
           if (_prefs.mutedTags.contains(t)) return false;
@@ -297,9 +295,7 @@ class PixivRepository {
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
 
-      // 画质选择逻辑 (在 _enrichWithPages 已处理 URL 获取，这里选哪个字段)
       String bestUrl = e.thumbUrl;
-      
       switch (_prefs.imageQuality) {
         case 'original':
           bestUrl = e.originalUrl.isNotEmpty ? e.originalUrl : (e.regularUrl.isNotEmpty ? e.regularUrl : e.thumbUrl);
@@ -322,8 +318,8 @@ class PixivRepository {
           width: e.width.toDouble(),
           height: e.height.toDouble(),
           grade: e.grade,
-          isUgoira: e.isUgoira, // 传递动图标识
-          isAi: e.isAi,         // 传递 AI 标识
+          isUgoira: e.isUgoira,
+          isAi: e.isAi,
         ),
       );
     }
@@ -359,8 +355,6 @@ class PixivRepository {
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
 
-        // 优化：如果是小图模式，或者 original 已经能推导出来，就没必要发 pages 请求
-        // 只有当 'original' 或 'regular' 且推导失败时，才必须请求
         final bool needFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
 
         if (needFetch) {
@@ -375,7 +369,6 @@ class PixivRepository {
             // ignore
           }
         } else {
-          // thumb 能推导 original：直接用同一个
           if (regular.isEmpty) regular = original;
         }
 
