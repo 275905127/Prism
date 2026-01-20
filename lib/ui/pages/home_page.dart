@@ -12,7 +12,7 @@ import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
-import '../../core/pixiv/pixiv_client.dart'; 
+import '../../core/pixiv/pixiv_client.dart';
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -56,7 +56,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
-    await _loadPixivPreferences(); 
+    await _loadPixivPreferences();
     await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
   }
@@ -72,10 +72,10 @@ class _HomePageState extends State<HomePage> {
       if (jsonStr != null) {
         final m = jsonDecode(jsonStr);
         context.read<WallpaperService>().setPixivPreferences(
-          imageQuality: m['quality'],
-          showAi: m['show_ai'],
-          mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
-        );
+              imageQuality: m['quality'],
+              showAi: m['show_ai'],
+              mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
+            );
       }
     } catch (_) {}
   }
@@ -105,8 +105,7 @@ class _HomePageState extends State<HomePage> {
       final prefs = await SharedPreferences.getInstance();
       final c = prefs.getString(_pixivCookiePrefsKey(rule.id))?.trim() ?? '';
       context.read<WallpaperService>().setPixivCookie(c.isEmpty ? null : c);
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 
   Future<void> _loadFilters() async {
@@ -127,7 +126,7 @@ class _HomePageState extends State<HomePage> {
         }
       });
     } catch (e) {
-      print("加载筛选记录失败: $e");
+      // 这里不强制提示，避免影响主流程
     }
   }
 
@@ -144,7 +143,7 @@ class _HomePageState extends State<HomePage> {
         await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
       }
     } catch (e) {
-      print("保存筛选记录失败: $e");
+      // 这里不强制提示，避免影响主流程
     }
   }
 
@@ -174,10 +173,10 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final data = await context.read<WallpaperService>().fetch(
-        rule,
-        page: _page,
-        filterParams: _currentFilters,
-      );
+            rule,
+            page: _page,
+            filterParams: _currentFilters,
+          );
 
       if (!mounted) return;
 
@@ -274,11 +273,15 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 终极方案：自动检测 + 鲁棒的手动检测
-    // 🔥 修复版：加入重试轮询，确保 Cookie 落地后再关闭
+  // =========================================================
+  // Pixiv Web 登录（增强：App 内提示 + Cookie 共享 + 写回规则 headers）
+  // =========================================================
+
   void _openPixivWebLogin(BuildContext context) async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
+
+    // 1) 决定 UA：优先规则 headers，否则用 PixivClient 的统一移动 UA
     String targetUA = PixivClient.kMobileUserAgent;
     if (rule != null && rule.headers != null) {
       final h = rule.headers!;
@@ -289,8 +292,11 @@ class _HomePageState extends State<HomePage> {
     }
 
     final cookieManager = CookieManager.instance();
+
+    // 2) 清 Cookie：避免旧会话干扰
     await cookieManager.deleteAllCookies();
 
+    // 3) 统一 Dialog（你没有控制台时的主入口）
     void showMsg(String title, String content) {
       if (!context.mounted) return;
       showDialog(
@@ -305,29 +311,54 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
+    // 4) 可选：轻量提示（不打断）
+    void showSnack(String msg) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+      );
+    }
+
     String? foundCookie;
 
-    // 提取 Cookie 的逻辑
-    Future<String?> checkCookies() async {
-      // 1. 尝试同步 (虽说 v6 自动同步，但在循环里调用一下不亏)
-      if (Theme.of(context).platform == TargetPlatform.android) {
-         // await cookieManager.flush(); // 如果编译报错 flush 未定义，请注释掉这行
-      }
-
+    // 5) Cookie 抓取函数：同时读 pixiv.net 与 accounts.pixiv.net
+    Future<String?> checkCookies({bool forDebug = false}) async {
       final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
       final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
-      
+
       final allCookies = [...cookiesMain, ...cookiesAcc];
       final uniqueCookies = <String, Cookie>{};
-      for (var c in allCookies) {
+      for (final c in allCookies) {
         uniqueCookies[c.name] = c;
       }
 
-      // 必须包含 PHPSESSID 才算成功
+      // 必须包含 PHPSESSID 才算成功（你的原策略保留）
       if (uniqueCookies.containsKey('PHPSESSID')) {
         return uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
       }
       return null;
+    }
+
+    // 6) 失败诊断信息（只给“名称列表”，不泄露 cookie value）
+    Future<String> buildCookieNamesDebugText() async {
+      try {
+        final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+        final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
+
+        final mainNames = cookiesMain.map((c) => c.name).toSet().toList()..sort();
+        final accNames = cookiesAcc.map((c) => c.name).toSet().toList()..sort();
+
+        return [
+          '当前 UA：${targetUA.length > 60 ? '${targetUA.substring(0, 60)}...' : targetUA}',
+          '',
+          '[pixiv.net] cookies: ${mainNames.isEmpty ? '(空)' : mainNames.join(', ')}',
+          '[accounts.pixiv.net] cookies: ${accNames.isEmpty ? '(空)' : accNames.join(', ')}',
+          '',
+          '提示：若两边都为空或始终没有 PHPSESSID，通常是 WebView Cookie 未共享/未同步导致。',
+        ].join('\n');
+      } catch (e) {
+        return '读取 cookie 列表失败：$e';
+      }
     }
 
     await showModalBottomSheet(
@@ -340,23 +371,23 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                // 手动检测按钮 (逻辑保持不变)
+                // 手动检测按钮：带 loading
                 showDialog(
                   context: ctx,
                   barrierDismissible: false,
                   builder: (c) => const Center(child: CircularProgressIndicator()),
                 );
+
                 try {
                   final cookieStr = await checkCookies();
-                  if (ctx.mounted) Navigator.pop(ctx); 
+                  if (ctx.mounted) Navigator.pop(ctx);
 
                   if (cookieStr != null) {
                     foundCookie = cookieStr;
-                    if (ctx.mounted) Navigator.pop(ctx); 
+                    if (ctx.mounted) Navigator.pop(ctx);
                   } else {
-                    final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
-                    final names = cookies.map((c) => c.name).join(', ');
-                    showMsg("未检测到 Session", "请确认已登录。\n\n当前读到: [$names]");
+                    final debugText = await buildCookieNamesDebugText();
+                    showMsg("未检测到 Session", '请确认已完成登录。\n\n$debugText');
                   }
                 } catch (e) {
                   if (ctx.mounted) Navigator.pop(ctx);
@@ -372,73 +403,101 @@ class _HomePageState extends State<HomePage> {
           initialSettings: InAppWebViewSettings(
             userAgent: targetUA,
             javaScriptEnabled: true,
+
+            // ✅ 关键：让 WebView Cookie 与 CookieManager 同步（否则你读不到）
+            sharedCookiesEnabled: true,
+
+            // ✅ Android 关键：第三方 cookie
             thirdPartyCookiesEnabled: true,
+
             domStorageEnabled: true,
             databaseEnabled: true,
-            mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW, 
+            mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
           ),
-          // 🔥🔥🔥 核心修复：自动检测 + 轮询重试机制 🔥🔥🔥
           onLoadStop: (controller, url) async {
-             try {
-               final urlStr = url?.toString() ?? '';
-               
-               // 1. 还在登录页？忽略
-               if (urlStr.contains('accounts.pixiv.net')) return;
-               
-               // 2. 是主页？开始轮询检查！
-               if (urlStr.contains('pixiv.net') && !urlStr.contains('login')) {
-                 
-                 // 循环检查 5 次，每次间隔 500ms
-                 // 也就是给系统 2.5秒 的时间去写入 Cookie
-                 for (int i = 0; i < 5; i++) {
-                   final cookieStr = await checkCookies();
-                   
-                   if (cookieStr != null) {
-                     // 找到了！保存并关闭
-                     foundCookie = cookieStr;
-                     if (ctx.mounted) Navigator.pop(ctx); 
-                     return; // 结束循环
-                   }
-                   
-                   // 没找到，等待 500ms 后重试
-                   await Future.delayed(const Duration(milliseconds: 500));
-                 }
-                 // 如果循环结束还没找到，就不自动关闭，让用户手动点按钮
-               }
-             } catch (_) {}
+            try {
+              final urlStr = url?.toString() ?? '';
+
+              // 还在登录域：不做处理
+              if (urlStr.contains('accounts.pixiv.net')) return;
+
+              // 离开登录页后，尝试自动抓取
+              if (urlStr.contains('pixiv.net') && !urlStr.contains('login')) {
+                // 轻提示一下（不打断）
+                showSnack('正在自动检测登录状态...');
+
+                // 轮询 8 次，每次 500ms（给系统更多时间落地 cookie）
+                const int maxTry = 8;
+                for (int i = 0; i < maxTry; i++) {
+                  final cookieStr = await checkCookies();
+                  if (cookieStr != null) {
+                    foundCookie = cookieStr;
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    return;
+                  }
+                  await Future.delayed(const Duration(milliseconds: 500));
+                }
+
+                // 自动检测失败：弹 App 内可见提示
+                if (context.mounted) {
+                  final debugText = await buildCookieNamesDebugText();
+                  showMsg(
+                    "自动检测失败",
+                    '未自动获取到 PHPSESSID。\n'
+                        '你可以点击右上角「我已登录」进行手动检测。\n\n'
+                        '$debugText',
+                  );
+                }
+              }
+            } catch (e) {
+              if (context.mounted) {
+                showMsg("自动检测异常", e.toString());
+              }
+            }
           },
         ),
       ),
     );
 
-    // 保存逻辑
+    // =========================================================
+    // 保存逻辑：prefs + service + 写回规则 headers（关键）
+    // =========================================================
     if (foundCookie != null && mounted) {
-      final manager = context.read<SourceManager>();
-      final rule = manager.activeRule;
-      if (rule == null) return;
-      
-      final prefs = await SharedPreferences.getInstance();
-      final key = _pixivCookiePrefsKey(rule.id);
-      
-      await prefs.setString(key, foundCookie!);
-      context.read<WallpaperService>().setPixivCookie(foundCookie);
-      
-      showMsg("成功", "登录成功！Cookie 已保存。");
-      _fetchData(refresh: true);
+      final m = context.read<SourceManager>();
+      final r = m.activeRule;
+      if (r == null) return;
+
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final key = _pixivCookiePrefsKey(r.id);
+
+        // 1) 存 prefs（保持你原有逻辑）
+        await prefs.setString(key, foundCookie!);
+
+        // 2) 注入 Service（立即生效）
+        context.read<WallpaperService>().setPixivCookie(foundCookie);
+
+        // 3) ✅ 写回规则 headers（确保重启/切换规则仍有效）
+        await m.updateRuleHeader(r.id, 'Cookie', foundCookie);
+
+        showMsg("成功", "登录成功！Cookie 已保存并写入规则。");
+        _fetchData(refresh: true);
+      } catch (e) {
+        showMsg("保存失败", "已检测到 Cookie，但保存/写入规则时失败：\n$e");
+      }
     }
   }
-
 
   Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
-    
+
     if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     final service = context.read<WallpaperService>();
     final prefs = service.pixivPreferences;
-    
+
     String quality = prefs.imageQuality;
     bool showAi = prefs.showAi;
     final mutedController = TextEditingController(text: prefs.mutedTags.join(' '));
@@ -470,7 +529,6 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  
                   const Text('画质偏好', style: TextStyle(fontWeight: FontWeight.bold)),
                   DropdownButton<String>(
                     value: quality,
@@ -486,20 +544,18 @@ class _HomePageState extends State<HomePage> {
                     },
                   ),
                   const SizedBox(height: 16),
-
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('显示 AI 生成作品', style: TextStyle(fontWeight: FontWeight.bold)),
                       Switch(
-                        value: showAi, 
+                        value: showAi,
                         activeColor: Colors.black,
                         onChanged: (v) => setState(() => showAi = v),
                       ),
                     ],
                   ),
                   const SizedBox(height: 16),
-
                   const Text('屏蔽标签 (空格分隔)', style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
                   TextField(
@@ -523,15 +579,19 @@ class _HomePageState extends State<HomePage> {
               FilledButton(
                 style: FilledButton.styleFrom(backgroundColor: Colors.black),
                 onPressed: () {
-                  final tags = mutedController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
-                  
+                  final tags = mutedController.text
+                      .trim()
+                      .split(RegExp(r'\s+'))
+                      .where((s) => s.isNotEmpty)
+                      .toList();
+
                   service.setPixivPreferences(
                     imageQuality: quality,
                     showAi: showAi,
                     mutedTags: tags,
                   );
                   _savePixivPreferences();
-                  
+
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设置已保存，刷新后生效')));
                   _fetchData(refresh: true);
@@ -559,7 +619,8 @@ class _HomePageState extends State<HomePage> {
       headers.putIfAbsent('Referer', () => 'https://www.pixiv.net/');
       headers.putIfAbsent(
         'User-Agent',
-        () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        () =>
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       );
     }
     if (headers.isEmpty) return null;
@@ -611,7 +672,6 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    // 🔥 修复：补回丢失的 badges 定义
     final List<Widget> badges = [];
     if (paper.isUgoira) {
       badges.add(Container(
@@ -692,7 +752,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
-    
+
     final showPixivSettings = context.read<WallpaperService>().isPixivRule(activeRule);
 
     return Scaffold(
@@ -763,7 +823,6 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const Divider(height: 1, color: Colors.black12),
-
             if (showPixivSettings)
               ListTile(
                 leading: const Icon(Icons.settings_applications, color: Colors.black),
@@ -774,7 +833,6 @@ class _HomePageState extends State<HomePage> {
                   _showPixivSettingsDialog();
                 },
               ),
-
             ListTile(
               leading: const Icon(Icons.add, color: Colors.black),
               title: const Text('导入规则', style: TextStyle(color: Colors.black)),
