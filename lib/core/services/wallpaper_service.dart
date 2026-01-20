@@ -29,10 +29,14 @@ class WallpaperService {
   String? _pixivCookie;
   bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
 
+  // 🔥 核心方法：设置 Cookie 并立刻同步给 Repository
   void setPixivCookie(String? cookie) {
     final c = cookie?.trim() ?? '';
     _pixivCookie = c.isEmpty ? null : c;
+    
+    // 关键修复：把 Cookie 塞给 _pixivRepo，让底层的 Client 知道
     _pixivRepo.setCookie(_pixivCookie);
+    
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
   }
 
@@ -107,6 +111,7 @@ class WallpaperService {
   void _syncPixivCookieFromRule(SourceRule rule) {
     final headers = rule.headers;
     if (headers == null) {
+      // 规则没写死 cookie，就用应用内设置的全局 cookie
       if (_pixivCookie != null) {
         _pixivRepo.setCookie(_pixivCookie);
       }
