@@ -804,6 +804,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    const AppLogLogger().log('HOME_PAGE_VERSION=2026-01-21_SAVE_STAGE_V3');
     final manager = context.watch<SourceManager>();
     final activeRule = manager.activeRule;
     final hasFilters = activeRule != null && activeRule.filters.isNotEmpty;
