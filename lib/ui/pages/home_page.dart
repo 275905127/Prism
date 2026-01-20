@@ -325,19 +325,17 @@ class _HomePageState extends State<HomePage> {
                 );
 
                 try {
-                  // 2. 强制 Android 写入
-                  if (Theme.of(ctx).platform == TargetPlatform.android) {
-                     await cookieManager.flush(); 
-                  }
+                  // 🔥🔥🔥 修复：删除了报错的 flush() 调用 🔥🔥🔥
+                  // flutter_inappwebview v6 会自动处理同步
 
-                  // 3. 读取 (多域名)
+                  // 2. 读取 (多域名)
                   final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
                   final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
                   
                   // 关闭 Loading
                   if (ctx.mounted) Navigator.pop(ctx); 
 
-                  // 4. 合并检查
+                  // 3. 合并检查
                   final allCookies = [...cookiesMain, ...cookiesAcc];
                   final uniqueCookies = <String, Cookie>{};
                   for (var c in allCookies) {
