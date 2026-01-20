@@ -5,10 +5,12 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart'; // 🔥 需添加依赖
 
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
-import '../../core/services/wallpaper_service.dart'; // 引入 Service
+import '../../core/services/wallpaper_service.dart';
+import '../../core/pixiv/pixiv_repository.dart'; // 为了取 key 常量
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -42,6 +44,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
+  static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
 
   @override
   void initState() {
@@ -57,8 +60,42 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
+    await _loadPixivPreferences(); // 🔥 加载 Pixiv 设置
     await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
+  }
+
+  Future<void> _loadPixivPreferences() async {
+    final manager = context.read<SourceManager>();
+    final rule = manager.activeRule;
+    if (rule == null || !_isPixivRuleId(rule.id)) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = prefs.getString(_kPixivPrefsKey);
+      if (jsonStr != null) {
+        final m = jsonDecode(jsonStr);
+        context.read<WallpaperService>().setPixivPreferences(
+          imageQuality: m['quality'],
+          showAi: m['show_ai'],
+          mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _savePixivPreferences() async {
+    try {
+      final service = context.read<WallpaperService>();
+      final p = service.pixivPreferences;
+      final m = {
+        'quality': p.imageQuality,
+        'show_ai': p.showAi,
+        'muted_tags': p.mutedTags,
+      };
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kPixivPrefsKey, jsonEncode(m));
+    } catch (_) {}
   }
 
   Future<void> _applyPixivCookieIfNeeded() async {
@@ -73,7 +110,6 @@ class _HomePageState extends State<HomePage> {
       final c = prefs.getString(_pixivCookiePrefsKey(rule.id))?.trim() ?? '';
       context.read<WallpaperService>().setPixivCookie(c.isEmpty ? null : c);
     } catch (_) {
-      // 不影响主流程
     }
   }
 
@@ -95,7 +131,6 @@ class _HomePageState extends State<HomePage> {
         }
       });
     } catch (e) {
-      // ignore: avoid_print
       print("加载筛选记录失败: $e");
     }
   }
@@ -113,7 +148,6 @@ class _HomePageState extends State<HomePage> {
         await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
       }
     } catch (e) {
-      // ignore: avoid_print
       print("保存筛选记录失败: $e");
     }
   }
@@ -244,89 +278,175 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<void> _showPixivCookieDialog() async {
+  // 🔥 新增：Webview 登录页
+  void _openPixivWebLogin(BuildContext context) async {
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent('Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36')
+      ..loadRequest(Uri.parse('https://accounts.pixiv.net/login'));
+
+    String? foundCookie;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => Scaffold(
+        appBar: AppBar(
+          title: const Text('登录 Pixiv', style: TextStyle(fontSize: 16)),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final cookies = await controller.runJavaScriptReturningResult('document.cookie') as String;
+                // Webview返回的 cookie 可能是带引号的字符串
+                foundCookie = cookies.replaceAll('"', '');
+                if (foundCookie != null && foundCookie!.contains('PHPSESSID')) {
+                  Navigator.pop(ctx);
+                } else {
+                  ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('未检测到 PHPSESSID，请先登录')));
+                }
+              },
+              child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+        body: WebViewWidget(controller: controller),
+      ),
+    );
+
+    if (foundCookie != null && mounted) {
+      final manager = context.read<SourceManager>();
+      final rule = manager.activeRule;
+      if (rule == null) return;
+      
+      final prefs = await SharedPreferences.getInstance();
+      final key = _pixivCookiePrefsKey(rule.id);
+      
+      await prefs.setString(key, foundCookie!);
+      context.read<WallpaperService>().setPixivCookie(foundCookie);
+      
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 登录成功，Cookie 已更新')));
+      _fetchData(refresh: true);
+    }
+  }
+
+  // 🔥 改造：Pixiv 设置对话框 (包含登录、画质、屏蔽)
+  Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
     if (!_isPixivRuleId(rule.id)) return;
 
-    final prefs = await SharedPreferences.getInstance();
-    final key = _pixivCookiePrefsKey(rule.id);
-    final initCookie = prefs.getString(key) ?? '';
+    final service = context.read<WallpaperService>();
+    final prefs = service.pixivPreferences;
+    
+    // 状态
+    String quality = prefs.imageQuality;
+    bool showAi = prefs.showAi;
+    final mutedController = TextEditingController(text: prefs.mutedTags.join(' '));
 
-    final controller = TextEditingController(text: initCookie);
-
-    if (!mounted) return;
-
-    showDialog(
+    await showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        title: const Text('Pixiv Cookie'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '用于加载 i.pximg.net 原图/大图（部分内容需要登录）。\n留空并保存可清除 Cookie。',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              maxLines: 6,
-              decoration: const InputDecoration(
-                hintText: '粘贴 Cookie（PHPSESSID=...; device_token=...; ...）',
-                border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            backgroundColor: Colors.white,
+            title: const Text('Pixiv 设置'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 1. 登录
+                  const Text('账户', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(service.hasPixivCookie ? '已设置 Cookie' : '未登录', style: const TextStyle(fontSize: 14)),
+                    subtitle: const Text('建议使用 Web 登录自动抓取', style: TextStyle(fontSize: 12)),
+                    trailing: FilledButton.tonal(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _openPixivWebLogin(context);
+                      },
+                      child: const Text('Web 登录'),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  
+                  // 2. 画质
+                  const Text('画质偏好', style: TextStyle(fontWeight: FontWeight.bold)),
+                  DropdownButton<String>(
+                    value: quality,
+                    isExpanded: true,
+                    underline: Container(height: 1, color: Colors.grey[300]),
+                    items: const [
+                      DropdownMenuItem(value: 'original', child: Text('原图 (Original) - 极耗流量')),
+                      DropdownMenuItem(value: 'regular', child: Text('标准 (Regular) - 推荐')),
+                      DropdownMenuItem(value: 'small', child: Text('缩略图 (Small) - 极省流')),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) setState(() => quality = v);
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // 3. AI 显示
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('显示 AI 生成作品', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Switch(
+                        value: showAi, 
+                        activeColor: Colors.black,
+                        onChanged: (v) => setState(() => showAi = v),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // 4. 屏蔽标签
+                  const Text('屏蔽标签 (空格分隔)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: mutedController,
+                    decoration: const InputDecoration(
+                      hintText: '例如: R-18G AI生成 ...',
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    ),
+                    style: const TextStyle(fontSize: 13),
+                    maxLines: 2,
+                  ),
+                ],
               ),
-              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
             ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消', style: TextStyle(color: Colors.grey)),
-          ),
-          TextButton(
-            onPressed: () async {
-              await prefs.remove(key);
-              if (!mounted) return;
-
-              context.read<WallpaperService>().setPixivCookie(null);
-              Navigator.pop(ctx);
-
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已清除 Pixiv Cookie')));
-                _fetchData(refresh: true);
-              }
-            },
-            child: const Text('清除', style: TextStyle(color: Colors.redAccent)),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.black),
-            onPressed: () async {
-              final c = controller.text.trim();
-              if (c.isEmpty) {
-                await prefs.remove(key);
-                context.read<WallpaperService>().setPixivCookie(null);
-              } else {
-                await prefs.setString(key, c);
-                context.read<WallpaperService>().setPixivCookie(c);
-              }
-
-              if (!mounted) return;
-              Navigator.pop(ctx);
-
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(c.isEmpty ? 'Pixiv Cookie 已清除' : 'Pixiv Cookie 已保存')),
-                );
-                _fetchData(refresh: true);
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消', style: TextStyle(color: Colors.grey)),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.black),
+                onPressed: () {
+                  final tags = mutedController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
+                  
+                  service.setPixivPreferences(
+                    imageQuality: quality,
+                    showAi: showAi,
+                    mutedTags: tags,
+                  );
+                  _savePixivPreferences(); // 持久化
+                  
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设置已保存，刷新后生效')));
+                  _fetchData(refresh: true);
+                },
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -336,12 +456,9 @@ class _HomePageState extends State<HomePage> {
     required dynamic activeRule,
   }) {
     final service = context.read<WallpaperService>();
-
-    // 1) 先用 Service 的规则级 headers
     final base = service.getImageHeaders(activeRule);
     final headers = <String, String>{...?(base ?? const <String, String>{})};
 
-    // 2) 针对 Pixiv 图片域名做兜底（避免 supports 判定失误导致缺 Referer -> 403）
     final u = paper.thumbUrl.trim();
     final isPximg = u.contains('pximg.net');
     if (isPximg) {
@@ -351,7 +468,6 @@ class _HomePageState extends State<HomePage> {
         () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       );
     }
-
     if (headers.isEmpty) return null;
     return headers;
   }
@@ -396,18 +512,28 @@ class _HomePageState extends State<HomePage> {
             const Icon(Icons.broken_image, color: Colors.grey, size: 30),
             const SizedBox(height: 6),
             const Text('图片加载失败', style: TextStyle(color: Colors.grey, fontSize: 12)),
-            const SizedBox(height: 2),
-            Text(
-              e.toString(),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: Colors.grey[400], fontSize: 10),
-              textAlign: TextAlign.center,
-            ),
           ],
         ),
       ),
     );
+
+    // 🔥 标识：GIF / AI
+    final List<Widget> badges = [];
+    if (paper.isUgoira) {
+      badges.add(Container(
+        margin: const EdgeInsets.only(right: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), borderRadius: BorderRadius.circular(4)),
+        child: const Text('GIF', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+      ));
+    }
+    if (paper.isAi) {
+      badges.add(Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(color: Colors.blueAccent.withOpacity(0.7), borderRadius: BorderRadius.circular(4)),
+        child: const Text('AI', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+      ));
+    }
 
     final content = Container(
       decoration: BoxDecoration(
@@ -441,6 +567,13 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
+            // 🔥 Badge 渲染
+            if (badges.isNotEmpty)
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Row(mainAxisSize: MainAxisSize.min, children: badges),
+              ),
           ],
         ),
       ),
@@ -466,7 +599,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
-    final showPixivCookieEntry = _isPixivRuleId(activeRule?.id);
+    final showPixivSettings = _isPixivRuleId(activeRule?.id);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -537,14 +670,14 @@ class _HomePageState extends State<HomePage> {
             ),
             const Divider(height: 1, color: Colors.black12),
 
-            if (showPixivCookieEntry)
+            if (showPixivSettings)
               ListTile(
-                leading: const Icon(Icons.cookie_outlined, color: Colors.black),
-                title: const Text('Pixiv Cookie', style: TextStyle(color: Colors.black)),
-                subtitle: const Text('用于原图/大图加载（可选）', style: TextStyle(fontSize: 12)),
+                leading: const Icon(Icons.settings_applications, color: Colors.black),
+                title: const Text('Pixiv 设置', style: TextStyle(color: Colors.black)),
+                subtitle: const Text('登录 / 画质 / 屏蔽', style: TextStyle(fontSize: 12)),
                 onTap: () {
                   Navigator.pop(context);
-                  _showPixivCookieDialog();
+                  _showPixivSettingsDialog();
                 },
               ),
 
