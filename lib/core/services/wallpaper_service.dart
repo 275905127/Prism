@@ -29,12 +29,12 @@ class WallpaperService {
   String? _pixivCookie;
   bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
 
-  // 🔥 核心方法：设置 Cookie 并立刻同步给 Repository
+  // 🔥 核心修复：确保 UI 设置的 Cookie 能传递给 Repo
   void setPixivCookie(String? cookie) {
     final c = cookie?.trim() ?? '';
     _pixivCookie = c.isEmpty ? null : c;
     
-    // 关键修复：把 Cookie 塞给 _pixivRepo，让底层的 Client 知道
+    // 关键：同步给 Repository
     _pixivRepo.setCookie(_pixivCookie);
     
     _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
@@ -111,13 +111,14 @@ class WallpaperService {
   void _syncPixivCookieFromRule(SourceRule rule) {
     final headers = rule.headers;
     if (headers == null) {
-      // 规则没写死 cookie，就用应用内设置的全局 cookie
+      // 规则无特殊 Cookie，确保 Repo 使用全局 UI Cookie
       if (_pixivCookie != null) {
         _pixivRepo.setCookie(_pixivCookie);
       }
       return;
     }
 
+    // 如果规则里硬编码了 Cookie，优先使用规则的
     final cookie = (headers['Cookie'] ?? headers['cookie'])?.trim() ?? '';
     if (cookie.isNotEmpty) {
       _pixivRepo.setCookie(cookie);
@@ -125,9 +126,11 @@ class WallpaperService {
       return;
     }
 
+    // 否则回退到全局 UI Cookie
     if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
       _pixivRepo.setCookie(_pixivCookie);
     } else {
+      // 都没有，则清除
       _pixivRepo.setCookie(null);
     }
   }
@@ -155,7 +158,8 @@ class WallpaperService {
 
     if (_pixivRepo.supports(rule)) {
       _syncPixivCookieFromRule(rule);
-      return _pixivRepo.buildImageHeaders();
+      // 🔥 直接使用 Repo 暴露的 client 方法
+      return _pixivRepo.client.buildImageHeaders();
     }
     return rule.buildRequestHeaders();
   }
@@ -173,9 +177,7 @@ class WallpaperService {
       ...?headers,
     };
 
-    // 🔥 优化：下载逻辑健壮性增强
-    // 自动检测是否为 Pixiv 图片域名 (i.pximg.net)，如果是且没传 Referer，自动补全。
-    // 这样无论 UI 层是否漏传 header，下载都能成功，避免 403 Forbidden。
+    // 🔥 自动补全 Referer，防止 403
     if (u.contains('pximg.net') && !finalHeaders.containsKey('Referer')) {
       finalHeaders['Referer'] = 'https://www.pixiv.net/';
     }
