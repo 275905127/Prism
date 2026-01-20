@@ -271,7 +271,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // Pixiv Web 登录：禁用手势关闭 + 保存按钮强制写日志
+  // Pixiv Web 登录：保存流程防抖 + 分步日志 + timeout，避免无声卡死
   // =========================================================
   void _openPixivWebLogin(BuildContext context) async {
     final PrismLogger logger = const AppLogLogger();
@@ -336,15 +336,14 @@ class _HomePageState extends State<HomePage> {
 
     await showModalBottomSheet(
       context: context,
-
-      // ✅ 核心：禁用背景点击关闭 / 手势下滑关闭
       isDismissible: false,
       enableDrag: false,
-
       isScrollControlled: true,
       useSafeArea: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModalState) {
+          bool saving = false;
+
           Future<void> markDetected(String cookie, {required String by}) async {
             foundCookie = cookie;
             detected = true;
@@ -356,13 +355,32 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
+          Future<T> _withTimeout<T>(Future<T> f, Duration d, String stepName) async {
+            try {
+              return await f.timeout(d);
+            } catch (e) {
+              // timeout / other
+              logger.log('Pixiv save step timeout/failed: $stepName error=$e');
+              rethrow;
+            }
+          }
+
           Future<void> saveAndClose() async {
-            // ✅ 无论成功失败，第一行先写日志，确保你能看到“确实点到了”
+            if (saving) {
+              logger.log('Pixiv save ignored: already saving');
+              return;
+            }
+            saving = true;
+            if (ctx.mounted) setModalState(() {});
+
+            // 一定要先打日志，证明按钮确实触发
             logger.log('Pixiv save pressed (UI) detected=$detected cookieLen=${foundCookie?.length ?? 0}');
 
             final cookie = (foundCookie ?? '').trim();
             if (cookie.isEmpty) {
               logger.log('Pixiv save blocked: cookie empty');
+              saving = false;
+              if (ctx.mounted) setModalState(() {});
               snack(ctx, 'Cookie 为空，无法保存');
               return;
             }
@@ -371,22 +389,42 @@ class _HomePageState extends State<HomePage> {
             final r = m.activeRule;
             if (r == null) {
               logger.log('Pixiv save failed: activeRule null');
+              saving = false;
+              if (ctx.mounted) setModalState(() {});
               snack(ctx, '保存失败：当前图源为空');
               return;
             }
 
             try {
-              final prefs = await SharedPreferences.getInstance();
+              logger.log('Pixiv save step start: SharedPreferences.getInstance');
+              final prefs = await _withTimeout(
+                SharedPreferences.getInstance(),
+                const Duration(seconds: 3),
+                'SharedPreferences.getInstance',
+              );
+              logger.log('Pixiv save step done: SharedPreferences.getInstance');
+
               final key = _pixivCookiePrefsKey(r.id);
 
-              await prefs.setString(key, cookie);
-              logger.log('Pixiv cookie saved to prefs key=$key len=${cookie.length}');
+              logger.log('Pixiv save step start: prefs.setString key=$key');
+              await _withTimeout(
+                prefs.setString(key, cookie),
+                const Duration(seconds: 3),
+                'prefs.setString($key)',
+              );
+              logger.log('Pixiv save step done: prefs.setString key=$key len=${cookie.length}');
 
+              logger.log('Pixiv save step start: WallpaperService.setPixivCookie');
               context.read<WallpaperService>().setPixivCookie(cookie);
-              logger.log('Pixiv cookie injected into WallpaperService (UI)');
+              logger.log('Pixiv save step done: WallpaperService.setPixivCookie');
 
-              await m.updateRuleHeader(r.id, 'Cookie', cookie);
-              logger.log('Pixiv cookie written into rule.headers rule=${r.id}');
+              logger.log('Pixiv save step start: SourceManager.updateRuleHeader Cookie');
+              await _withTimeout(
+                m.updateRuleHeader(r.id, 'Cookie', cookie),
+                const Duration(seconds: 3),
+                'updateRuleHeader(Cookie)',
+              );
+              logger.log('Pixiv save step done: SourceManager.updateRuleHeader Cookie');
 
               saved = true;
               logger.log('Pixiv save success (UI)');
@@ -395,8 +433,11 @@ class _HomePageState extends State<HomePage> {
               snack(context, '保存成功，正在刷新…');
               _fetchData(refresh: true);
             } catch (e) {
-              logger.log('Pixiv save failed: $e');
-              snack(ctx, '保存失败：$e');
+              logger.log('Pixiv save failed (final): $e');
+              snack(ctx, '保存失败或超时：$e');
+            } finally {
+              saving = false;
+              if (ctx.mounted) setModalState(() {});
             }
           }
 
@@ -429,18 +470,16 @@ class _HomePageState extends State<HomePage> {
               ),
               actions: [
                 TextButton(
-                  onPressed: manualCheck,
+                  onPressed: saving ? null : manualCheck,
                   child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
                 const SizedBox(width: 6),
-
-                // ✅ 改为 FilledButton，触发更明显；并且点击一定会写日志
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
                   child: FilledButton(
-                    onPressed: detected ? saveAndClose : null,
+                    onPressed: (!detected || saving) ? null : saveAndClose,
                     style: FilledButton.styleFrom(backgroundColor: Colors.black),
-                    child: const Text('保存'),
+                    child: Text(saving ? '保存中…' : '保存'),
                   ),
                 ),
               ],
@@ -455,7 +494,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                   child: Text(
                     detected
-                        ? '已检测到 Cookie：请点击右上角「保存」。（不会自动关闭）'
+                        ? (saving ? '正在保存…请稍候（会写入日志页）' : '已检测到 Cookie：请点击右上角「保存」。')
                         : '登录完成后等待自动检测，或点右上角「我已登录」手动检测。检测结果会写入日志页。',
                     style: const TextStyle(fontSize: 12),
                   ),
@@ -466,10 +505,7 @@ class _HomePageState extends State<HomePage> {
                     initialSettings: InAppWebViewSettings(
                       userAgent: targetUA,
                       javaScriptEnabled: true,
-
-                      // ✅ 关键：Cookie 共享
                       sharedCookiesEnabled: true,
-
                       thirdPartyCookiesEnabled: true,
                       domStorageEnabled: true,
                       databaseEnabled: true,
@@ -485,7 +521,7 @@ class _HomePageState extends State<HomePage> {
                         if (urlStr.contains('pixiv.net') && !urlStr.contains('login')) {
                           logger.log('Pixiv auto check started');
 
-                          const int maxTry = 12; // 6 秒窗口
+                          const int maxTry = 12;
                           for (int i = 0; i < maxTry; i++) {
                             final cookieStr = await checkCookies();
                             if (cookieStr != null) {
@@ -515,7 +551,7 @@ class _HomePageState extends State<HomePage> {
 
     logger.log('Pixiv web login sheet closed (UI) detected=$detected saved=$saved');
     if (detected && !saved) {
-      logger.log('Pixiv cookie was detected but NOT saved (UI) — user likely closed without saving');
+      logger.log('Pixiv cookie was detected but NOT saved (UI) — user closed or save timed out');
     }
   }
 
