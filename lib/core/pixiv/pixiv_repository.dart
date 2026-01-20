@@ -42,7 +42,9 @@ class PixivRepository {
             PixivClient(
               dio: dio,
               cookie: cookie,
+              // 关键日志走 log，高频走 debug
               logger: (msg) => logger?.log(msg),
+              debugLogger: (msg) => logger?.debug(msg),
             ),
         _pagesConfig = pagesConfig ?? const PixivPagesConfig();
 
@@ -72,7 +74,7 @@ class PixivRepository {
 
   bool get hasCookie => _client.hasCookie;
 
-  // Cookie 设置逻辑 + 调试日志
+  // Cookie 设置逻辑（关键点保留，高频点 debug）
   void setCookie(String? cookie) {
     _client.setCookie(cookie);
     _invalidateLoginCache();
@@ -83,7 +85,9 @@ class PixivRepository {
     } else {
       _logger?.log('PixivRepo: setCookie cleared');
     }
-    _logger?.log('PixivRepo: client.hasCookie=${_client.hasCookie}');
+
+    // 高频状态点：默认不刷屏
+    _logger?.debug('PixivRepo: client.hasCookie=${_client.hasCookie}');
   }
 
   Map<String, String> buildImageHeaders() => _client.buildImageHeaders();
@@ -112,7 +116,8 @@ class PixivRepository {
     if (!hasCookie) {
       _cachedLoginOk = false;
       _cachedLoginAt = DateTime.now();
-      _logger?.log('PixivRepo: login cache -> false (no cookie)');
+      // 低频但有解释性：保留
+      _logger?.log('PixivRepo: login=false (no cookie)');
       return false;
     }
 
@@ -121,20 +126,21 @@ class PixivRepository {
     if (lastAt != null && _cachedLoginOk != null) {
       final age = now.difference(lastAt);
       if (age <= _kLoginCacheTtl) {
-        _logger?.log('PixivRepo: login cache hit -> ${_cachedLoginOk!} age=${age.inSeconds}s');
+        // cache 命中属于高频：debug
+        _logger?.debug('PixivRepo: login cache hit -> ${_cachedLoginOk!} age=${age.inSeconds}s');
         return _cachedLoginOk!;
       }
     }
 
     if (_checkingLogin && _checkingLoginFuture != null) {
-      _logger?.log('PixivRepo: login check already running -> await same future');
+      _logger?.debug('PixivRepo: login check already running -> await');
       return _checkingLoginFuture!;
     }
 
     _checkingLogin = true;
     _checkingLoginFuture = () async {
       try {
-        _logger?.log('PixivRepo: login check start (/ajax/user/self)');
+        _logger?.log('PixivRepo: login check start');
         final ok = await _client.checkLogin();
         _cachedLoginOk = ok;
         _cachedLoginAt = DateTime.now();
@@ -178,8 +184,13 @@ class PixivRepository {
         _client.updateConfig(cookie: cookie ?? '', userAgent: ua);
         _invalidateLoginCache();
 
-        if (ua != null && ua.isNotEmpty) _logger?.log('PixivRepo: config synced: UA updated (len=${ua.length})');
-        if (cookie != null && cookie.isNotEmpty) _logger?.log('PixivRepo: config synced: Cookie injected (len=${cookie.length})');
+        // 规则注入属于“解释性关键路径”，但可能频繁：降到 debug
+        if (ua != null && ua.isNotEmpty) {
+          _logger?.debug('PixivRepo: config synced: UA updated (len=${ua.length})');
+        }
+        if (cookie != null && cookie.isNotEmpty) {
+          _logger?.debug('PixivRepo: config synced: Cookie injected (len=${cookie.length})');
+        }
       }
     } catch (e) {
       _logger?.log('PixivRepo: config sync failed: $e');
@@ -252,9 +263,13 @@ class PixivRepository {
       finalQuery = '$baseQuery ${minBookmarks}users入り';
     }
 
+    // 核心请求日志：保留一行即可
     _logger?.log(
-      'REQ pixiv q="$finalQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0} cookie=${hasCookie ? 1 : 0}',
+      'REQ pixiv q="$finalQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0}',
     );
+
+    // cookie 是否存在属于高频细节：debug
+    _logger?.debug('PixivRepo: cookie=${hasCookie ? 1 : 0}');
 
     // 6. 执行 API
     final ruleId = (rule as dynamic).id?.toString() ?? '';
@@ -293,7 +308,7 @@ class PixivRepository {
     }).toList();
 
     if (briefs.length != beforeCount) {
-      _logger?.log('PixivRepo: muted filtered: ${beforeCount - briefs.length} removed');
+      _logger?.debug('PixivRepo: muted filtered: ${beforeCount - briefs.length} removed');
     }
 
     _logger?.log('RESP pixiv count=${briefs.length}');
@@ -375,6 +390,7 @@ class PixivRepository {
         final bool needFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
 
         if (needFetch) {
+          // pages 并发请求非常高频：完全静默（失败也不刷屏）
           try {
             final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
             if (pages.isNotEmpty) {
