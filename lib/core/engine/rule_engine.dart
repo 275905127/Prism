@@ -78,7 +78,10 @@ class RuleEngine {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       };
 
-  // ---------- App 内日志（打码） ----------
+  // ---------- 日志：分级 & 打码 ----------
+  // 目标：
+  // - log：只留“重要节点”（请求开始/响应状态/合并统计/cursor 变化/错误）
+  // - debug：高频细节（params、headers、body 截断、smithsonian 定点结构等）
 
   String _mask(String v) {
     if (v.length <= 16) return '***';
@@ -89,27 +92,41 @@ class RuleEngine {
     final m = Map<String, String>.from(headers);
     if (m.containsKey('Authorization')) m['Authorization'] = _mask(m['Authorization']!);
     if (m.containsKey('apikey')) m['apikey'] = _mask(m['apikey']!);
+    if (m.containsKey('Api-Key')) m['Api-Key'] = _mask(m['Api-Key']!);
+    if (m.containsKey('X-Api-Key')) m['X-Api-Key'] = _mask(m['X-Api-Key']!);
+    if (m.containsKey('Cookie')) m['Cookie'] = '***';
     return m;
   }
 
   void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
+    // ✅ 重要节点：请求开始（单行）
     _logger?.log('REQ ${rule.id} GET $url');
-    _logger?.log('    params=$params');
-    _logger?.log('    headers=${_maskHeaders(headers)}');
+
+    // ✅ 高频细节：放到 debug
+    _logger?.debug('    params=$params');
+    _logger?.debug('    headers=${_maskHeaders(headers)}');
   }
 
   void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
+    // ✅ 重要节点：响应摘要（单行）
     _logger?.log('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
+
+    // ✅ 高频细节：body 截断，仅 debug
     final s = (data == null) ? '' : data.toString();
-    _logger?.log('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+    if (s.isNotEmpty) {
+      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+    }
   }
 
   void _logErr(SourceRule rule, int? status, String realUrl, Object e, dynamic data) {
+    // ✅ 错误永远是 log（必看）
     _logger?.log('ERR ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
     _logger?.log('    err=$e');
+
+    // body 也可以留在 debug，避免错误时刷屏（但仍保留可开关）
     final s = (data == null) ? '' : data.toString();
     if (s.isNotEmpty) {
-      _logger?.log('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
     }
   }
 
@@ -177,7 +194,6 @@ class RuleEngine {
 
     final kw = (finalQuery ?? '').trim();
     if (kw.isEmpty) {
-      // default 已在 fetch() 里处理过；这里代表：url 需要占位符但你仍没给词
       throw Exception('该图源需要关键词：keyword 为空（url 含 {keyword}/{word}/{q}）');
     }
 
@@ -228,20 +244,18 @@ class RuleEngine {
           final encode = (filterRule?.encode ?? 'join').toLowerCase();
           final cleaned =
               value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
-          if (cleaned.isEmpty) return; // ✅ 空数组不发（repeat/join/merge 都不该发空）
+          if (cleaned.isEmpty) return;
 
           if (encode == 'merge') {
             mergeMulti[key] = cleaned;
           } else if (encode == 'repeat') {
-            // Dio 会变成重复 key
-            params[key] = cleaned;
+            params[key] = cleaned; // Dio 会变成重复 key
           } else {
             final separator = filterRule?.separator ?? ',';
             final joined = cleaned.join(separator);
             if (joined.trim().isNotEmpty) params[key] = joined;
           }
         } else {
-          // ✅ 空字符串参数不该发（waifu.im included_tags= 会 400）
           _putParam(params, key, value);
         }
       });
@@ -261,7 +275,6 @@ class RuleEngine {
     }
 
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
-      // paramKeyword 可以是 '' 来禁用
       if (rule.paramKeyword.isNotEmpty) {
         _putParam(params, rule.paramKeyword, finalQuery.trim());
       }
@@ -279,7 +292,6 @@ class RuleEngine {
           final offset = (page - 1) * size;
           params[rule.paramPage] = offset;
         } else if (rule.pageMode == 'cursor') {
-          // ✅ refresh（page==1）时清掉该条件下的 cursor，避免拿旧游标继续滚
           final ck = _cursorKey(rule, finalQuery, filterParams);
           if (page <= 1) {
             if (_cursorCache.containsKey(ck)) {
@@ -290,6 +302,8 @@ class RuleEngine {
             final cursor = _cursorCache[ck];
             if (cursor != null) {
               params[rule.paramPage] = cursor;
+            } else {
+              _logger?.debug('CURSOR ${rule.id} missing cache (page=$page)');
             }
           }
         } else {
@@ -462,7 +476,7 @@ class RuleEngine {
     return out;
   }
 
-  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆 + Smithsonian 定点 debug） ----------
+  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆 + 定点 debug） ----------
 
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
@@ -474,7 +488,7 @@ class RuleEngine {
   }) async {
     _logReq(rule, requestUrl, params, headers);
 
-    // ✅ 只对这个图源打印 Smithsonian 的结构（避免刷屏）
+    // ✅ 定点 debug（仅 debug 输出，避免刷屏）
     const String kDebugRuleId = 'smithsonian_open_access_images';
     final bool dbg = rule.id == kDebugRuleId;
 
@@ -513,16 +527,16 @@ class RuleEngine {
         );
       }
 
-      // ✅ 定点 debug：只打印第一条的 media 结构（帮你写配置用）
+      // ✅ 定点 debug：只在 debug 模式下输出结构
       if (dbg) {
         try {
           final media0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]')
               .read(response.data)
               .firstOrNull
               ?.value;
-          _logger?.log('DBG ${rule.id} media0=${safeJson(media0)}');
+          _logger?.debug('DBG ${rule.id} media0=${safeJson(media0)}');
         } catch (e) {
-          _logger?.log('DBG ${rule.id} media0 ERR=$e');
+          _logger?.debug('DBG ${rule.id} media0 ERR=$e');
         }
 
         try {
@@ -530,9 +544,9 @@ class RuleEngine {
               .read(response.data)
               .firstOrNull
               ?.value;
-          _logger?.log('DBG ${rule.id} media0.content=${safeJson(content0)}');
+          _logger?.debug('DBG ${rule.id} media0.content=${safeJson(content0)}');
         } catch (e) {
-          _logger?.log('DBG ${rule.id} media0.content ERR=$e');
+          _logger?.debug('DBG ${rule.id} media0.content ERR=$e');
         }
 
         try {
@@ -540,9 +554,9 @@ class RuleEngine {
               .read(response.data)
               .firstOrNull
               ?.value;
-          _logger?.log('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
+          _logger?.debug('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
         } catch (e) {
-          _logger?.log('DBG ${rule.id} media0.thumbnail ERR=$e');
+          _logger?.debug('DBG ${rule.id} media0.thumbnail ERR=$e');
         }
       }
 
@@ -554,7 +568,7 @@ class RuleEngine {
           _cursorCache[ck] = nextCursor;
           _logger?.log('CURSOR ${rule.id} set=$nextCursor');
         } else {
-          _logger?.log('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
+          _logger?.debug('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
         }
       }
 
@@ -592,6 +606,7 @@ class RuleEngine {
       paramSets = next;
     });
 
+    // ✅ 重要节点：merge 统计（单行）
     _logger?.log('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
 
     final List<UniWallpaper> merged = [];
