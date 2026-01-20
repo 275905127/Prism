@@ -23,6 +23,8 @@ dependencies:
   permission_handler: ^11.3.0  # 申请权限
   gal: ^2.3.0  # 保存图片到相册
   share_plus: ^9.0.0           # 系统分享
+  webview_flutter: ^4.10.0 # 或最新版本
+  webview_cookie_manager: ^2.0.6
 
 dev_dependencies:
   flutter_test:
