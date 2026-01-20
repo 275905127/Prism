@@ -55,7 +55,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
-    await _loadPixivPreferences(); 
+    await _loadPixivPreferences();
     await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
   }
@@ -273,14 +273,13 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 优化：动态适配 UA 登录逻辑
+  // 🔥 核心优化：动态 UA + 原生 Cookie 抓取
   void _openPixivWebLogin(BuildContext context) async {
-    // 1. 获取当前规则
+    // 1. 获取当前规则中的 UA
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
 
-    // 2. 确定目标 UA
-    // 默认使用兼容性最好的 Android Chrome UA (即 PixivClient 定义的常量)
+    // 默认使用兼容性最好的 Android Chrome UA
     String targetUA = PixivClient.kMobileUserAgent; 
 
     // 如果规则里配置了特殊的 UA (比如 Edge/iPhone)，则覆盖默认值
@@ -293,7 +292,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
     
-    // 3. 初始化 Webview，强制使用 targetUA
+    // 2. 初始化 Webview，强制使用 targetUA
     final controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(targetUA) 
@@ -311,13 +310,32 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                final cookies = await controller.runJavaScriptReturningResult('document.cookie') as String;
-                foundCookie = cookies.replaceAll('"', '');
-                if (foundCookie != null && foundCookie!.contains('PHPSESSID')) {
-                  Navigator.pop(ctx);
-                } else {
-                  ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('未检测到 PHPSESSID，请先登录')));
+                // 🔥🔥🔥 核心修复：改用原生 CookieManager 读取 HttpOnly Cookie
+                try {
+                  final cookieManager = WebViewCookieManager();
+                  final cookies = await cookieManager.getCookies('https://www.pixiv.net');
+
+                  // 检查关键的 PHPSESSID
+                  final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
+
+                  if (hasSession) {
+                    // 手动拼接 Cookie 字符串 (key=value; key=value; ...)
+                    final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+                    foundCookie = cookieStr;
+                    Navigator.pop(ctx);
+                  } else {
+                    if (mounted) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(content: Text('未检测到 PHPSESSID，请确认已登录成功')),
+                      );
+                    }
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('读取 Cookie 失败: $e')));
+                  }
                 }
+                // 🔥🔥🔥 核心修复结束
               },
               child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
