@@ -5,14 +5,14 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// 🔥 核心修改：引入 flutter_inappwebview
+// 🔥 确保引入了新库
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
-import '../../core/pixiv/pixiv_client.dart'; // 引入以获取 kMobileUserAgent
+import '../../core/pixiv/pixiv_client.dart'; 
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -274,11 +274,8 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 核心重写：使用 flutter_inappwebview 进行登录
-  // 可以 100% 读取到 HttpOnly 的 Cookie (如 PHPSESSID)
-  // 🔥 终极调试版：带日志 + 强制弹窗 + Android Cookie 刷新
+  // 🔥 终极调试版：全程弹窗，解决 Release 包看不到日志的问题
   void _openPixivWebLogin(BuildContext context) async {
-    // 1. 获取 UA
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     String targetUA = PixivClient.kMobileUserAgent;
@@ -293,16 +290,16 @@ class _HomePageState extends State<HomePage> {
     final cookieManager = CookieManager.instance();
     await cookieManager.deleteAllCookies();
 
-    // 定义一个显示弹窗的辅助函数（因为 SnackBar 可能会没反应）
-    void showDebugDialog(String title, String content) {
+    // 辅助函数：显示强制弹窗
+    void showMsg(String title, String content) {
       if (!context.mounted) return;
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
           content: SingleChildScrollView(child: Text(content, style: const TextStyle(fontSize: 12))),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("确定")),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
           ],
         ),
       );
@@ -320,42 +317,49 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                print("👉 按钮被点击了！开始读取 Cookie..."); // 1. 确认点击有效
-                
+                // 1. 先弹个 Loading，证明点击生效了
+                showDialog(
+                  context: ctx,
+                  barrierDismissible: false,
+                  builder: (c) => const Center(child: CircularProgressIndicator()),
+                );
+
                 try {
-                  // 2. 强制 Android 写入/同步 Cookie (关键)
-                  // 在某些机型上，Webview 的 Cookie 还在内存里，没存到 CookieManager 能读到的地方
-                  if (Theme.of(context).platform == TargetPlatform.android) {
+                  // 2. 强制 Android 写入
+                  if (Theme.of(ctx).platform == TargetPlatform.android) {
                      await cookieManager.flush(); 
                   }
 
-                  // 3. 读取 Cookie (目标必须是 .pixiv.net 根域)
-                  final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                  // 3. 读取 (多域名)
+                  final cookiesMain = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
+                  final cookiesAcc = await cookieManager.getCookies(url: WebUri("https://accounts.pixiv.net"));
                   
-                  print("👉 读取到的 Cookie 数量: ${cookies.length}"); // 2. 确认是否读到了东西
-                  
-                  final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
+                  // 关闭 Loading
+                  if (ctx.mounted) Navigator.pop(ctx); 
+
+                  // 4. 合并检查
+                  final allCookies = [...cookiesMain, ...cookiesAcc];
+                  final uniqueCookies = <String, Cookie>{};
+                  for (var c in allCookies) {
+                    uniqueCookies[c.name] = c;
+                  }
+
+                  final hasSession = uniqueCookies.containsKey('PHPSESSID');
                   
                   if (hasSession) {
-                    print("👉 ✅ 成功找到 PHPSESSID");
-                    final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+                    final cookieStr = uniqueCookies.values.map((c) => '${c.name}=${c.value}').join('; ');
                     foundCookie = cookieStr;
-                    Navigator.pop(ctx);
+                    Navigator.pop(ctx); // 关闭 Webview 页面
                   } else {
-                    // 调试：打印出所有读到的 Cookie 名字
-                    final names = cookies.map((c) => c.name).join(', ');
-                    print("👉 ❌ 没找到 Session。当前 Cookie 列表: $names");
-                    
-                    // 强制弹窗报错
-                    showDebugDialog(
-                      "未检测到登录状态",
-                      "已读取 Cookie ($names)\n\n如果这里是空的，或者只有 device_token，说明：\n1. 网页还没加载完\n2. 还没完成登录\n3. 需要重启 App 让新插件生效",
-                    );
+                    // 💥 失败弹窗：展示所有读到的 Key
+                    final names = uniqueCookies.keys.join(', ');
+                    showMsg("未检测到 Session", "已读到: [$names]\n\n如果这里只有 device_token 或空，说明还没登录成功，或者网页没加载完。");
                   }
-                } catch (e, stack) {
-                  print("👉 💥 发生异常: $e");
-                  print(stack);
-                  showDebugDialog("程序错误", e.toString());
+                } catch (e) {
+                  // 关闭 Loading
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  // 💥 异常弹窗
+                  showMsg("程序异常", e.toString());
                 }
               },
               child: const Text('我已登录', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -370,35 +374,27 @@ class _HomePageState extends State<HomePage> {
             thirdPartyCookiesEnabled: true,
             domStorageEnabled: true,
             databaseEnabled: true,
-            // 允许混合内容，防止部分资源加载失败
             mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW, 
           ),
-          // 监听加载进度，确保页面真的载入了
-          onLoadStop: (controller, url) {
-            print("👉 页面加载完成: $url");
-          },
         ),
       ),
     );
 
-    // 保存逻辑
     if (foundCookie != null && mounted) {
       final manager = context.read<SourceManager>();
       final rule = manager.activeRule;
       if (rule == null) return;
-
+      
       final prefs = await SharedPreferences.getInstance();
       final key = _pixivCookiePrefsKey(rule.id);
-
+      
       await prefs.setString(key, foundCookie!);
       context.read<WallpaperService>().setPixivCookie(foundCookie);
-
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 登录成功')));
+      
+      showMsg("成功", "登录成功！Cookie 已保存。");
       _fetchData(refresh: true);
     }
   }
-
-
 
   Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
