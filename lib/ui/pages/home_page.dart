@@ -5,14 +5,14 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// 🔥 修改引用的包
+// 🔥 核心修改：引入 flutter_inappwebview
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
 import '../../core/pixiv/pixiv_repository.dart';
-import '../../core/pixiv/pixiv_client.dart'; 
+import '../../core/pixiv/pixiv_client.dart'; // 引入以获取 kMobileUserAgent
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -275,12 +275,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   // 🔥 核心重写：使用 flutter_inappwebview 进行登录
+  // 可以 100% 读取到 HttpOnly 的 Cookie (如 PHPSESSID)
   void _openPixivWebLogin(BuildContext context) async {
-    // 1. 获取当前规则中的 UA
+    // 1. 获取 UA 逻辑：优先用配置的，没有则用默认 Mobile UA
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
 
-    // 默认使用兼容性最好的 Android Chrome UA
     String targetUA = PixivClient.kMobileUserAgent; 
 
     if (rule != null && rule.headers != null) {
@@ -291,9 +291,9 @@ class _HomePageState extends State<HomePage> {
       }
     }
     
-    // CookieManager 单例
+    // 2. 准备 CookieManager
     final cookieManager = CookieManager.instance();
-    // 每次打开前清空旧 Cookie，防止状态混淆
+    // 清空旧 Cookie，防止干扰
     await cookieManager.deleteAllCookies();
 
     String? foundCookie;
@@ -308,16 +308,16 @@ class _HomePageState extends State<HomePage> {
           actions: [
             TextButton(
               onPressed: () async {
-                // 🔥 核心修复：使用 InAppWebView 的 CookieManager 获取所有 Cookie
-                // 它能无视 HttpOnly 限制，完美获取 PHPSESSID
                 try {
+                  // 🔥 使用 CookieManager 直接从浏览器内核读取
+                  // 这里的 WebUri 是 inappwebview 特有的类
                   final cookies = await cookieManager.getCookies(url: WebUri("https://www.pixiv.net"));
                   
-                  // 寻找 PHPSESSID
+                  // 检查是否包含关键的 session id
                   final hasSession = cookies.any((c) => c.name == 'PHPSESSID');
 
                   if (hasSession) {
-                    // 手动拼接 Cookie 字符串
+                    // 拼接 Cookie 字符串
                     final cookieStr = cookies.map((c) => '${c.name}=${c.value}').join('; ');
                     foundCookie = cookieStr;
                     if (ctx.mounted) Navigator.pop(ctx);
@@ -338,19 +338,21 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-        // 🔥 使用 InAppWebView 替换 WebViewWidget
+        // 🔥 使用 InAppWebView 替换原有的 WebViewWidget
         body: InAppWebView(
           initialUrlRequest: URLRequest(url: WebUri('https://accounts.pixiv.net/login')),
           initialSettings: InAppWebViewSettings(
             userAgent: targetUA,
             javaScriptEnabled: true,
-            // 允许第三方 Cookie，减少登录问题
-            thirdPartyCookiesEnabled: true, 
+            thirdPartyCookiesEnabled: true, // 允许第三方 Cookie，提高登录成功率
+            domStorageEnabled: true,        // 开启存储，确保 Android 能够持久化 Cookie
+            databaseEnabled: true,
           ),
         ),
       ),
     );
 
+    // 3. 保存逻辑
     if (foundCookie != null && mounted) {
       final manager = context.read<SourceManager>();
       final rule = manager.activeRule;
