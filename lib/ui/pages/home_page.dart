@@ -5,12 +5,12 @@ import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:webview_flutter/webview_flutter.dart'; // 🔥 需添加依赖
+import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
-import '../../core/pixiv/pixiv_repository.dart'; // 为了取 key 常量
+import '../../core/pixiv/pixiv_repository.dart';
 
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
@@ -37,11 +37,8 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic> _currentFilters = {};
   String? _currentRuleId;
 
-  static bool _isPixivRuleId(String? id) {
-    if (id == null) return false;
-    if (id == 'pixiv_search_ajax') return true;
-    return id.startsWith('pixiv');
-  }
+  // 🔥 优化：已删除 static bool _isPixivRuleId(...) 方法
+  // 逻辑重复判定已移除，现在统一通过 WallpaperService.isPixivRule() 进行判断。
 
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
@@ -60,7 +57,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initSource() async {
     await _loadFilters();
-    await _loadPixivPreferences(); // 🔥 加载 Pixiv 设置
+    await _loadPixivPreferences(); 
     await _applyPixivCookieIfNeeded();
     _fetchData(refresh: true);
   }
@@ -68,7 +65,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _loadPixivPreferences() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
-    if (rule == null || !_isPixivRuleId(rule.id)) return;
+    
+    // 🔥 优化：调用 Service 判断
+    if (rule == null || !context.read<WallpaperService>().isPixivRule(rule)) return;
 
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -103,7 +102,8 @@ class _HomePageState extends State<HomePage> {
     final rule = manager.activeRule;
     if (rule == null) return;
 
-    if (!_isPixivRuleId(rule.id)) return;
+    // 🔥 优化：调用 Service 判断
+    if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -278,7 +278,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 🔥 新增：Webview 登录页
   void _openPixivWebLogin(BuildContext context) async {
     final controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -298,7 +297,6 @@ class _HomePageState extends State<HomePage> {
             TextButton(
               onPressed: () async {
                 final cookies = await controller.runJavaScriptReturningResult('document.cookie') as String;
-                // Webview返回的 cookie 可能是带引号的字符串
                 foundCookie = cookies.replaceAll('"', '');
                 if (foundCookie != null && foundCookie!.contains('PHPSESSID')) {
                   Navigator.pop(ctx);
@@ -330,17 +328,17 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // 🔥 改造：Pixiv 设置对话框 (包含登录、画质、屏蔽)
   Future<void> _showPixivSettingsDialog() async {
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
     if (rule == null) return;
-    if (!_isPixivRuleId(rule.id)) return;
+    
+    // 🔥 优化：调用 Service 判断
+    if (!context.read<WallpaperService>().isPixivRule(rule)) return;
 
     final service = context.read<WallpaperService>();
     final prefs = service.pixivPreferences;
     
-    // 状态
     String quality = prefs.imageQuality;
     bool showAi = prefs.showAi;
     final mutedController = TextEditingController(text: prefs.mutedTags.join(' '));
@@ -357,7 +355,6 @@ class _HomePageState extends State<HomePage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 1. 登录
                   const Text('账户', style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
                   ListTile(
@@ -374,7 +371,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 16),
                   
-                  // 2. 画质
                   const Text('画质偏好', style: TextStyle(fontWeight: FontWeight.bold)),
                   DropdownButton<String>(
                     value: quality,
@@ -391,7 +387,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 3. AI 显示
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -405,7 +400,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 4. 屏蔽标签
                   const Text('屏蔽标签 (空格分隔)', style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
                   TextField(
@@ -436,7 +430,7 @@ class _HomePageState extends State<HomePage> {
                     showAi: showAi,
                     mutedTags: tags,
                   );
-                  _savePixivPreferences(); // 持久化
+                  _savePixivPreferences();
                   
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设置已保存，刷新后生效')));
@@ -517,7 +511,6 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    // 🔥 标识：GIF / AI
     final List<Widget> badges = [];
     if (paper.isUgoira) {
       badges.add(Container(
@@ -567,7 +560,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-            // 🔥 Badge 渲染
             if (badges.isNotEmpty)
               Positioned(
                 top: 6,
@@ -599,7 +591,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
-    final showPixivSettings = _isPixivRuleId(activeRule?.id);
+    
+    // 🔥 优化：使用 Service 判断，不再依赖本地硬编码逻辑
+    final showPixivSettings = context.read<WallpaperService>().isPixivRule(activeRule);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
