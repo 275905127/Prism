@@ -26,12 +26,18 @@ class _FilterSheetState extends State<FilterSheet> {
   late Map<String, dynamic> _tempValues;
 
   Future<bool>? _pixivLoginFuture;
-  bool? _pixivLoginOk; // null = 未完成校验；true/false = 已完成
+  bool? _pixivLoginOk;
+
+  // 🔥 Pixiv 专属状态
+  double _minBookmarks = 0;
+  String _selectedRankingMode = ''; // 空字符串表示“普通搜索”
 
   @override
   void initState() {
     super.initState();
     _tempValues = <String, dynamic>{};
+    
+    // 1. 复制通用 Filters
     widget.currentValues.forEach((key, value) {
       if (value is List) {
         _tempValues[key] = List<dynamic>.from(value);
@@ -39,19 +45,28 @@ class _FilterSheetState extends State<FilterSheet> {
         _tempValues[key] = value;
       }
     });
+
+    // 2. 初始化 Pixiv 专属状态
+    if (_tempValues.containsKey('min_bookmarks')) {
+      _minBookmarks = double.tryParse(_tempValues['min_bookmarks'].toString()) ?? 0;
+    }
+    
+    final mode = _tempValues['mode']?.toString() ?? '';
+    if (['daily', 'weekly', 'monthly', 'rookie', 'original', 'male', 'female'].contains(mode)) {
+      _selectedRankingMode = mode;
+    } else if (mode.startsWith('ranking_')) {
+      _selectedRankingMode = mode.replaceFirst('ranking_', '');
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-
-    // 只在首次进入或依赖变化时触发一次 login 校验（避免 build 里反复请求）
     final activeRule = context.read<SourceManager>().activeRule;
     final service = context.read<WallpaperService>();
-
     final isPixiv = service.isPixivRule(activeRule);
+    
     if (!isPixiv || activeRule == null) return;
-
     if (_pixivLoginFuture != null) return;
 
     _pixivLoginFuture = service.getPixivLoginOk(activeRule).then((ok) {
@@ -70,12 +85,9 @@ class _FilterSheetState extends State<FilterSheet> {
     return context.read<WallpaperService>().isPixivRule(activeRule);
   }
 
-  /// Pixiv Cookie 判定包含“规则 headers 自带 Cookie”
-  /// 这里只判断“是否提供了 cookie 字符串”，不等价于“有效登录态”
   bool _hasPixivCookie(BuildContext context) {
     final activeRule = context.read<SourceManager>().activeRule;
     if (activeRule == null) return false;
-
     final headers = context.read<WallpaperService>().getImageHeaders(activeRule);
     final cookie = (headers?['Cookie'] ?? headers?['cookie'] ?? '').trim();
     return cookie.isNotEmpty;
@@ -91,34 +103,126 @@ class _FilterSheetState extends State<FilterSheet> {
     final k = filterKey.trim().toLowerCase();
     final v = optionValue.trim().toLowerCase();
 
+    // 排行榜模式下，锁定普通的 'order' 和 'mode' 筛选，避免冲突
+    if (_selectedRankingMode.isNotEmpty) {
+      if (k == 'order' || k == 'mode') return true;
+    }
+
     final bool isPrivileged =
         (k == 'order' && v.contains('popular')) || (k == 'mode' && v == 'r18');
 
     if (!isPrivileged) return false;
 
-    // 规则：
-    // - 未提供 cookie：一定锁
-    // - 提供 cookie 但 login 未完成校验：保守锁（避免 UI 放行但最终无效）
-    // - 校验完成但 loginOk=false：锁
-    // - loginOk=true：放行
     if (!hasCookie) return true;
     if (!loginResolved) return true;
     return !loginOk;
   }
 
-  void _toastLocked() {
+  void _toastLocked(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('该筛选项需要有效的 Pixiv 登录 Cookie（未登录/过期会无效）'),
-        duration: Duration(milliseconds: 1400),
+      SnackBar(content: Text(msg), duration: const Duration(milliseconds: 1400)),
+    );
+  }
+
+  // 🔥 构建 Pixiv 专属区域 (排行榜 + 收藏数)
+  Widget _buildPixivExtras() {
+    final bool isRanking = _selectedRankingMode.isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 1. 排行榜选择器
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 10, 20, 8),
+          child: Text("排行榜 (Ranking)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+        ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              _buildRankingChip('普通搜索', ''),
+              _buildRankingChip('日榜', 'daily'),
+              _buildRankingChip('周榜', 'weekly'),
+              _buildRankingChip('月榜', 'monthly'),
+              _buildRankingChip('新人', 'rookie'),
+              _buildRankingChip('原创', 'original'),
+              _buildRankingChip('受男性欢迎', 'male'),
+              _buildRankingChip('受女性欢迎', 'female'),
+            ],
+          ),
+        ),
+        
+        // 2. 最小收藏数 (仅普通搜索模式有效)
+        Opacity(
+          opacity: isRanking ? 0.4 : 1.0,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("最小收藏数 (users入り)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                    Text(
+                      _minBookmarks <= 0 ? "不限" : "${_minBookmarks.toInt()}+",
+                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent),
+                    ),
+                  ],
+                ),
+              ),
+              Slider(
+                value: _minBookmarks,
+                min: 0,
+                max: 20000, // 2万收藏
+                divisions: 20, // 1000 一档
+                activeColor: Colors.black,
+                inactiveColor: Colors.grey[200],
+                label: _minBookmarks.toInt().toString(),
+                onChanged: isRanking ? null : (v) {
+                  setState(() => _minBookmarks = v);
+                },
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 24, thickness: 8, color: Color(0xFFF5F5F5)),
+      ],
+    );
+  }
+
+  Widget _buildRankingChip(String label, String modeValue) {
+    final bool isSelected = _selectedRankingMode == modeValue;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: FilterChip(
+        label: Text(label),
+        selected: isSelected,
+        selectedColor: Colors.black,
+        checkmarkColor: Colors.white,
+        labelStyle: TextStyle(
+          color: isSelected ? Colors.white : Colors.black,
+          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+        ),
+        backgroundColor: Colors.grey[100],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide.none),
+        onSelected: (val) {
+          setState(() {
+            // 点击已选中的不做取消，必须切回“普通搜索”来取消
+            if (val) _selectedRankingMode = modeValue;
+          });
+        },
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final isPixiv = _isPixivActiveSource(context);
+
     return Container(
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.8),
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
       padding: const EdgeInsets.only(top: 16, bottom: 24),
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -136,23 +240,31 @@ class _FilterSheetState extends State<FilterSheet> {
               children: [
                 const Text("筛选", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 TextButton(
-                  onPressed: () => setState(() => _tempValues.clear()),
+                  onPressed: () => setState(() {
+                    _tempValues.clear();
+                    _minBookmarks = 0;
+                    _selectedRankingMode = '';
+                  }),
                   child: const Text("重置", style: TextStyle(color: Colors.grey)),
                 ),
               ],
             ),
           ),
           const Divider(height: 1),
+          
           Flexible(
-            child: ListView.builder(
+            child: ListView(
               shrinkWrap: true,
-              itemCount: widget.filters.length,
-              itemBuilder: (context, index) {
-                final SourceFilter filter = widget.filters[index];
-                return _buildFilterGroup(filter);
-              },
+              children: [
+                // 🔥 如果是 Pixiv，插入专属控件
+                if (isPixiv) _buildPixivExtras(),
+
+                // 通用 Filters
+                ...widget.filters.map((filter) => _buildFilterGroup(filter)),
+              ],
             ),
           ),
+          
           Padding(
             padding: const EdgeInsets.all(20),
             child: SizedBox(
@@ -164,6 +276,28 @@ class _FilterSheetState extends State<FilterSheet> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 onPressed: () {
+                  // 🔥 保存 Pixiv 专属状态到 tempValues
+                  if (isPixiv) {
+                    if (_selectedRankingMode.isNotEmpty) {
+                      _tempValues['mode'] = _selectedRankingMode; // 覆盖 mode 为 ranking_daily 等
+                      _tempValues.remove('min_bookmarks'); // 排行榜不带收藏数
+                    } else {
+                      // 普通模式
+                      if (_minBookmarks > 0) {
+                        _tempValues['min_bookmarks'] = _minBookmarks.toInt();
+                      } else {
+                        _tempValues.remove('min_bookmarks');
+                      }
+                      
+                      // 如果之前选了 ranking，现在切回普通，需要确保 mode 不是 ranking_xxx
+                      // 这里假设 default mode 在 generic filters 里有处理，或者依赖 repository 默认值
+                      final currentMode = _tempValues['mode']?.toString() ?? '';
+                      if (currentMode.startsWith('ranking_') || ['daily','weekly'].contains(currentMode)) {
+                         _tempValues.remove('mode'); // 移除排行榜模式，回退到默认
+                      }
+                    }
+                  }
+
                   widget.onApply(_tempValues);
                   Navigator.pop(context);
                 },
@@ -178,14 +312,17 @@ class _FilterSheetState extends State<FilterSheet> {
 
   Widget _buildFilterGroup(SourceFilter filter) {
     final bool isMulti = filter.type == 'checklist';
-
     final bool isPixiv = _isPixivActiveSource(context);
     final bool hasCookie = _hasPixivCookie(context);
-
     final bool loginResolved = _pixivLoginOk != null;
     final bool loginOk = _pixivLoginOk == true;
 
-    // “部分需登录”的提示：如果是 Pixiv 且热门/R18 受限（未登录或未完成校验）就显示
+    // 如果当前选了排行榜模式，锁定通用的 mode 和 order 选项，避免用户混淆
+    final bool isRankingMode = _selectedRankingMode.isNotEmpty;
+    if (isPixiv && isRankingMode && (filter.key == 'mode' || filter.key == 'order')) {
+      return const SizedBox(); // 直接隐藏，或者置灰
+    }
+
     final bool shouldShowLoginHint = isPixiv &&
         (filter.key.toLowerCase() == 'order' || filter.key.toLowerCase() == 'mode') &&
         (!hasCookie || !loginResolved || !loginOk);
@@ -270,7 +407,6 @@ class _FilterSheetState extends State<FilterSheet> {
                           if (isMulti) {
                             final List<String> list =
                                 (val is List) ? val.map((e) => e.toString()).toList() : <String>[];
-
                             if (selected) {
                               if (!list.contains(option.value)) list.add(option.value);
                             } else {
@@ -292,7 +428,7 @@ class _FilterSheetState extends State<FilterSheet> {
                 padding: const EdgeInsets.only(right: 8),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: locked ? _toastLocked : null,
+                  onTap: locked ? () => _toastLocked('需要登录') : null,
                   child: Opacity(
                     opacity: locked ? 0.55 : 1.0,
                     child: chip,
