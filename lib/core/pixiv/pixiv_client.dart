@@ -13,9 +13,10 @@ import 'package:dio/dio.dart';
 class PixivClient {
   final Dio _dio;
   String? _cookie;
-  
+
   // 🔥 默认 UA，但会被 updateConfig 覆盖
-  String _userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  String _userAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   PixivClient({
     Dio? dio,
@@ -24,7 +25,7 @@ class PixivClient {
         _cookie = cookie {
     // 初始化 Headers
     _updateHeaders();
-    
+
     _dio.options = _dio.options.copyWith(
       baseUrl: 'https://www.pixiv.net',
       connectTimeout: const Duration(seconds: 10),
@@ -70,6 +71,42 @@ class PixivClient {
     final c = _cookie?.trim() ?? '';
     if (c.isNotEmpty) h['Cookie'] = c;
     return h;
+  }
+
+  /// ✅ 新增：检查当前 Cookie + UA 是否为“有效登录态”
+  ///
+  /// 说明：
+  /// - 仅 hasCookie 为 true 不代表 Pixiv 认可已登录（过期/缺字段/风控/UA 不一致都可能失败）
+  /// - 该接口用于 Repo 侧做降级判断（popular / r18 等）
+  ///
+  /// 返回：
+  /// - true  : 登录有效（能解析到 userId）
+  /// - false : 未登录/失效/被拦截/网络错误
+  Future<bool> checkLogin() async {
+    // 没 cookie 直接 false
+    if (!hasCookie) return false;
+
+    try {
+      final resp = await _dio.get('/ajax/user/self');
+
+      final sc = resp.statusCode ?? 0;
+      if (sc >= 400) return false;
+
+      final data = resp.data;
+      if (data is! Map) return false;
+
+      // Pixiv Ajax 通常结构：{ error: false, body: {...} }
+      final errFlag = data['error'];
+      if (errFlag == true) return false;
+
+      final body = data['body'];
+      if (body is! Map) return false;
+
+      final uid = (body['userId'] ?? body['user_id'] ?? '').toString().trim();
+      return uid.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// 搜索：返回 illust id + 搜索页给的缩略图
@@ -179,7 +216,7 @@ class PixivClient {
     }
     return out;
   }
-  
+
   // 新增：获取用户作品（兼容之前提到的扩展）
   Future<List<PixivIllustBrief>> getUserArtworks({
     required String userId,
