@@ -276,7 +276,7 @@ class _HomePageState extends State<HomePage> {
 
   // 🔥 核心重写：使用 flutter_inappwebview 进行登录
   // 可以 100% 读取到 HttpOnly 的 Cookie (如 PHPSESSID)
-    void _openPixivWebLogin(BuildContext context) async {
+  void _openPixivWebLogin(BuildContext context) async {
     // 1. 获取 UA
     final manager = context.read<SourceManager>();
     final rule = manager.activeRule;
