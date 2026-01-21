@@ -151,12 +151,14 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     
     // 📝 模拟 Wallhaven 数据 (请在 Model 中添加对应字段后替换)
     // -----------------------------------------------------
-    final String uploaderName = "Unknown_User"; // w.uploader
-    final String viewsCount = "8,888"; // w.views
-    final String favsCount = "666"; // w.favorites
-    final String fileSize = "5.2 MB"; // w.fileSize
-    final String uploadDate = "2026-01-20"; // w.createdAt
-    final String fileType = "image/png"; // w.mimeType
+    // 注意：这里使用的是您刚刚在 UniWallpaper 中新增的字段
+    // 如果解析层还没赋值，这里会显示默认的 "Unknown User" 等
+    final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
+    final String viewsCount = w.views.isNotEmpty ? w.views : "-";
+    final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
+    final String fileSize = w.fileSize.isNotEmpty ? w.fileSize : "-";
+    final String uploadDate = w.createdAt.isNotEmpty ? w.createdAt : "-";
+    final String fileType = w.mimeType.isNotEmpty ? w.mimeType : "image/jpeg";
     final String category = w.grade ?? "General";
     // -----------------------------------------------------
 
