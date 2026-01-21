@@ -264,7 +264,7 @@ class _HomePageState extends State<HomePage> {
         // 🔥🔥🔥 核心修改：用 SizedBox 包裹内容并指定 width
         content: SizedBox(
           width: 300, // 👈 在这里设置固定宽度
-        content: TextField(
+          child: TextField(
           controller: controller,
           maxLines: 10,
           decoration: InputDecoration(
@@ -596,7 +596,7 @@ class _HomePageState extends State<HomePage> {
             // 🔥🔥🔥 核心修改：用 SizedBox 包裹 SingleChildScrollView
             content: SizedBox(
               width: 300, // 👈 在这里设置固定宽度
-            content: SingleChildScrollView(
+              child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
