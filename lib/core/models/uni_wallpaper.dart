@@ -6,26 +6,30 @@ class UniWallpaper {
   final String fullUrl;
   final double width;
   final double height;
-  final String? grade; // "nsfw", "sketchy", "sfw"
-  
-  // 🔥 新增：功能性标识
-  final bool isUgoira; // 是否为动图
-  final bool isAi;     // 是否为 AI 生成
+  final String? grade; // 'safe', 'sketchy', 'nsfw'
+  final bool isUgoira;
+  final bool isAi;
+  final List<String> tags; // 🔥 新增：标签列表
 
   const UniWallpaper({
     required this.id,
-    this.sourceId = '',
+    required this.sourceId,
     required this.thumbUrl,
     required this.fullUrl,
-    this.width = 0,
-    this.height = 0,
+    required this.width,
+    required this.height,
     this.grade,
-    this.isUgoira = false, // default false
-    this.isAi = false,     // default false
+    this.isUgoira = false,
+    this.isAi = false,
+    this.tags = const [], // 🔥 默认为空列表
   });
 
+  // 如果你有 fromJson/toJson 也需要对应修改，这里为了不破坏你现有的逻辑，
+  // 假设你的转换逻辑是在 Repository 层手动做的（如之前的 PixivRepository）。
+  
+  // 辅助属性：计算宽高比
   double get aspectRatio {
-    if (width <= 0 || height <= 0) return 0.0;
-    return width / height;
+    if (width > 0 && height > 0) return width / height;
+    return 1.0;
   }
 }
