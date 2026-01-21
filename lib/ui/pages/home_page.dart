@@ -259,8 +259,11 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
-        insetPadding: const EdgeInsets.symmetric(horizontal: 20), 
+        insetPadding: const EdgeInsets.symmetric(horizontal: 30), 
         title: const Text('导入图源规则'),
+        // 🔥🔥🔥 核心修改：用 SizedBox 包裹内容并指定 width
+        content: SizedBox(
+          width: 300, // 👈 在这里设置固定宽度
         content: TextField(
           controller: controller,
           maxLines: 10,
@@ -588,8 +591,11 @@ class _HomePageState extends State<HomePage> {
           return AlertDialog(
             backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
-            insetPadding: const EdgeInsets.symmetric(horizontal: 20),
+            insetPadding: const EdgeInsets.symmetric(horizontal: 30),
             title: const Text('Pixiv 设置'),
+            // 🔥🔥🔥 核心修改：用 SizedBox 包裹 SingleChildScrollView
+            content: SizedBox(
+              width: 300, // 👈 在这里设置固定宽度
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
