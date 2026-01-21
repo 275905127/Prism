@@ -9,7 +9,15 @@ class UniWallpaper {
   final String? grade; // 'safe', 'sketchy', 'nsfw'
   final bool isUgoira;
   final bool isAi;
-  final List<String> tags; // 🔥 新增：标签列表
+  final List<String> tags;
+
+  // 🔥 新增：详情页元数据字段 (适配 Wallhaven/Pixiv 详细信息)
+  final String uploader;    // 上传者
+  final String views;       // 浏览量 (存字符串，方便处理 "1.2k" 这种格式)
+  final String favorites;   // 收藏量
+  final String fileSize;    // 文件大小 (如 "5.2 MB")
+  final String createdAt;   // 上传时间 (如 "2026-01-20")
+  final String mimeType;    // 文件类型 (如 "image/png")
 
   const UniWallpaper({
     required this.id,
@@ -21,12 +29,17 @@ class UniWallpaper {
     this.grade,
     this.isUgoira = false,
     this.isAi = false,
-    this.tags = const [], // 🔥 默认为空列表
+    this.tags = const [],
+    
+    // 🔥 给默认值，防止旧的解析代码报错
+    this.uploader = 'Unknown User',
+    this.views = '',
+    this.favorites = '',
+    this.fileSize = '',
+    this.createdAt = '',
+    this.mimeType = '',
   });
 
-  // 如果你有 fromJson/toJson 也需要对应修改，这里为了不破坏你现有的逻辑，
-  // 假设你的转换逻辑是在 Repository 层手动做的（如之前的 PixivRepository）。
-  
   // 辅助属性：计算宽高比
   double get aspectRatio {
     if (width > 0 && height > 0) return width / height;
