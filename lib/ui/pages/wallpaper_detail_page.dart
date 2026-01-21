@@ -194,7 +194,9 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
               onDoubleTap: _onDoubleTap,
               child: Container(
                 // 图片底色保持黑，以免透明图或加载时太亮眼
-                color: Colors.black, 
+                // 改为透明，透出页面的白色背景
+                color: Colors.transparent,
+
                 constraints: BoxConstraints(
                   minHeight: 300,
                   // 限制最大高度，防止超长图占满屏幕无法下滑
