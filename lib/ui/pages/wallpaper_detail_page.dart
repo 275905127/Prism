@@ -10,7 +10,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
-import 'wallpaper_search_delegate.dart'; // ✅ 引入搜索页，用于跳转作者/相似
+import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
@@ -34,7 +34,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   late AnimationController _animationController;
   Animation<Matrix4>? _animation;
 
-  // Wallhaven Light Theme Colors
+  // Wallhaven Light Theme Colors (复刻白色风格)
   static const Color _bgColor = Colors.white;
   static const Color _textColor = Color(0xFF333333);
   static const Color _subTextColor = Color(0xFF777777);
@@ -119,18 +119,28 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   void _shareImage() => Share.share(widget.wallpaper.fullUrl);
+  
   void _copyUrl() {
     Clipboard.setData(ClipboardData(text: widget.wallpaper.fullUrl));
     _snack("✅ 链接已复制");
   }
 
+  // 🔥 修复：使用 query 参数传递搜索词，而不是构造函数
   void _searchUploader(String uploader) {
-    showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: 'user:$uploader'));
+    showSearch(
+      context: context, 
+      delegate: WallpaperSearchDelegate(), 
+      query: 'user:$uploader',
+    );
   }
 
+  // 🔥 修复：使用 query 参数传递搜索词
   void _searchSimilar() {
-    // 假设 'like:' 前缀触发相似搜索，需配合 SearchDelegate 实现
-    showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: 'like:${widget.wallpaper.id}'));
+    showSearch(
+      context: context, 
+      delegate: WallpaperSearchDelegate(), 
+      query: 'like:${widget.wallpaper.id}',
+    );
   }
 
   void _snack(String msg) {
@@ -149,10 +159,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final w = widget.wallpaper;
     final heroTag = '${w.sourceId}::${w.id}';
     
-    // 📝 模拟 Wallhaven 数据 (请在 Model 中添加对应字段后替换)
-    // -----------------------------------------------------
-    // 注意：这里使用的是您刚刚在 UniWallpaper 中新增的字段
-    // 如果解析层还没赋值，这里会显示默认的 "Unknown User" 等
+    // 📝 获取数据，如果为空显示占位符
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
     final String viewsCount = w.views.isNotEmpty ? w.views : "-";
     final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
@@ -160,7 +167,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final String uploadDate = w.createdAt.isNotEmpty ? w.createdAt : "-";
     final String fileType = w.mimeType.isNotEmpty ? w.mimeType : "image/jpeg";
     final String category = w.grade ?? "General";
-    // -----------------------------------------------------
 
     final hasSize = w.width > 0 && w.height > 0;
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
@@ -187,7 +193,8 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
             child: GestureDetector(
               onDoubleTap: _onDoubleTap,
               child: Container(
-                color: Colors.black, // 图片底色保持黑，突出内容
+                // 图片底色保持黑，以免透明图或加载时太亮眼
+                color: Colors.black, 
                 constraints: BoxConstraints(
                   minHeight: 300,
                   // 限制最大高度，防止超长图占满屏幕无法下滑
@@ -202,7 +209,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                     child: CachedNetworkImage(
                       imageUrl: w.fullUrl,
                       httpHeaders: widget.headers,
-                      fit: BoxFit.contain,
+                      fit: BoxFit.contain, // 居中包含
                       placeholder: (_, __) => const Center(
                         child: CircularProgressIndicator(color: _accentColor),
                       ),
@@ -254,8 +261,10 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                           CircleAvatar(
                             radius: 20,
                             backgroundColor: _accentColor,
-                            child: Text(uploaderName[0].toUpperCase(),
-                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            child: Text(
+                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
+                            ),
                           ),
                           const SizedBox(width: 12),
                           Expanded(
@@ -293,7 +302,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                   const SizedBox(height: 20),
 
                   // --- 详细参数 Grid ---
-                  // 这里的布局复刻 Wallhaven 侧边栏信息
+                  // 复刻 Wallhaven 侧边栏信息布局
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
@@ -419,8 +428,12 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   Widget _buildTag(String tag) {
     return InkWell(
       onTap: () {
-        // 点击标签搜索
-        showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: tag));
+        // 🔥 修复：使用 query 参数传递搜索词
+        showSearch(
+          context: context, 
+          delegate: WallpaperSearchDelegate(), 
+          query: tag,
+        );
       },
       borderRadius: BorderRadius.circular(20),
       child: Container(
