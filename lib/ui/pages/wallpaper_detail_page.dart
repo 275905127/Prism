@@ -10,11 +10,10 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
+import 'wallpaper_search_delegate.dart'; // ✅ 引入搜索页，用于跳转作者/相似
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
-
-  /// ✅ 必须是“完整请求头”（含 Authorization / Client-ID / Referer 之类）
   final Map<String, String>? headers;
 
   const WallpaperDetailPage({
@@ -30,16 +29,17 @@ class WallpaperDetailPage extends StatefulWidget {
 class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTickerProviderStateMixin {
   bool _isDownloading = false;
   
-  // 图片缩放控制器
+  // 图片缩放控制
   final TransformationController _transformController = TransformationController();
   late AnimationController _animationController;
   Animation<Matrix4>? _animation;
 
-  // Wallhaven 风格颜色
-  static const Color _bgColor = Color(0xFF222222);
-  static const Color _accentColor = Color(0xFFA6CC8B); // 类似 Wallhaven 的绿色
-  static const Color _textColor = Color(0xFFEEEEEE);
-  static const Color _subTextColor = Color(0xFFAAAAAA);
+  // Wallhaven Light Theme Colors
+  static const Color _bgColor = Colors.white;
+  static const Color _textColor = Color(0xFF333333);
+  static const Color _subTextColor = Color(0xFF777777);
+  static const Color _accentColor = Color(0xFFA6CC8B); // Wallhaven Green
+  static const Color _tagBgColor = Color(0xFFF0F0F0);
 
   @override
   void initState() {
@@ -84,7 +84,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       if (!hasAccess) {
         final granted = await Gal.requestAccess();
         if (!granted) {
-          if (mounted) _snack("❌ 需要相册权限才能保存");
+          if (mounted) _snack("❌ 需要相册权限");
           return;
         }
       }
@@ -108,7 +108,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
         name: fileName,
       );
 
-      if (mounted) _snack("✅ 图片已保存");
+      if (mounted) _snack("✅ 已保存到相册");
     } on GalException catch (e) {
       if (mounted) _snack("❌ 保存失败: ${e.type.message}");
     } catch (e) {
@@ -118,21 +118,27 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     }
   }
 
-  void _shareImage() {
-    Share.share(widget.wallpaper.fullUrl);
-  }
-
+  void _shareImage() => Share.share(widget.wallpaper.fullUrl);
   void _copyUrl() {
     Clipboard.setData(ClipboardData(text: widget.wallpaper.fullUrl));
     _snack("✅ 链接已复制");
   }
 
+  void _searchUploader(String uploader) {
+    showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: 'user:$uploader'));
+  }
+
+  void _searchSimilar() {
+    // 假设 'like:' 前缀触发相似搜索，需配合 SearchDelegate 实现
+    showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: 'like:${widget.wallpaper.id}'));
+  }
+
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(msg),
+        content: Text(msg, style: const TextStyle(color: Colors.white)),
         behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF333333),
+        backgroundColor: Colors.black87,
         duration: const Duration(milliseconds: 1500),
       ),
     );
@@ -140,153 +146,210 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
   @override
   Widget build(BuildContext context) {
-    final heroTag = '${widget.wallpaper.sourceId}::${widget.wallpaper.id}';
     final w = widget.wallpaper;
+    final heroTag = '${w.sourceId}::${w.id}';
+    
+    // 📝 模拟 Wallhaven 数据 (请在 Model 中添加对应字段后替换)
+    // -----------------------------------------------------
+    final String uploaderName = "Unknown_User"; // w.uploader
+    final String viewsCount = "8,888"; // w.views
+    final String favsCount = "666"; // w.favorites
+    final String fileSize = "5.2 MB"; // w.fileSize
+    final String uploadDate = "2026-01-20"; // w.createdAt
+    final String fileType = "image/png"; // w.mimeType
+    final String category = w.grade ?? "General";
+    // -----------------------------------------------------
+
     final hasSize = w.width > 0 && w.height > 0;
-    
-    // 构造一些显示用的数据
-    final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown Size";
-    final String ratio = hasSize ? _calculateRatio(w.width, w.height) : "?";
-    
+    final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
+
     return Scaffold(
       backgroundColor: _bgColor,
-      body: Stack(
-        children: [
-          // 主滚动区域
-          SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 1. 图片区域
-                GestureDetector(
-                  onDoubleTap: _onDoubleTap,
-                  child: Container(
-                    constraints: BoxConstraints(
-                      minHeight: 200,
-                      maxHeight: MediaQuery.of(context).size.height * 0.85, // 图片最高占屏幕 85%
-                    ),
-                    width: double.infinity,
-                    color: Colors.black,
-                    child: InteractiveViewer(
-                      transformationController: _transformController,
-                      minScale: 1.0,
-                      maxScale: 4.0,
-                      child: Hero(
-                        tag: heroTag,
-                        child: CachedNetworkImage(
-                          imageUrl: w.fullUrl,
-                          httpHeaders: widget.headers,
-                          fit: BoxFit.contain, // 保持比例完整显示
-                          placeholder: (_, __) => const Center(
-                            child: CircularProgressIndicator(color: _accentColor),
-                          ),
-                          errorWidget: (_, __, ___) => const Center(
-                            child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-
-                // 2. 操作栏 (模仿截图中的图标栏)
-                Container(
-                  color: const Color(0xFF2B2B2B), //稍微亮一点的背景
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _buildActionIcon(Icons.crop, "设为壁纸", () {
-                         // 预留接口：设为壁纸
-                         _snack("暂未实现壁纸设置"); 
-                      }),
-                      _buildActionIcon(Icons.content_copy, "复制链接", _copyUrl),
-                      _buildActionIcon(Icons.share, "分享", _shareImage),
-                      _buildActionIcon(Icons.download, "下载原图", _isDownloading ? null : _saveImage, isLoading: _isDownloading),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-
-                // 3. 详细信息区域
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // 上传者/来源信息
-                      Row(
-                        children: [
-                          CircleAvatar(
-                            radius: 18,
-                            backgroundColor: _accentColor,
-                            child: Text(w.sourceId[0].toUpperCase(), 
-                              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                          ),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text("Source: ${w.sourceId}", 
-                                style: const TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 15)),
-                              Text("ID: ${w.id}", 
-                                style: const TextStyle(color: _subTextColor, fontSize: 12)),
-                            ],
-                          ),
-                          const Spacer(),
-                          // 收藏按钮（视觉展示）
-                          const Icon(Icons.bookmark_border, color: _accentColor, size: 28),
-                        ],
-                      ),
-                      
-                      const SizedBox(height: 20),
-                      const Divider(color: Colors.white10, height: 1),
-                      const SizedBox(height: 20),
-
-                      // 元数据列表
-                      _buildMetaRow(Icons.link, w.fullUrl, isLink: true),
-                      _buildMetaRow(Icons.aspect_ratio, resolution),
-                      _buildMetaRow(Icons.crop_free, ratio),
-                      if (w.isAi) _buildMetaRow(Icons.smart_toy, "AI Generated"),
-                      if (w.isUgoira) _buildMetaRow(Icons.animation, "Animated (Ugoira)"),
-                      _buildMetaRow(Icons.info_outline, w.grade?.toUpperCase() ?? "Safe"),
-
-                      const SizedBox(height: 24),
-                      
-                      // 4. 标签区域
-                      if (w.tags.isNotEmpty) ...[
-                        const Text("Tags", style: TextStyle(color: _subTextColor, fontSize: 14)),
-                        const SizedBox(height: 10),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: w.tags.map((tag) => _buildTag(tag)).toList(),
-                        ),
-                        const SizedBox(height: 40),
-                      ],
-                    ],
-                  ),
-                ),
-                
-                // 底部留白，防止被系统手势条遮挡
-                SizedBox(height: MediaQuery.of(context).padding.bottom + 20),
-              ],
+      // 使用 CustomScrollView 实现图片随滚动推上去的效果
+      body: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          // 1. 顶部栏 (透明/悬浮)
+          SliverAppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            floating: true,
+            leading: IconButton(
+              icon: const ContainerWithShadow(child: Icon(Icons.arrow_back, color: Colors.white)),
+              onPressed: () => Navigator.pop(context),
             ),
           ),
 
-          // 顶部返回按钮 (悬浮)
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: AppBar(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              leading: IconButton(
-                icon: const ContainerWithShadow(child: Icon(Icons.arrow_back, color: Colors.white)),
-                onPressed: () => Navigator.pop(context),
+          // 2. 图片展示区 (SliverToBoxAdapter)
+          SliverToBoxAdapter(
+            child: GestureDetector(
+              onDoubleTap: _onDoubleTap,
+              child: Container(
+                color: Colors.black, // 图片底色保持黑，突出内容
+                constraints: BoxConstraints(
+                  minHeight: 300,
+                  // 限制最大高度，防止超长图占满屏幕无法下滑
+                  maxHeight: MediaQuery.of(context).size.height * 0.85, 
+                ),
+                child: InteractiveViewer(
+                  transformationController: _transformController,
+                  minScale: 1.0,
+                  maxScale: 4.0,
+                  child: Hero(
+                    tag: heroTag,
+                    child: CachedNetworkImage(
+                      imageUrl: w.fullUrl,
+                      httpHeaders: widget.headers,
+                      fit: BoxFit.contain,
+                      placeholder: (_, __) => const Center(
+                        child: CircularProgressIndicator(color: _accentColor),
+                      ),
+                      errorWidget: (_, __, ___) => const Center(
+                        child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // 3. 信息详情区 (白底)
+          SliverToBoxAdapter(
+            child: Container(
+              color: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // --- 操作栏 (复制/分享/下载) ---
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildSimpleAction(Icons.crop_free, "设为壁纸", () => _snack("暂未实现")),
+                      _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
+                      _buildSimpleAction(Icons.share, "分享", _shareImage),
+                      _buildSimpleAction(
+                        Icons.download, 
+                        "下载原图", 
+                        _isDownloading ? null : _saveImage, 
+                        isProcessing: _isDownloading
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                  const SizedBox(height: 24),
+
+                  // --- 上传者信息 ---
+                  InkWell(
+                    onTap: () => _searchUploader(uploaderName),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 20,
+                            backgroundColor: _accentColor,
+                            child: Text(uploaderName[0].toUpperCase(),
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("上传者: $uploaderName",
+                                    style: const TextStyle(
+                                        color: _textColor, fontWeight: FontWeight.bold, fontSize: 16)),
+                                const Text("点击查看更多作品", 
+                                    style: TextStyle(color: _subTextColor, fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                          // 关注按钮样式
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: _accentColor),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.add, size: 16, color: _accentColor),
+                                SizedBox(width: 4),
+                                Text("关注", style: TextStyle(color: _accentColor, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                          )
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // --- 详细参数 Grid ---
+                  // 这里的布局复刻 Wallhaven 侧边栏信息
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF9F9F9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      children: [
+                        _buildInfoRow(Icons.visibility, "$viewsCount 浏览", Icons.favorite, "$favsCount 收藏"),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(Icons.aspect_ratio, resolution, Icons.sd_storage, fileSize),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(Icons.image, fileType, Icons.link, "查看源地址", isLink: true),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // --- 相似搜索按钮 ---
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.image_search, color: _textColor),
+                      label: const Text("查找相似图片 (Similar)", style: TextStyle(color: _textColor)),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: const BorderSide(color: Color(0xFFDDDDDD)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onPressed: _searchSimilar,
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // --- 标签区域 ---
+                  if (w.tags.isNotEmpty) ...[
+                    const Row(
+                      children: [
+                        Icon(Icons.label, size: 18, color: _subTextColor),
+                        SizedBox(width: 8),
+                        Text("Tags", style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: w.tags.map((tag) => _buildTag(tag)).toList(),
+                    ),
+                  ],
+
+                  // 底部留白
+                  SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
+                ],
               ),
             ),
           ),
@@ -295,80 +358,86 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  // 计算宽高比字符串
-  String _calculateRatio(double w, double h) {
-    if (w == 0 || h == 0) return "";
-    final double r = w / h;
-    if ((r - 1.77).abs() < 0.05) return "16:9";
-    if ((r - 1.33).abs() < 0.05) return "4:3";
-    if ((r - 1.6).abs() < 0.05) return "16:10";
-    if ((r - 2.33).abs() < 0.1) return "21:9";
-    if ((r - 0.56).abs() < 0.05) return "9:16";
-    return r.toStringAsFixed(2);
-  }
-
-  // 构建单个操作图标
-  Widget _buildActionIcon(IconData icon, String tooltip, VoidCallback? onTap, {bool isLoading = false}) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(50),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: isLoading 
-            ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor))
-            : Icon(icon, color: _subTextColor, size: 26),
+  // 构建简单的图标+文字按钮 (无背景)
+  Widget _buildSimpleAction(IconData icon, String label, VoidCallback? onTap, {bool isProcessing = false}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          children: [
+            isProcessing
+                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor))
+                : Icon(icon, color: _textColor, size: 26),
+            const SizedBox(height: 6),
+            Text(label, style: const TextStyle(color: _subTextColor, fontSize: 12)),
+          ],
         ),
       ),
     );
   }
 
-  // 构建元数据行
-  Widget _buildMetaRow(IconData icon, String text, {bool isLink = false}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: _accentColor),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                color: isLink ? _accentColor : _textColor,
-                fontSize: 14,
-                decoration: isLink ? TextDecoration.underline : null,
-                decorationColor: _accentColor,
+  // 构建一行两个信息
+  Widget _buildInfoRow(IconData i1, String t1, IconData i2, String t2, {bool isLink = false}) {
+    Widget item(IconData i, String t, bool link) {
+      return Expanded(
+        child: Row(
+          children: [
+            Icon(i, size: 16, color: _accentColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                t, 
+                style: TextStyle(
+                  color: link ? _accentColor : _textColor, 
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  decoration: link ? TextDecoration.underline : null,
+                  decorationColor: _accentColor,
+                ),
+                maxLines: 1, 
+                overflow: TextOverflow.ellipsis
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
             ),
-          ),
-        ],
-      ),
+          ],
+        ),
+      );
+    }
+    return Row(
+      children: [
+        item(i1, t1, false),
+        const SizedBox(width: 16),
+        item(i2, t2, isLink),
+      ],
     );
   }
 
-  // 构建标签
+  // 构建胶囊标签
   Widget _buildTag(String tag) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2B2B2B),
-        border: Border.all(color: const Color(0xFF444444)),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        tag,
-        style: const TextStyle(color: _accentColor, fontSize: 13),
+    return InkWell(
+      onTap: () {
+        // 点击标签搜索
+        showSearch(context: context, delegate: WallpaperSearchDelegate(initialQuery: tag));
+      },
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: _tagBgColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFE0E0E0)),
+        ),
+        child: Text(
+          tag,
+          style: const TextStyle(color: _textColor, fontSize: 13),
+        ),
       ),
     );
   }
 }
 
-// 简单的阴影容器，确保白色图标在浅色图上也能看清
+// 阴影容器，用于返回按钮
 class ContainerWithShadow extends StatelessWidget {
   final Widget child;
   const ContainerWithShadow({super.key, required this.child});
@@ -377,8 +446,9 @@ class ContainerWithShadow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
+        shape: BoxShape.circle,
         boxShadow: [
-          BoxShadow(color: Colors.black45, blurRadius: 8, spreadRadius: 0),
+          BoxShadow(color: Colors.black26, blurRadius: 8, spreadRadius: 1),
         ],
       ),
       child: child,
