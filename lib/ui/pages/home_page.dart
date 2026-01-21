@@ -278,6 +278,7 @@ class _HomePageState extends State<HomePage> {
             contentPadding: const EdgeInsets.all(12),
           ),
           style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
+         ),
         ),
         actions: [
           TextButton(
@@ -664,7 +665,8 @@ class _HomePageState extends State<HomePage> {
                     maxLines: 2,
                   ),
                 ],
-              ),
+               ),
+             ),
             ),
             actions: [
               TextButton(
