@@ -182,4 +182,40 @@ class WallpaperService {
       throw _errorMapper.map(e);
     }
   }
+
+  // -------------------- Compatibility APIs (keep UI compiling) --------------------
+
+  /// Old UI expects a sync flag for login state display.
+  bool get hasPixivCookie => _pixivRepo.hasCookie;
+
+  /// Old UI calls this to persist pixiv preferences.
+  Future<void> setPixivPreferences({
+    String? imageQuality,
+    List<String>? mutedTags,
+    bool? showAi,
+  }) async {
+    final current = _pixivRepo.prefs;
+    final updated = current.copyWith(
+      imageQuality: imageQuality,
+      mutedTags: mutedTags,
+      showAi: showAi,
+    );
+    _pixivRepo.updatePreferences(updated);
+    await persistPixivPreferences();
+  }
+
+  /// Old UI calls this to obtain base headers (rule-level).
+  /// Note: pximg Referer/UA 补齐需要 wallpaper URL，因此请优先使用 imageHeadersFor(...).
+  Map<String, String>? getImageHeaders(SourceRule? rule) {
+    final rh = rule?.headers;
+    if (rh == null || rh.isEmpty) return null;
+
+    final out = <String, String>{};
+    rh.forEach((k, v) {
+      if (v == null) return;
+      out[k.toString()] = v.toString();
+    });
+    return out.isEmpty ? null : out;
+  }
+
 }
