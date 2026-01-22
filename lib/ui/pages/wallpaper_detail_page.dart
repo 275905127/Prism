@@ -15,9 +15,13 @@ import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
+
+  /// Compatibility: allow callers (e.g. SearchDelegate) to pass headers explicitly.
+  final Map<String, String>? headers;
   const WallpaperDetailPage({
     super.key,
     required this.wallpaper,
+    this.headers,
   });
 
   @override
@@ -159,6 +163,8 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   Widget build(BuildContext context) {
     final w = widget.wallpaper;
     final heroTag = '${w.sourceId}::${w.id}';
+
+$insert
     
     // 📝 获取数据，如果为空显示占位符
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
@@ -211,14 +217,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                     tag: heroTag,
                     child: CachedNetworkImage(
                       imageUrl: w.fullUrl,
-                      httpHeaders: context.read<WallpaperService>().imageHeadersFor(
-                        wallpaper: w,
-                        rule: context.read<SourceManager>().activeRule,
-                      ),
-                      fit: BoxFit.contain, // 居中包含
-                      placeholder: (_, __) => const Center(
-                        child: CircularProgressIndicator(color: _accentColor),
-                      ),
+                      httpHeaders: resolvedHeaders,
                       errorWidget: (_, __, ___) => const Center(
                         child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
                       ),
