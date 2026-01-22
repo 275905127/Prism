@@ -1,5 +1,6 @@
 // lib/ui/pages/home_page.dart
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
@@ -32,7 +33,6 @@ class _HomePageState extends State<HomePage> {
   // 避免重复弹 SnackBar
   String _lastShownError = '';
 
-
   @override
   void dispose() {
     _scrollController.dispose();
@@ -48,6 +48,7 @@ class _HomePageState extends State<HomePage> {
 
   // ---------- UI helpers ----------
   void _snack(String msg) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
     );
@@ -133,11 +134,11 @@ class _HomePageState extends State<HomePage> {
 
   // ---------- Pixiv Web Login ----------
   void _openPixivWebLogin(BuildContext context) async {
-    final PrismLogger logger = const AppLogLogger();
+    // ✅ 必须从 Provider 取全局 logger，避免你本地 new 导致日志系统割裂
+    final PrismLogger logger = context.read<PrismLogger>();
 
     final sourceManager = context.read<SourceManager>();
     final wallpaperService = context.read<WallpaperService>();
-
     final rule = sourceManager.activeRule;
 
     String targetUA = PixivClient.kMobileUserAgent;
@@ -235,6 +236,9 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
+          /// ✅ 彻底修复：保存 Cookie 的逻辑完全 Null-safe，并且只走两条正确路径：
+          /// - WallpaperService.setPixivCookieForRule（持久化 + 注入 repo）
+          /// - SourceManager.updateRuleHeader（写入 rule.headers 并持久化 rules_v2）
           Future<void> doSave() async {
             if (saving) return;
 
@@ -258,25 +262,20 @@ class _HomePageState extends State<HomePage> {
             logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
 
             try {
+              // 1) 通过 Service 保存（包含 prefs 保存 + repo 注入）
               await wallpaperService.setPixivCookieForRule(active.id, cookie);
-              logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
+              logger.log('Pixiv cookie persisted via WallpaperService (UI) len=${cookie.length}');
 
+              // 2) 同步写入 rule.headers（让 rule-based 请求也能透传 Cookie）
               await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
               logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
 
-              // 备份到 prefs
-              try {
-                await context.read<WallpaperService>().setPixivCookieForRule(active.id, cookie);
-                logger.log('Pixiv cookie backup saved for rule=${active.id}');
-              } catch (e) {
-                logger.log('Pixiv cookie backup prefs failed: $e');
-              }
-
               snack(ctx, '已保存，正在刷新…');
 
+              // 先关闭 sheet
               if (ctx.mounted) Navigator.pop(ctx);
 
-              // 由 HomeController 统一刷新（避免 UI 直接改分页状态）
+              // 由 HomeController 统一刷新
               if (mounted) {
                 await context.read<HomeController>().refresh();
                 if (_scrollController.hasClients) {
@@ -438,7 +437,10 @@ class _HomePageState extends State<HomePage> {
                     const SizedBox(height: 8),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: Text(service.hasPixivCookie ? '已设置 Cookie' : '未登录', style: const TextStyle(fontSize: 14)),
+                      title: Text(
+                        service.hasPixivCookie ? '已设置 Cookie' : '未登录',
+                        style: const TextStyle(fontSize: 14),
+                      ),
                       subtitle: const Text('建议使用 Web 登录自动抓取', style: TextStyle(fontSize: 12)),
                       trailing: FilledButton.tonal(
                         style: FilledButton.styleFrom(
@@ -582,10 +584,10 @@ class _HomePageState extends State<HomePage> {
         alignment: Alignment.center,
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.broken_image, color: Colors.grey, size: 30),
-            const SizedBox(height: 6),
-            const Text('图片加载失败', style: TextStyle(color: Colors.grey, fontSize: 12)),
+          children: const [
+            Icon(Icons.broken_image, color: Colors.grey, size: 30),
+            SizedBox(height: 6),
+            Text('图片加载失败', style: TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
       ),
@@ -756,7 +758,10 @@ class _HomePageState extends State<HomePage> {
                   final rule = manager.rules[index];
                   final isSelected = rule.id == activeRule?.id;
                   return ListTile(
-                    title: Text(rule.name, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                    title: Text(
+                      rule.name,
+                      style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+                    ),
                     leading: isSelected
                         ? const Icon(Icons.circle, color: Colors.black, size: 10)
                         : const Icon(Icons.circle_outlined, color: Colors.grey, size: 10),
