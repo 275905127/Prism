@@ -1,12 +1,24 @@
+// lib/core/manager/source_manager.dart
 import 'dart:convert';
-import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import '../models/source_rule.dart';
 
+import 'package:flutter/foundation.dart';
+
+import '../models/source_rule.dart';
+import '../storage/preferences_store.dart';
+import '../utils/prism_logger.dart';
+
+/// SourceManager manages the rule list and currently active rule.
+///
+/// Architecture constraints:
+/// - MUST NOT depend on SharedPreferences directly (use [PreferencesStore]).
+/// - UI should depend on SourceManager state only; persistence happens here.
 class SourceManager extends ChangeNotifier {
-  // ✅ 升版本，隔离旧数据（避免以前的坏规则继续加载）
+  // ✅ Versioned keys to isolate legacy/bad rules
   static const String _kRulesKey = 'prism_rules_v2';
   static const String _kActiveKey = 'prism_active_id_v2';
+
+  final PreferencesStore _prefs;
+  final PrismLogger _logger;
 
   List<SourceRule> _rules = [];
   SourceRule? _activeRule;
@@ -14,43 +26,63 @@ class SourceManager extends ChangeNotifier {
   List<SourceRule> get rules => _rules;
   SourceRule? get activeRule => _activeRule;
 
-  SourceManager() {
+  SourceManager({
+    required PreferencesStore prefs,
+    required PrismLogger logger,
+  })  : _prefs = prefs,
+        _logger = logger {
     _load();
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
+    try {
+      final list = await _prefs.getStringList(_kRulesKey) ?? const <String>[];
 
-    final List<String> list = prefs.getStringList(_kRulesKey) ?? [];
-    if (list.isNotEmpty) {
-      _rules = list.map((e) => SourceRule.fromJson(jsonDecode(e))).toList();
-    } else {
+      final parsed = <SourceRule>[];
+      for (final raw in list) {
+        try {
+          final m = jsonDecode(raw);
+          if (m is Map<String, dynamic>) {
+            parsed.add(SourceRule.fromJson(m));
+          }
+        } catch (e) {
+          // Skip broken items, but keep others
+          _logger.w('SourceManager', 'Skip invalid rule item: $e');
+        }
+      }
+      _rules = parsed;
+
+      final activeId = await _prefs.getString(_kActiveKey);
+      if (activeId != null) {
+        _activeRule = _rules.where((r) => r.id == activeId).cast<SourceRule?>().firstOrNull;
+      }
+
+      _activeRule ??= _rules.isNotEmpty ? _rules.first : null;
+      notifyListeners();
+    } catch (e) {
+      _logger.e('SourceManager', 'Load rules failed: $e');
       _rules = [];
+      _activeRule = null;
+      notifyListeners();
     }
-
-    final activeId = prefs.getString(_kActiveKey);
-    if (activeId != null) {
-      _activeRule = _rules.where((r) => r.id == activeId).cast<SourceRule?>().firstOrNull;
-    }
-
-    _activeRule ??= _rules.isNotEmpty ? _rules.first : null;
-
-    notifyListeners();
   }
 
   Future<void> addRule(String jsonString) async {
     try {
-      final Map<String, dynamic> map = jsonDecode(jsonString);
-      final newRule = SourceRule.fromJson(map);
+      final decoded = jsonDecode(jsonString);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('Root is not a JSON object');
+      }
+      final newRule = SourceRule.fromJson(decoded);
 
       _rules.removeWhere((r) => r.id == newRule.id);
       _rules.add(newRule);
-
       _activeRule = newRule;
 
       await _save();
       notifyListeners();
     } catch (e) {
+      // Keep message user-friendly; caller can map further if needed
       throw Exception('规则格式错误: $e');
     }
   }
@@ -62,7 +94,7 @@ class SourceManager extends ChangeNotifier {
       orElse: () => _rules.first,
     );
     _activeRule = target;
-    _save();
+    _save(); // fire-and-forget; persistence is best-effort
     notifyListeners();
   }
 
@@ -73,11 +105,11 @@ class SourceManager extends ChangeNotifier {
       _activeRule = _rules.isNotEmpty ? _rules.first : null;
     }
 
-    _save();
+    _save(); // fire-and-forget
     notifyListeners();
   }
 
-  /// ✅ 更新某条规则的 headers（不可变写法：toJson -> 改 -> fromJson）
+  /// ✅ Update a rule's headers using an immutable approach: toJson -> mutate -> fromJson.
   Future<void> updateRuleHeaders(String ruleId, Map<String, String>? headers) async {
     if (_rules.isEmpty) return;
 
@@ -87,7 +119,7 @@ class SourceManager extends ChangeNotifier {
     final old = _rules[idx];
     final m = Map<String, dynamic>.from(old.toJson());
 
-    // headers 允许为 null（表示清空）
+    // headers may be null (meaning clear)
     m['headers'] = headers;
 
     final updated = SourceRule.fromJson(m);
@@ -101,7 +133,7 @@ class SourceManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// ✅ 更新单个 header（如 Cookie），value 为空则移除该 key
+  /// ✅ Update a single header (e.g., Cookie). If [value] is empty, remove the key.
   Future<void> updateRuleHeader(String ruleId, String key, String? value) async {
     if (key.trim().isEmpty) return;
 
@@ -114,7 +146,7 @@ class SourceManager extends ChangeNotifier {
     final v = value?.trim() ?? '';
     if (v.isEmpty) {
       h.remove(key);
-      // 顺手把大小写变体也清掉，避免重复
+      // Clean case variants to avoid duplicates
       if (key.toLowerCase() == 'cookie') {
         h.remove('cookie');
         h.remove('Cookie');
@@ -127,20 +159,22 @@ class SourceManager extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    final prefs = await SharedPreferences.getInstance();
+    try {
+      final jsonList = _rules.map((r) => jsonEncode(r.toJson())).toList(growable: false);
+      await _prefs.setStringList(_kRulesKey, jsonList);
 
-    final jsonList = _rules.map((r) => jsonEncode(r.toJson())).toList();
-    await prefs.setStringList(_kRulesKey, jsonList);
-
-    if (_activeRule != null) {
-      await prefs.setString(_kActiveKey, _activeRule!.id);
-    } else {
-      await prefs.remove(_kActiveKey);
+      if (_activeRule != null) {
+        await _prefs.setString(_kActiveKey, _activeRule!.id);
+      } else {
+        await _prefs.remove(_kActiveKey);
+      }
+    } catch (e) {
+      _logger.e('SourceManager', 'Save rules failed: $e');
     }
   }
 }
 
-// ✅ 不引入额外依赖的 firstOrNull
+/// ✅ firstOrNull without extra deps
 extension _FirstOrNullExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }

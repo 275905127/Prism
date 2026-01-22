@@ -54,8 +54,13 @@ class MyApp extends StatelessWidget {
           ),
         ),
 
-        // Source manager
-        ChangeNotifierProvider(create: (_) => SourceManager()),
+        // Source manager (no SharedPreferences in manager)
+        ChangeNotifierProvider(
+          create: (ctx) => SourceManager(
+            prefs: ctx.read<PreferencesStore>(),
+            logger: ctx.read<PrismLogger>(),
+          ),
+        ),
 
         // WallpaperService (UI 唯一入口)
         ProxyProvider5<Dio, RuleEngine, PixivRepository, PreferencesStore, PrismLogger, WallpaperService>(

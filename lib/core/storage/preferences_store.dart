@@ -5,11 +5,41 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// A thin, centralized persistence layer over [SharedPreferences].
 ///
-/// UI layer MUST NOT depend on raw keys; use this store via [WallpaperService]/[SourceManager].
+/// Architecture constraints:
+/// - Non-core layers MUST NOT import SharedPreferences directly.
+/// - Keys should live here (or within core managers/services), not in UI widgets.
 class PreferencesStore {
   const PreferencesStore();
 
+  // -------------------- generic primitives --------------------
+
+  Future<String?> getString(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(key);
+  }
+
+  Future<void> setString(String key, String value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, value);
+  }
+
+  Future<List<String>?> getStringList(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(key);
+  }
+
+  Future<void> setStringList(String key, List<String> value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(key, value);
+  }
+
+  Future<void> remove(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(key);
+  }
+
   // -------------------- filters --------------------
+
   String _filtersKey(String ruleId) => 'filter_prefs_$ruleId';
 
   Future<Map<String, dynamic>> loadFilters(String ruleId) async {
@@ -36,6 +66,7 @@ class PreferencesStore {
   }
 
   // -------------------- pixiv cookie --------------------
+
   String _pixivCookieKey(String ruleId) => 'pixiv_cookie_$ruleId';
 
   Future<String?> loadPixivCookie(String ruleId) async {
@@ -55,6 +86,7 @@ class PreferencesStore {
   }
 
   // -------------------- pixiv preferences --------------------
+
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
 
   Future<Map<String, dynamic>?> loadPixivPrefsRaw() async {
