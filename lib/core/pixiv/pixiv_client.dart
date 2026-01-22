@@ -8,7 +8,6 @@ class PixivClient {
   /// 全局统一的 Mobile UA (Android Chrome)
   static const String kMobileUserAgent =
       'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
-
   String _userAgent = kMobileUserAgent;
 
   /// 普通日志（关键业务）
@@ -34,7 +33,6 @@ class PixivClient {
       responseType: ResponseType.json,
       validateStatus: (status) => status != null && status < 500,
     );
-
     _installDebugInterceptors();
     _refreshHeaders();
   }
@@ -43,7 +41,6 @@ class PixivClient {
 
   void updateConfig({String? cookie, String? userAgent}) {
     bool changed = false;
-
     if (cookie != null) {
       final c = cookie.trim();
       _cookie = c.isEmpty ? null : c;
@@ -68,13 +65,20 @@ class PixivClient {
     updateConfig(cookie: cookie);
   }
 
+  /// ✅ 修复：安全设置 Header，防止 _cookie 在并发/时序问题下为空时解包崩溃
   void _refreshHeaders() {
     final headers = <String, dynamic>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     };
-    if (hasCookie) headers['Cookie'] = _cookie!;
+    
+    // 安全获取
+    final c = _cookie;
+    if (c != null && c.trim().isNotEmpty) {
+      headers['Cookie'] = c;
+    }
+
     _dio.options.headers = headers;
 
     _debug?.call(
@@ -82,12 +86,19 @@ class PixivClient {
     );
   }
 
+  /// ✅ 修复：同样进行安全检查
   Map<String, String> buildImageHeaders() {
     final out = <String, String>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
     };
-    if (hasCookie) out['Cookie'] = _cookie!;
+    
+    // 安全获取
+    final c = _cookie;
+    if (c != null && c.trim().isNotEmpty) {
+      out['Cookie'] = c;
+    }
+    
     return out;
   }
 
@@ -95,7 +106,6 @@ class PixivClient {
     // 注意：这里会移除已有的 InterceptorsWrapper（你目前项目就是这么写的）
     // 如果你后续在 Dio 上也用 InterceptorsWrapper 做别的事，建议改成只移除“PixivClient 自己加的”那一个。
     _dio.interceptors.removeWhere((i) => i is InterceptorsWrapper);
-
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
@@ -177,7 +187,6 @@ class PixivClient {
     String sMode = 's_tag',
   }) async {
     if (word.trim().isEmpty) return [];
-
     try {
       final resp = await _dio.get(
         '/ajax/search/artworks/${Uri.encodeComponent(word)}',
@@ -192,13 +201,11 @@ class PixivClient {
       );
 
       if ((resp.statusCode ?? 0) >= 400) return [];
-
       final data = resp.data;
       if (data is! Map) return [];
 
       final body = data['body'];
       if (body is! Map) return [];
-
       final container = body['illustManga'] ?? body['illust'];
       if (container is! Map) return [];
 
@@ -229,12 +236,10 @@ class PixivClient {
           'format': 'json',
         },
       );
-
       if ((resp.statusCode ?? 0) >= 400) return [];
 
       final body = resp.data;
       if (body is! Map) return [];
-
       final rankings = body['ranking'] ?? (body['body']?['ranking']);
       if (rankings is! List) return [];
 
@@ -250,13 +255,11 @@ class PixivClient {
     try {
       final resp = await _dio.get('/ajax/illust/$illustId/pages');
       if ((resp.statusCode ?? 0) >= 400) return [];
-
       final data = resp.data;
       if (data is! Map) return [];
 
       final body = data['body'];
       if (body is! List) return [];
-
       return body.map((e) => PixivPageUrls.fromJson(e)).toList();
     } catch (e) {
       _log?.call('PixivClient.getIllustPages exception: $e');
@@ -274,7 +277,6 @@ class PixivClient {
         '/touch/ajax/user/illusts',
         queryParameters: {'user_id': userId, 'p': page},
       );
-
       final data = resp.data;
       if (data is! Map) return [];
       final body = data['body'];
@@ -316,14 +318,11 @@ class PixivIllustBrief {
     this.illustType = 0,
     this.aiType = 0,
   });
-
   bool get isUgoira => illustType == 2;
   bool get isAi => aiType == 2;
-
   factory PixivIllustBrief.fromJson(dynamic json) {
     if (json is! Map) return _empty();
     if (json['id'] == null) return _empty();
-
     return PixivIllustBrief(
       id: _parseString(json['id']),
       title: _parseString(json['title']),
@@ -360,7 +359,6 @@ class PixivIllustBrief {
         height: 0,
         xRestrict: 0,
       );
-
   static String _parseString(dynamic v) => v?.toString() ?? '';
   static int _parseInt(dynamic v) {
     if (v is int) return v;
@@ -376,14 +374,12 @@ class PixivPageUrls {
   final String regular;
   final String small;
   final String thumbMini;
-
   const PixivPageUrls({
     required this.original,
     required this.regular,
     required this.small,
     required this.thumbMini,
   });
-
   factory PixivPageUrls.fromJson(dynamic json) {
     if (json is! Map) return _empty();
     final urls = json['urls'];
