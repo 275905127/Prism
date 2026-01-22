@@ -1,108 +1,126 @@
 // lib/core/services/wallpaper_service.dart
 import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 
 import '../engine/rule_engine.dart';
+import '../errors/error_mapper.dart';
+import '../errors/prism_exception.dart';
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
+import '../network/image_header_policy.dart';
 import '../pixiv/pixiv_repository.dart';
+import '../storage/preferences_store.dart';
 import '../utils/prism_logger.dart';
 
+/// UI 层唯一入口：
+/// - 统一请求编排（Pixiv vs 通用 RuleEngine）
+/// - 统一持久化（filters / pixiv prefs / cookie）
+/// - 统一图片 Headers 策略（防 403）
+/// - 统一错误映射（对 UI 输出友好文案）
 class WallpaperService {
-  final Dio _dio = Dio(
-    BaseOptions(
-      connectTimeout: const Duration(seconds: 15),
-      sendTimeout: const Duration(seconds: 20),
-      receiveTimeout: const Duration(seconds: 25),
-      responseType: ResponseType.json,
-      validateStatus: (s) => s != null && s < 500,
-    ),
-  );
+  final Dio _dio;
+  final RuleEngine _engine;
+  final PixivRepository _pixivRepo;
+  final PreferencesStore _prefs;
+  final PrismLogger _logger;
+  final ErrorMapper _errorMapper;
+  final ImageHeaderPolicy _imageHeaderPolicy;
 
-  late final Dio _pixivDio = _createPixivDioFrom(_dio);
+  WallpaperService({
+    required Dio dio,
+    required RuleEngine engine,
+    required PixivRepository pixivRepo,
+    required PreferencesStore prefs,
+    PrismLogger logger = const AppLogLogger(),
+    ErrorMapper errorMapper = const ErrorMapper(),
+    ImageHeaderPolicy imageHeaderPolicy = const ImageHeaderPolicy(),
+  })  : _dio = dio,
+        _engine = engine,
+        _pixivRepo = pixivRepo,
+        _prefs = prefs,
+        _logger = logger,
+        _errorMapper = errorMapper,
+        _imageHeaderPolicy = imageHeaderPolicy;
 
-  /// 统一日志：关键路径用 log，高频细节用 debug（由 AppLogLogger.debugEnabled 控制）
-  final PrismLogger _logger = const AppLogLogger();
+  // -------------------- pixiv prefs / cookie --------------------
 
-  late final RuleEngine _standardEngine = RuleEngine(dio: _dio, logger: _logger);
-  late final PixivRepository _pixivRepo = PixivRepository(dio: _pixivDio, logger: _logger);
-
-  String? _pixivCookie;
-  bool get hasPixivCookie => (_pixivCookie?.trim().isNotEmpty ?? false);
-
-  // 用于去重：避免重复 setCookie 造成日志与链路抖动
-  String _lastAppliedCookie = '';
-
-  void _applyPixivCookieToRepo(String? cookie, {required String reason}) {
-    final c = (cookie ?? '').trim();
-    if (c == _lastAppliedCookie) {
-      _logger.debug('WallpaperService: skip setCookie (unchanged) reason=$reason len=${c.length}');
-      return;
-    }
-    _lastAppliedCookie = c;
-
-    _pixivRepo.setCookie(c.isEmpty ? null : c);
-    _logger.debug('WallpaperService: repo.setCookie applied reason=$reason len=${c.length}');
-  }
-
-  // UI 设置 Cookie：同步给 Repo + 关键日志
-  void setPixivCookie(String? cookie) {
-    final c = cookie?.trim() ?? '';
-    _pixivCookie = c.isEmpty ? null : c;
-
-    // 立刻生效
-    _applyPixivCookieToRepo(_pixivCookie, reason: 'UI.setPixivCookie');
-
-    // 关键点保留一条即可
-    _logger.log(_pixivCookie == null ? 'Pixiv cookie cleared (UI)' : 'Pixiv cookie set (UI)');
-
-    // 高频细节下沉到 debug
-    _logger.debug('WallpaperService: _pixivCookieLen=${(_pixivCookie ?? '').length}');
-  }
-
-  void setPixivPagesConfig({
-    int? concurrency,
-    Duration? timeoutPerItem,
-    int? retryCount,
-    Duration? retryDelay,
-  }) {
-    final current = _pixivRepo.pagesConfig;
-    final next = current.copyWith(
-      concurrency: concurrency,
-      timeoutPerItem: timeoutPerItem,
-      retryCount: retryCount,
-      retryDelay: retryDelay,
-    );
-    _pixivRepo.updatePagesConfig(next);
-  }
-
-  // 设置 Pixiv 偏好 (画质/屏蔽)
-  void setPixivPreferences({
-    String? imageQuality,
-    List<String>? mutedTags,
-    bool? showAi,
-  }) {
-    final current = _pixivRepo.prefs;
-    final next = current.copyWith(
-      imageQuality: imageQuality,
-      mutedTags: mutedTags,
-      showAi: showAi,
-    );
-    _pixivRepo.updatePreferences(next);
-  }
+  bool isPixivRule(SourceRule? rule) => rule != null && _pixivRepo.supports(rule);
 
   PixivPreferences get pixivPreferences => _pixivRepo.prefs;
   PixivPagesConfig get pixivPagesConfig => _pixivRepo.pagesConfig;
 
-  bool isPixivRule(SourceRule? rule) {
-    if (rule == null) return false;
-    return _pixivRepo.supports(rule);
+  Future<void> hydratePixivContext(SourceRule rule) async {
+    if (!isPixivRule(rule)) return;
+
+    // 1) cookie: prefs 优先，其次 rule.headers
+    String? cookie = await _prefs.loadPixivCookie(rule.id);
+
+    final h = rule.headers;
+    final fromHeaders = ((h?['Cookie'] ?? h?['cookie'])?.toString() ?? '').trim();
+    if ((cookie ?? '').trim().isEmpty && fromHeaders.isNotEmpty) {
+      cookie = fromHeaders;
+      await _prefs.savePixivCookie(rule.id, cookie); // 回填备份
+      _logger.debug('WallpaperService: backfilled pixiv cookie from rule.headers rule=${rule.id}');
+    }
+
+    _pixivRepo.setCookie((cookie ?? '').trim().isEmpty ? null : cookie);
+
+    // 2) prefs
+    final raw = await _prefs.loadPixivPrefsRaw();
+    if (raw != null) {
+      _pixivRepo.updatePreferences(
+        _pixivRepo.prefs.copyWith(
+          imageQuality: raw['quality']?.toString(),
+          showAi: raw['show_ai'] == true,
+          mutedTags: (raw['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
+        ),
+      );
+    }
   }
 
+  Future<void> persistPixivPreferences() async {
+    final p = _pixivRepo.prefs;
+    await _prefs.savePixivPrefsRaw({
+      'quality': p.imageQuality,
+      'show_ai': p.showAi,
+      'muted_tags': p.mutedTags,
+    });
+  }
+
+  Future<void> setPixivCookieForRule(String ruleId, String? cookie) async {
+    final c = (cookie ?? '').trim();
+    await _prefs.savePixivCookie(ruleId, c.isEmpty ? null : c);
+    _pixivRepo.setCookie(c.isEmpty ? null : c);
+    _logger.log(c.isEmpty ? 'Pixiv cookie cleared' : 'Pixiv cookie updated');
+  }
+
+  // -------------------- filters persistence --------------------
+
+  Future<Map<String, dynamic>> loadFilters(String ruleId) => _prefs.loadFilters(ruleId);
+
+  Future<void> saveFilters(String ruleId, Map<String, dynamic> filters) =>
+      _prefs.saveFilters(ruleId, filters);
+
+  // -------------------- image headers --------------------
+
+  Map<String, String>? imageHeadersFor({
+    required UniWallpaper wallpaper,
+    required SourceRule? rule,
+  }) {
+    return _imageHeaderPolicy.headersFor(wallpaper: wallpaper, rule: rule);
+  }
+
+  // -------------------- fetch --------------------
+
   Future<bool> getPixivLoginOk(SourceRule rule) async {
-    if (!_pixivRepo.supports(rule)) return false;
-    _syncPixivCookieFromRule(rule);
-    return _pixivRepo.getLoginOk(rule);
+    if (!isPixivRule(rule)) return false;
+    await hydratePixivContext(rule);
+    try {
+      return await _pixivRepo.getLoginOk(rule);
+    } catch (e) {
+      throw _errorMapper.map(e);
+    }
   }
 
   Future<List<UniWallpaper>> fetch(
@@ -111,145 +129,57 @@ class WallpaperService {
     String? query,
     Map<String, dynamic>? filterParams,
   }) async {
-    if (_pixivRepo.supports(rule)) {
-      _syncPixivCookieFromRule(rule);
-      return _fetchFromPixiv(
+    try {
+      if (isPixivRule(rule)) {
+        await hydratePixivContext(rule);
+        return await _pixivRepo.fetch(
+          rule,
+          page: page,
+          query: query,
+          filterParams: filterParams,
+        );
+      }
+
+      return await _engine.fetch(
         rule,
-        page,
-        query,
+        page: page,
+        query: query,
         filterParams: filterParams,
       );
-    }
-    return _standardEngine.fetch(
-      rule,
-      page: page,
-      query: query,
-      filterParams: filterParams,
-    );
-  }
-
-  void _syncPixivCookieFromRule(SourceRule rule) {
-    final headers = rule.headers;
-
-    // 1) rule.headers 为 null：只能用全局 cookie
-    if (headers == null) {
-      if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
-        _applyPixivCookieToRepo(_pixivCookie, reason: 'sync(rule.headers null -> global)');
-        _logger.debug('WallpaperService: sync cookie from global (rule.headers null)');
-      } else {
-        _applyPixivCookieToRepo(null, reason: 'sync(rule.headers null -> none)');
-        _logger.debug('WallpaperService: sync cookie -> none (rule.headers null & global empty)');
-      }
-      return;
-    }
-
-    // 2) rule.headers 有 Cookie：优先使用规则 Cookie
-    final cookie = (headers['Cookie'] ?? headers['cookie'])?.toString().trim() ?? '';
-    if (cookie.isNotEmpty) {
-      _applyPixivCookieToRepo(cookie, reason: 'sync(rule.headers Cookie)');
-      // 这条在你日志里最吵：降为 debug
-      _logger.debug('Pixiv cookie injected from rule');
-      return;
-    }
-
-    // 3) rule.headers 没 Cookie：回退到全局 cookie，否则清空
-    if (_pixivCookie != null && _pixivCookie!.trim().isNotEmpty) {
-      _applyPixivCookieToRepo(_pixivCookie, reason: 'sync(rule cookie empty -> global)');
-      _logger.debug('WallpaperService: sync cookie from global (rule cookie empty)');
-    } else {
-      _applyPixivCookieToRepo(null, reason: 'sync(rule cookie empty -> clear)');
-      _logger.debug('WallpaperService: sync cookie -> clear (rule cookie empty & global empty)');
+    } catch (e) {
+      final mapped = _errorMapper.map(e);
+      _logger.debug('WallpaperService.fetch failed: ${mapped.debugMessage ?? mapped.userMessage}');
+      throw mapped;
     }
   }
 
-  Future<List<UniWallpaper>> _fetchFromPixiv(
-    SourceRule rule,
-    int page,
-    String? query, {
-    Map<String, dynamic>? filterParams,
-  }) async {
-    final String q =
-        (query != null && query.trim().isNotEmpty) ? query : (rule.defaultKeyword ?? '').trim();
-
-    return _pixivRepo.fetch(
-      rule,
-      page: page,
-      query: q,
-      filterParams: filterParams,
-    );
-  }
-
-  Map<String, String>? getImageHeaders(SourceRule? rule) {
-    if (rule == null) return null;
-
-    if (_pixivRepo.supports(rule)) {
-      _syncPixivCookieFromRule(rule);
-      return _pixivRepo.client.buildImageHeaders();
-    }
-    return rule.buildRequestHeaders();
-  }
+  // -------------------- download bytes --------------------
 
   Future<Uint8List> downloadImageBytes({
     required String url,
     Map<String, String>? headers,
   }) async {
-    final String u = url.trim();
-    if (u.isEmpty) throw Exception('下载地址为空');
+    final u = url.trim();
+    if (u.isEmpty) throw const PrismException(userMessage: '下载地址为空');
 
-    final Map<String, String> finalHeaders = <String, String>{
-      'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      ...?headers,
-    };
-
-    if (u.contains('pximg.net') && !finalHeaders.containsKey('Referer')) {
-      finalHeaders['Referer'] = 'https://www.pixiv.net/';
-    }
-
-    final resp = await _dio.get(
-      u,
-      options: Options(
-        responseType: ResponseType.bytes,
-        headers: finalHeaders,
-        sendTimeout: const Duration(seconds: 20),
-        receiveTimeout: const Duration(seconds: 20),
-      ),
-    );
-
-    final sc = resp.statusCode ?? 0;
-    if (sc >= 400) {
-      throw DioException(
-        requestOptions: resp.requestOptions,
-        response: resp,
-        type: DioExceptionType.badResponse,
-        error: 'HTTP $sc',
+    try {
+      final resp = await _dio.get<List<int>>(
+        u,
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: headers,
+          followRedirects: true,
+          validateStatus: (s) => s != null && s < 500,
+        ),
       );
+
+      final bytes = resp.data;
+      if (bytes == null || bytes.isEmpty) {
+        throw const PrismException(userMessage: '下载失败：返回数据为空');
+      }
+      return Uint8List.fromList(bytes);
+    } catch (e) {
+      throw _errorMapper.map(e);
     }
-
-    final data = resp.data;
-    if (data is! List<int>) throw Exception('下载返回数据类型异常');
-
-    final bytes = Uint8List.fromList(data);
-    if (bytes.lengthInBytes < 100) throw Exception('文件过小，可能是错误页面');
-
-    return bytes;
-  }
-
-  static Dio _createPixivDioFrom(Dio base) {
-    final dio = Dio(
-      BaseOptions(
-        baseUrl: 'https://www.pixiv.net',
-        connectTimeout: base.options.connectTimeout ?? const Duration(seconds: 15),
-        sendTimeout: base.options.sendTimeout ?? const Duration(seconds: 20),
-        receiveTimeout: base.options.receiveTimeout ?? const Duration(seconds: 25),
-        responseType: ResponseType.json,
-        validateStatus: base.options.validateStatus,
-      ),
-    );
-
-    dio.httpClientAdapter = base.httpClientAdapter;
-    dio.interceptors.clear();
-    dio.interceptors.addAll(base.interceptors);
-    return dio;
   }
 }
