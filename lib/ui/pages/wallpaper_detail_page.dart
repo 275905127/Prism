@@ -30,7 +30,7 @@ class WallpaperDetailPage extends StatefulWidget {
 
 class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTickerProviderStateMixin {
   bool _isDownloading = false;
-  
+
   // 图片缩放控制
   final TransformationController _transformController = TransformationController();
   late AnimationController _animationController;
@@ -50,7 +50,9 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       vsync: this,
       duration: const Duration(milliseconds: 200),
     )..addListener(() {
-        _transformController.value = _animation!.value;
+        if (_animation != null) {
+          _transformController.value = _animation!.value;
+        }
       });
   }
 
@@ -62,11 +64,25 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   void _onDoubleTap() {
-    Matrix4 matrix = _transformController.value;
+    final matrix = _transformController.value;
     if (matrix.getMaxScaleOnAxis() > 1.0) {
       _animation = Matrix4Tween(begin: matrix, end: Matrix4.identity()).animate(_animationController);
       _animationController.forward(from: 0);
     }
+  }
+
+  /// ✅ 统一计算图片 headers：
+  /// 1) 优先用 widget.headers（兼容 SearchDelegate 传入）
+  /// 2) 否则由 WallpaperService 基于 activeRule + wallpaper URL 决策（pximg referer/UA 等）
+  Map<String, String>? _resolveImageHeaders() {
+    final passed = widget.headers;
+    if (passed != null && passed.isNotEmpty) return passed;
+
+    final rule = context.read<SourceManager>().activeRule;
+    return context.read<WallpaperService>().imageHeadersFor(
+          wallpaper: widget.wallpaper,
+          rule: rule,
+        );
   }
 
   String _detectExtension(Uint8List bytes) {
@@ -96,12 +112,11 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     if (mounted) _snack("正在下载原图...");
 
     try {
+      final headers = _resolveImageHeaders();
+
       final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
             url: widget.wallpaper.fullUrl,
-            headers: context.read<WallpaperService>().imageHeadersFor(
-              wallpaper: widget.wallpaper,
-              rule: context.read<SourceManager>().activeRule,
-            ),
+            headers: headers,
           );
 
       final String extension = _detectExtension(imageBytes);
@@ -124,7 +139,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   void _shareImage() => Share.share(widget.wallpaper.fullUrl);
-  
+
   void _copyUrl() {
     Clipboard.setData(ClipboardData(text: widget.wallpaper.fullUrl));
     _snack("✅ 链接已复制");
@@ -133,8 +148,8 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   // 🔥 修复：使用 query 参数传递搜索词，而不是构造函数
   void _searchUploader(String uploader) {
     showSearch(
-      context: context, 
-      delegate: WallpaperSearchDelegate(), 
+      context: context,
+      delegate: WallpaperSearchDelegate(),
       query: 'user:$uploader',
     );
   }
@@ -142,8 +157,8 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   // 🔥 修复：使用 query 参数传递搜索词
   void _searchSimilar() {
     showSearch(
-      context: context, 
-      delegate: WallpaperSearchDelegate(), 
+      context: context,
+      delegate: WallpaperSearchDelegate(),
       query: 'like:${widget.wallpaper.id}',
     );
   }
@@ -164,8 +179,9 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final w = widget.wallpaper;
     final heroTag = '${w.sourceId}::${w.id}';
 
-$insert
-    
+    // ✅ 这里定义 resolvedHeaders，供 CachedNetworkImage 使用
+    final resolvedHeaders = _resolveImageHeaders();
+
     // 📝 获取数据，如果为空显示占位符
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
     final String viewsCount = w.views.isNotEmpty ? w.views : "-";
@@ -200,14 +216,12 @@ $insert
             child: GestureDetector(
               onDoubleTap: _onDoubleTap,
               child: Container(
-                // 图片底色保持黑，以免透明图或加载时太亮眼
                 // 改为透明，透出页面的白色背景
                 color: Colors.transparent,
-
                 constraints: BoxConstraints(
                   minHeight: 300,
                   // 限制最大高度，防止超长图占满屏幕无法下滑
-                  maxHeight: MediaQuery.of(context).size.height * 0.85, 
+                  maxHeight: MediaQuery.of(context).size.height * 0.85,
                 ),
                 child: InteractiveViewer(
                   transformationController: _transformController,
@@ -244,10 +258,10 @@ $insert
                       _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
                       _buildSimpleAction(Icons.share, "分享", _shareImage),
                       _buildSimpleAction(
-                        Icons.download, 
-                        "下载原图", 
-                        _isDownloading ? null : _saveImage, 
-                        isProcessing: _isDownloading
+                        Icons.download,
+                        "下载原图",
+                        _isDownloading ? null : _saveImage,
+                        isProcessing: _isDownloading,
                       ),
                     ],
                   ),
@@ -268,7 +282,7 @@ $insert
                             backgroundColor: _accentColor,
                             child: Text(
                               uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                             ),
                           ),
                           const SizedBox(width: 12),
@@ -276,11 +290,18 @@ $insert
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text("上传者: $uploaderName",
-                                    style: const TextStyle(
-                                        color: _textColor, fontWeight: FontWeight.bold, fontSize: 16)),
-                                const Text("点击查看更多作品", 
-                                    style: TextStyle(color: _subTextColor, fontSize: 12)),
+                                Text(
+                                  "上传者: $uploaderName",
+                                  style: const TextStyle(
+                                    color: _textColor,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                                const Text(
+                                  "点击查看更多作品",
+                                  style: TextStyle(color: _subTextColor, fontSize: 12),
+                                ),
                               ],
                             ),
                           ),
@@ -298,7 +319,7 @@ $insert
                                 Text("关注", style: TextStyle(color: _accentColor, fontWeight: FontWeight.bold)),
                               ],
                             ),
-                          )
+                          ),
                         ],
                       ),
                     ),
@@ -307,7 +328,6 @@ $insert
                   const SizedBox(height: 20),
 
                   // --- 详细参数 Grid ---
-                  // 复刻 Wallhaven 侧边栏信息布局
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
@@ -352,7 +372,10 @@ $insert
                       children: [
                         Icon(Icons.label, size: 18, color: _subTextColor),
                         SizedBox(width: 8),
-                        Text("Tags", style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16)),
+                        Text(
+                          "Tags",
+                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -384,7 +407,11 @@ $insert
         child: Column(
           children: [
             isProcessing
-                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor))
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor),
+                  )
                 : Icon(icon, color: _textColor, size: 26),
             const SizedBox(height: 6),
             Text(label, style: const TextStyle(color: _subTextColor, fontSize: 12)),
@@ -404,22 +431,23 @@ $insert
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                t, 
+                t,
                 style: TextStyle(
-                  color: link ? _accentColor : _textColor, 
+                  color: link ? _accentColor : _textColor,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                   decoration: link ? TextDecoration.underline : null,
                   decorationColor: _accentColor,
                 ),
-                maxLines: 1, 
-                overflow: TextOverflow.ellipsis
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
       );
     }
+
     return Row(
       children: [
         item(i1, t1, false),
@@ -433,10 +461,9 @@ $insert
   Widget _buildTag(String tag) {
     return InkWell(
       onTap: () {
-        // 🔥 修复：使用 query 参数传递搜索词
         showSearch(
-          context: context, 
-          delegate: WallpaperSearchDelegate(), 
+          context: context,
+          delegate: WallpaperSearchDelegate(),
           query: tag,
         );
       },
