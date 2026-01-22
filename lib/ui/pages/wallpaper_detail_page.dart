@@ -33,8 +33,11 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
   // 图片缩放控制
   final TransformationController _transformController = TransformationController();
-  late AnimationController _animationController;
+  late final AnimationController _animationController;
   Animation<Matrix4>? _animation;
+
+  // 缓存，避免 build 期间 provider lookup / 反复计算引发重建抖动
+  Map<String, String>? _cachedHeaders;
 
   // Wallhaven Light Theme Colors (复刻白色风格)
   static const Color _bgColor = Colors.white;
@@ -50,10 +53,18 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       vsync: this,
       duration: const Duration(milliseconds: 200),
     )..addListener(() {
-        if (_animation != null) {
-          _transformController.value = _animation!.value;
+        final a = _animation;
+        if (a != null) {
+          _transformController.value = a.value;
         }
       });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // ✅ 只在依赖变化时重新解析 headers，避免每帧 build 都 read provider
+    _cachedHeaders ??= _resolveImageHeaders();
   }
 
   @override
@@ -67,6 +78,11 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final matrix = _transformController.value;
     if (matrix.getMaxScaleOnAxis() > 1.0) {
       _animation = Matrix4Tween(begin: matrix, end: Matrix4.identity()).animate(_animationController);
+      _animationController.forward(from: 0);
+    } else {
+      // 可选：双击放大到 2x（体验更像相册）
+      final zoomed = Matrix4.identity()..scale(2.0);
+      _animation = Matrix4Tween(begin: matrix, end: zoomed).animate(_animationController);
       _animationController.forward(from: 0);
     }
   }
@@ -112,7 +128,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     if (mounted) _snack("正在下载原图...");
 
     try {
-      final headers = _resolveImageHeaders();
+      final headers = _cachedHeaders ?? _resolveImageHeaders();
 
       final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
             url: widget.wallpaper.fullUrl,
@@ -145,7 +161,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     _snack("✅ 链接已复制");
   }
 
-  // 🔥 修复：使用 query 参数传递搜索词，而不是构造函数
+  // 使用 query 参数传递搜索词
   void _searchUploader(String uploader) {
     showSearch(
       context: context,
@@ -154,7 +170,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  // 🔥 修复：使用 query 参数传递搜索词
   void _searchSimilar() {
     showSearch(
       context: context,
@@ -164,6 +179,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   void _snack(String msg) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg, style: const TextStyle(color: Colors.white)),
@@ -174,15 +190,23 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
+  // ✅ 关键：固定图片展示区高度，避免 Sliver child 因图片 decode 改变高度导致“跳一下”
+  double _imageViewportHeight(BuildContext context) {
+    final screenH = MediaQuery.of(context).size.height;
+    // 你原本 maxHeight=0.85，这里直接固定为同等上限：稳定、可预期
+    final h = screenH * 0.85;
+    // 下限避免极小屏过小
+    return h.clamp(320.0, 900.0);
+  }
+
   @override
   Widget build(BuildContext context) {
     final w = widget.wallpaper;
     final heroTag = '${w.sourceId}::${w.id}';
 
-    // ✅ 这里定义 resolvedHeaders，供 CachedNetworkImage 使用
-    final resolvedHeaders = _resolveImageHeaders();
+    final resolvedHeaders = _cachedHeaders ?? _resolveImageHeaders();
 
-    // 📝 获取数据，如果为空显示占位符
+    // 数据占位
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
     final String viewsCount = w.views.isNotEmpty ? w.views : "-";
     final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
@@ -194,13 +218,13 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final hasSize = w.width > 0 && w.height > 0;
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
 
+    final double viewportH = _imageViewportHeight(context);
+
     return Scaffold(
       backgroundColor: _bgColor,
-      // 使用 CustomScrollView 实现图片随滚动推上去的效果
       body: CustomScrollView(
         physics: const BouncingScrollPhysics(),
         slivers: [
-          // 1. 顶部栏 (透明/悬浮)
           SliverAppBar(
             backgroundColor: Colors.transparent,
             elevation: 0,
@@ -211,29 +235,33 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
             ),
           ),
 
-          // 2. 图片展示区 (SliverToBoxAdapter)
+          // ✅ 图片区：固定高度 + 固定布局盒子 + 渐进式加载
           SliverToBoxAdapter(
             child: GestureDetector(
               onDoubleTap: _onDoubleTap,
-              child: Container(
-                // 改为透明，透出页面的白色背景
-                color: Colors.transparent,
-                constraints: BoxConstraints(
-                  minHeight: 300,
-                  // 限制最大高度，防止超长图占满屏幕无法下滑
-                  maxHeight: MediaQuery.of(context).size.height * 0.85,
-                ),
-                child: InteractiveViewer(
-                  transformationController: _transformController,
-                  minScale: 1.0,
-                  maxScale: 4.0,
+              child: SizedBox(
+                height: viewportH,
+                width: double.infinity,
+                child: Container(
+                  color: Colors.transparent,
                   child: Hero(
                     tag: heroTag,
-                    child: CachedNetworkImage(
-                      imageUrl: w.fullUrl,
-                      httpHeaders: resolvedHeaders,
-                      errorWidget: (_, __, ___) => const Center(
-                        child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
+                    // ✅ Hero 只包“固定尺寸的盒子”，避免 Hero 结束后又因图片尺寸变化二次跳动
+                    child: ClipRect(
+                      child: InteractiveViewer(
+                        transformationController: _transformController,
+                        minScale: 1.0,
+                        maxScale: 4.0,
+                        // 可选：避免边缘溢出空白闪动
+                        clipBehavior: Clip.hardEdge,
+                        child: SizedBox.expand(
+                          // ✅ SizedBox.expand 锁定 child 的布局尺寸
+                          child: _ProgressiveImage(
+                            thumbUrl: w.thumbUrl,
+                            fullUrl: w.fullUrl,
+                            headers: resolvedHeaders,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -242,7 +270,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
             ),
           ),
 
-          // 3. 信息详情区 (白底)
+          // 信息区
           SliverToBoxAdapter(
             child: Container(
               color: Colors.white,
@@ -250,7 +278,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // --- 操作栏 (复制/分享/下载) ---
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
@@ -269,7 +296,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                   const Divider(height: 1, color: Color(0xFFEEEEEE)),
                   const SizedBox(height: 24),
 
-                  // --- 上传者信息 ---
                   InkWell(
                     onTap: () => _searchUploader(uploaderName),
                     borderRadius: BorderRadius.circular(8),
@@ -305,7 +331,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                               ],
                             ),
                           ),
-                          // 关注按钮样式
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
@@ -327,7 +352,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
                   const SizedBox(height: 20),
 
-                  // --- 详细参数 Grid ---
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
@@ -349,7 +373,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
                   const SizedBox(height: 20),
 
-                  // --- 相似搜索按钮 ---
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
@@ -366,7 +389,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
                   const SizedBox(height: 24),
 
-                  // --- 标签区域 ---
                   if (w.tags.isNotEmpty) ...[
                     const Row(
                       children: [
@@ -386,7 +408,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                     ),
                   ],
 
-                  // 底部留白
                   SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
                 ],
               ),
@@ -397,7 +418,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  // 构建简单的图标+文字按钮 (无背景)
   Widget _buildSimpleAction(IconData icon, String label, VoidCallback? onTap, {bool isProcessing = false}) {
     return InkWell(
       onTap: onTap,
@@ -421,7 +441,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  // 构建一行两个信息
   Widget _buildInfoRow(IconData i1, String t1, IconData i2, String t2, {bool isLink = false}) {
     Widget item(IconData i, String t, bool link) {
       return Expanded(
@@ -457,7 +476,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  // 构建胶囊标签
   Widget _buildTag(String tag) {
     return InkWell(
       onTap: () {
@@ -480,6 +498,79 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
           style: const TextStyle(color: _textColor, fontSize: 13),
         ),
       ),
+    );
+  }
+}
+
+/// ✅ 渐进式图片：thumb 先出图，full 成功后淡入覆盖；
+/// 关键是：外层 SizedBox.expand 锁住布局尺寸，内部用 FittedBox(contain) 适配，避免任何“加载前后布局变化”。
+class _ProgressiveImage extends StatelessWidget {
+  final String thumbUrl;
+  final String fullUrl;
+  final Map<String, String>? headers;
+
+  const _ProgressiveImage({
+    required this.thumbUrl,
+    required this.fullUrl,
+    required this.headers,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fitted(Widget child) {
+      return Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: child,
+        ),
+      );
+    }
+
+    // 注意：FittedBox 需要 child 有“自身尺寸”，这里用 Image 组件提供 intrinsic；
+    // 外层布局已被 SizedBox.expand 锁死，不会反向影响 Sliver 高度。
+    final thumb = CachedNetworkImage(
+      imageUrl: thumbUrl,
+      httpHeaders: headers,
+      fadeInDuration: Duration.zero,
+      fadeOutDuration: Duration.zero,
+      errorWidget: (_, __, ___) => const SizedBox.shrink(),
+      // 让其尽快解码
+      placeholder: (_, __) => const SizedBox.shrink(),
+    );
+
+    final full = CachedNetworkImage(
+      imageUrl: fullUrl,
+      httpHeaders: headers,
+      fadeInDuration: const Duration(milliseconds: 150),
+      fadeOutDuration: Duration.zero,
+      placeholder: (_, __) => const SizedBox.shrink(),
+      errorWidget: (_, __, ___) => const Center(
+        child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
+      ),
+    );
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // 背景：避免透明导致的视觉“闪一下”
+        Container(color: Colors.transparent),
+
+        // thumb
+        fitted(thumb),
+
+        // full（淡入覆盖）
+        fitted(full),
+
+        // 中央 loading（只要 full 没出来，它也不会撑布局）
+        const Align(
+          alignment: Alignment.center,
+          child: SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+          ),
+        ),
+      ],
     );
   }
 }
