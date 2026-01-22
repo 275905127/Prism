@@ -3,19 +3,19 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'core/manager/source_manager.dart';
+import 'core/services/wallpaper_service.dart';
+import 'ui/controllers/home_controller.dart';
 import 'ui/pages/home_page.dart';
-import 'core/services/wallpaper_service.dart'; // 引入 Service
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 1. 设置沉浸式，并预设图标为黑色
+
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     systemNavigationBarColor: Colors.transparent,
     statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.dark,     // 🔥 Android: 图标变黑
-    statusBarBrightness: Brightness.light,        // 🔥 iOS: 图标变黑
+    statusBarIconBrightness: Brightness.dark,
+    statusBarBrightness: Brightness.light,
   ));
 
   runApp(const MyApp());
@@ -29,8 +29,19 @@ class MyApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => SourceManager()),
-        // 🔥 新增：注册 WallpaperService
         Provider(create: (_) => WallpaperService()),
+
+        /// HomeController 需要同时依赖 SourceManager + WallpaperService
+        ChangeNotifierProxyProvider2<SourceManager, WallpaperService, HomeController>(
+          create: (ctx) => HomeController(
+            sourceManager: ctx.read<SourceManager>(),
+            service: ctx.read<WallpaperService>(),
+          ),
+          update: (_, sourceManager, service, controller) {
+            controller!.updateDeps(sourceManager: sourceManager, service: service);
+            return controller;
+          },
+        ),
       ],
       child: MaterialApp(
         title: 'Prism',
@@ -40,9 +51,7 @@ class MyApp extends StatelessWidget {
           scaffoldBackgroundColor: Colors.white,
           canvasColor: Colors.white,
           primaryColor: Colors.black,
-          cardColor: const Color(0xFFF8F9FA), 
-
-          // 🔥 全局强制 AppBar 的状态栏图标为黑色
+          cardColor: const Color(0xFFF8F9FA),
           appBarTheme: const AppBarTheme(
             backgroundColor: Colors.white,
             foregroundColor: Colors.black,
@@ -51,11 +60,10 @@ class MyApp extends StatelessWidget {
             iconTheme: IconThemeData(color: Colors.black),
             systemOverlayStyle: SystemUiOverlayStyle(
               statusBarColor: Colors.transparent,
-              statusBarIconBrightness: Brightness.dark, // Android 黑图标
-              statusBarBrightness: Brightness.light,    // iOS 黑图标
+              statusBarIconBrightness: Brightness.dark,
+              statusBarBrightness: Brightness.light,
             ),
           ),
-
           drawerTheme: const DrawerThemeData(
             backgroundColor: Colors.white,
             elevation: 0,
