@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/manager/source_manager.dart';
@@ -33,8 +32,6 @@ class _HomePageState extends State<HomePage> {
   // 避免重复弹 SnackBar
   String _lastShownError = '';
 
-  static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
-  static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
 
   @override
   void dispose() {
@@ -45,15 +42,7 @@ class _HomePageState extends State<HomePage> {
   // ---------- Pixiv Preferences ----------
   Future<void> _savePixivPreferences() async {
     try {
-      final service = context.read<WallpaperService>();
-      final p = service.pixivPreferences;
-      final m = {
-        'quality': p.imageQuality,
-        'show_ai': p.showAi,
-        'muted_tags': p.mutedTags,
-      };
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kPixivPrefsKey, jsonEncode(m));
+      await context.read<WallpaperService>().persistPixivPreferences();
     } catch (_) {}
   }
 
@@ -269,7 +258,7 @@ class _HomePageState extends State<HomePage> {
             logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
 
             try {
-              wallpaperService.setPixivCookie(cookie);
+              await wallpaperService.setPixivCookieForRule(active.id, cookie);
               logger.log('Pixiv cookie injected into WallpaperService (UI) len=${cookie.length}');
 
               await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
@@ -277,9 +266,7 @@ class _HomePageState extends State<HomePage> {
 
               // 备份到 prefs
               try {
-                final prefs = await SharedPreferences.getInstance();
-                final key = _pixivCookiePrefsKey(active.id);
-                await prefs.setString(key, cookie);
+                await context.read<WallpaperService>().setPixivCookieForRule(active.id, cookie);
                 logger.log('Pixiv cookie backup saved to prefs key=$key');
               } catch (e) {
                 logger.log('Pixiv cookie backup prefs failed: $e');
@@ -550,24 +537,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ---------- Grid helpers ----------
-  Map<String, String>? _buildSafeImageHeaders({
-    required UniWallpaper paper,
-    required Map<String, String>? baseHeaders,
-  }) {
-    final headers = <String, String>{...?(baseHeaders ?? const <String, String>{})};
-
-    final u = paper.thumbUrl.trim();
-    final isPximg = u.contains('pximg.net');
-    if (isPximg) {
-      headers.putIfAbsent('Referer', () => 'https://www.pixiv.net/');
-      headers.putIfAbsent(
-        'User-Agent',
-        () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      );
-    }
-    if (headers.isEmpty) return null;
-    return headers;
-  }
 
   Widget _buildWallpaperItem({
     required BuildContext context,
@@ -588,7 +557,8 @@ class _HomePageState extends State<HomePage> {
     const double kRadius = 6.0;
     const double kBorderWidth = 1.5;
 
-    final headers = _buildSafeImageHeaders(paper: paper, baseHeaders: baseHeaders);
+    final rule = context.read<SourceManager>().activeRule;
+    final headers = context.read<WallpaperService>().imageHeadersFor(wallpaper: paper, rule: rule);
 
     final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
@@ -882,7 +852,6 @@ class _HomePageState extends State<HomePage> {
                           MaterialPageRoute(
                             builder: (_) => WallpaperDetailPage(
                               wallpaper: paper,
-                              headers: baseHeaders,
                             ),
                           ),
                         ),
