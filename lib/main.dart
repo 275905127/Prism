@@ -1,9 +1,15 @@
+// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import 'core/engine/rule_engine.dart';
 import 'core/manager/source_manager.dart';
+import 'core/network/dio_factory.dart';
+import 'core/pixiv/pixiv_repository.dart';
 import 'core/services/wallpaper_service.dart';
+import 'core/storage/preferences_store.dart';
+import 'core/utils/prism_logger.dart';
 import 'ui/controllers/home_controller.dart';
 import 'ui/pages/home_page.dart';
 
@@ -28,14 +34,46 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => SourceManager()),
-        Provider(create: (_) => WallpaperService()),
+        Provider<PrismLogger>(create: (_) => const AppLogLogger()),
+        Provider<PreferencesStore>(create: (_) => const PreferencesStore()),
+        Provider<DioFactory>(create: (_) => const DioFactory()),
 
-        /// HomeController 需要同时依赖 SourceManager + WallpaperService
+        // Base Dio singleton
+        ProxyProvider2<DioFactory, PrismLogger, Dio>(
+          update: (_, factory, logger, __) => factory.createBaseDio(logger: logger),
+        ),
+
+        // Core engine / repos
+        ProxyProvider2<Dio, PrismLogger, RuleEngine>(
+          update: (_, dio, logger, __) => RuleEngine(dio: dio, logger: logger),
+        ),
+        ProxyProvider3<DioFactory, Dio, PrismLogger, PixivRepository>(
+          update: (_, factory, baseDio, logger, __) => PixivRepository(
+            dio: factory.createPixivDioFrom(baseDio, logger: logger),
+            logger: logger,
+          ),
+        ),
+
+        // Source manager
+        ChangeNotifierProvider(create: (_) => SourceManager()),
+
+        // WallpaperService (UI 唯一入口)
+        ProxyProvider5<Dio, RuleEngine, PixivRepository, PreferencesStore, PrismLogger, WallpaperService>(
+          update: (_, dio, engine, repo, prefs, logger, __) => WallpaperService(
+            dio: dio,
+            engine: engine,
+            pixivRepo: repo,
+            prefs: prefs,
+            logger: logger,
+          ),
+        ),
+
+        /// HomeController 依赖 SourceManager + WallpaperService
         ChangeNotifierProxyProvider2<SourceManager, WallpaperService, HomeController>(
           create: (ctx) => HomeController(
             sourceManager: ctx.read<SourceManager>(),
             service: ctx.read<WallpaperService>(),
+            logger: ctx.read<PrismLogger>(),
           ),
           update: (_, sourceManager, service, controller) {
             controller!.updateDeps(sourceManager: sourceManager, service: service);
