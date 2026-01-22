@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:dio/dio.dart';
 
 import 'core/engine/rule_engine.dart';
 import 'core/manager/source_manager.dart';
@@ -54,13 +55,8 @@ class MyApp extends StatelessWidget {
           ),
         ),
 
-        // Source manager (no SharedPreferences in manager)
-        ChangeNotifierProvider(
-          create: (ctx) => SourceManager(
-            prefs: ctx.read<PreferencesStore>(),
-            logger: ctx.read<PrismLogger>(),
-          ),
-        ),
+        // Source manager
+        ChangeNotifierProvider(create: (_) => SourceManager()),
 
         // WallpaperService (UI 唯一入口)
         ProxyProvider5<Dio, RuleEngine, PixivRepository, PreferencesStore, PrismLogger, WallpaperService>(
