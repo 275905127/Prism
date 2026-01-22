@@ -17,11 +17,12 @@ class HomeController extends ChangeNotifier {
   HomeController({
     required SourceManager sourceManager,
     required WallpaperService service,
-    PrismLogger logger = const AppLogLogger(),
+    required PrismLogger logger,
   })  : _sourceManager = sourceManager,
         _service = service,
         _logger = logger {
     _bindSourceManager(sourceManager);
+    // 启动时强制跑一次规则同步
     _handleRuleMaybeChanged(force: true);
   }
 
@@ -53,11 +54,13 @@ class HomeController extends ChangeNotifier {
 
   Map<String, dynamic> _currentFilters = <String, dynamic>{};
   String? _currentRuleId;
-
   String? _lastError;
 
   // 防止“异步回调晚到”覆盖新状态
   int _requestSeq = 0;
+
+  // 防止 loadMore 并发
+  bool _pagingInFlight = false;
 
   // -------------------- dependency update --------------------
 
@@ -112,13 +115,26 @@ class HomeController extends ChangeNotifier {
 
   Future<void> refresh() async => _fetchData(refresh: true);
 
-  Future<void> loadMore() async => _fetchData(refresh: false);
+  Future<void> loadMore() async {
+    // 避免并发分页
+    if (_pagingInFlight) return;
+    _pagingInFlight = true;
+    try {
+      await _fetchData(refresh: false);
+    } finally {
+      _pagingInFlight = false;
+    }
+  }
 
   Future<void> applyFilters(Map<String, dynamic> newFilters) async {
     _currentFilters = Map<String, dynamic>.from(newFilters);
     final rule = _sourceManager.activeRule;
     if (rule != null) {
-      await _service.saveFilters(rule.id, _currentFilters);
+      try {
+        await _service.saveFilters(rule.id, _currentFilters);
+      } catch (e) {
+        _logger.debug('HomeController: saveFilters failed: $e');
+      }
     }
     await refresh();
   }
@@ -133,6 +149,7 @@ class HomeController extends ChangeNotifier {
 
     _currentRuleId = ruleId;
 
+    // 重置页面状态
     _wallpapers = <UniWallpaper>[];
     _loading = false;
     _page = 1;
@@ -144,16 +161,26 @@ class HomeController extends ChangeNotifier {
 
     if (rule == null) return;
 
-    try {
-      _currentFilters = await _service.loadFilters(rule.id);
-      notifyListeners();
+    final localRuleId = rule.id;
 
-      // Pixiv: hydrate cookie + prefs once per rule switch
-      await _service.hydratePixivContext(rule);
+    // 规则切换时：先加载 filters，再尽力 hydrate pixiv 上下文（不阻断 refresh）
+    try {
+      _currentFilters = await _service.loadFilters(localRuleId);
+      if (_disposed) return;
+      if (_currentRuleId != localRuleId) return;
+      notifyListeners();
     } catch (e) {
-      _logger.debug('HomeController: init for rule failed: $e');
+      _logger.debug('HomeController: loadFilters failed: $e');
     }
 
+    try {
+      await _service.hydratePixivContext(rule);
+    } catch (e) {
+      // 这里不让异常中断刷新，否则就会表现为“刷不出图”
+      _logger.debug('HomeController: hydratePixivContext failed: $e');
+    }
+
+    // 不管 hydrate 成功与否都刷新
     await refresh();
   }
 
@@ -164,25 +191,32 @@ class HomeController extends ChangeNotifier {
     if (rule == null) return;
     if (_loading) return;
 
+    final String localRuleId = rule.id;
     final int seq = ++_requestSeq;
 
     _loading = true;
     _lastError = null;
+
     if (refresh) {
       _page = 1;
       _hasMore = true;
     }
+
     notifyListeners();
 
     try {
+      final int pageToFetch = _page;
+
       final data = await _service.fetch(
         rule,
-        page: _page,
+        page: pageToFetch,
         filterParams: _currentFilters,
       );
 
       if (_disposed) return;
+      // 请求过期：seq 变化或 rule 变化都忽略
       if (seq != _requestSeq) return;
+      if (_currentRuleId != localRuleId) return;
 
       if (refresh) {
         _wallpapers = data;
@@ -198,15 +232,19 @@ class HomeController extends ChangeNotifier {
       }
 
       if (data.isEmpty) _hasMore = false;
-      if (_hasMore) _page++;
+      if (_hasMore) _page = pageToFetch + 1;
 
       _loading = false;
       notifyListeners();
     } catch (e) {
       if (_disposed) return;
       if (seq != _requestSeq) return;
+      if (_currentRuleId != localRuleId) return;
 
       _loading = false;
+
+      // 真实异常写日志，UI 只拿友好提示
+      _logger.debug('HomeController: fetch failed: $e');
 
       final msg = (e is PrismException) ? e.userMessage : '加载失败，请稍后重试。';
       _lastError = msg;
