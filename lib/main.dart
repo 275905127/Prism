@@ -35,19 +35,21 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        // ---------- Core singletons ----------
         Provider<PrismLogger>(create: (_) => const AppLogLogger()),
         Provider<PreferencesStore>(create: (_) => const PreferencesStore()),
         Provider<DioFactory>(create: (_) => const DioFactory()),
 
-        // Base Dio singleton
+        // ---------- Base Dio singleton ----------
         ProxyProvider2<DioFactory, PrismLogger, Dio>(
           update: (_, factory, logger, __) => factory.createBaseDio(logger: logger),
         ),
 
-        // Core engine / repos
+        // ---------- Core engine / repos ----------
         ProxyProvider2<Dio, PrismLogger, RuleEngine>(
           update: (_, dio, logger, __) => RuleEngine(dio: dio, logger: logger),
         ),
+
         ProxyProvider3<DioFactory, Dio, PrismLogger, PixivRepository>(
           update: (_, factory, baseDio, logger, __) => PixivRepository(
             dio: factory.createPixivDioFrom(baseDio, logger: logger),
@@ -55,15 +57,24 @@ class MyApp extends StatelessWidget {
           ),
         ),
 
-        // ✅ Source manager (no SharedPreferences)
-        ChangeNotifierProvider(
+        // ---------- SourceManager (depends on prefs + logger) ----------
+        ChangeNotifierProxyProvider2<PreferencesStore, PrismLogger, SourceManager>(
           create: (ctx) => SourceManager(
             prefs: ctx.read<PreferencesStore>(),
             logger: ctx.read<PrismLogger>(),
           ),
+          update: (_, prefs, logger, existing) {
+            // SourceManager 没有 updateDeps，且 prefs/logger 本身是单例；
+            // 为避免 rebuild 时出现 null，我们这里永远返回一个非空实例。
+            return existing ??
+                SourceManager(
+                  prefs: prefs,
+                  logger: logger,
+                );
+          },
         ),
 
-        // WallpaperService (UI 唯一入口)
+        // ---------- WallpaperService (UI 唯一入口) ----------
         ProxyProvider5<Dio, RuleEngine, PixivRepository, PreferencesStore, PrismLogger, WallpaperService>(
           update: (_, dio, engine, repo, prefs, logger, __) => WallpaperService(
             dio: dio,
@@ -74,16 +85,24 @@ class MyApp extends StatelessWidget {
           ),
         ),
 
-        /// HomeController 依赖 SourceManager + WallpaperService
-        ChangeNotifierProxyProvider2<SourceManager, WallpaperService, HomeController>(
+        // ---------- HomeController (depends on SourceManager + WallpaperService + PrismLogger) ----------
+        ChangeNotifierProxyProvider3<SourceManager, WallpaperService, PrismLogger, HomeController>(
           create: (ctx) => HomeController(
             sourceManager: ctx.read<SourceManager>(),
             service: ctx.read<WallpaperService>(),
             logger: ctx.read<PrismLogger>(),
           ),
-          update: (_, sourceManager, service, controller) {
-            controller!.updateDeps(sourceManager: sourceManager, service: service);
-            return controller;
+          update: (ctx, sourceManager, service, logger, controller) {
+            // ✅ 关键修复：禁止 controller! 空断言
+            final c = controller ??
+                HomeController(
+                  sourceManager: sourceManager,
+                  service: service,
+                  logger: logger,
+                );
+
+            c.updateDeps(sourceManager: sourceManager, service: service);
+            return c;
           },
         ),
       ],
