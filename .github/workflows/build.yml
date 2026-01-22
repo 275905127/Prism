@@ -36,7 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # 给 push/pr 提供默认值（因为它们没有 inputs）
     env:
       BUILD_APK: ${{ github.event_name == 'workflow_dispatch' && inputs.build_apk || 'false' }}
       BUILD_AAB: ${{ github.event_name == 'workflow_dispatch' && inputs.build_aab || 'false' }}
@@ -52,35 +51,18 @@ jobs:
         with:
           distribution: "temurin"
           java-version: "17"
+          # 注意：这里已经启用了官方 gradle cache（够用且稳定）
           cache: "gradle"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: "stable"
+          # 让 flutter-action 负责 pub/SDK cache，避免重复缓存与路径校验 warning
           cache: true
 
       - name: Flutter version
         run: flutter --version
-
-      - name: Cache pub
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pub-
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-${{ hashFiles('**/*.gradle*', '**/gradle.properties', '**/settings.gradle*') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
 
       - name: Debug inputs
         run: |
@@ -103,7 +85,6 @@ jobs:
       - name: Analyze (strict)
         if: ${{ env.STRICT_ANALYZE == 'true' }}
         run: flutter analyze
-
 
       # 只有在 workflow_dispatch 且需要构建 release（apk 或 aab）时才准备签名文件
       - name: Decode keystore & write key.properties
