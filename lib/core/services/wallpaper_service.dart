@@ -218,14 +218,33 @@ class WallpaperService {
         // hydrate 不允许阻断 pixiv fetch
         await hydratePixivContext(rule);
 
+        // ✅✅✅ 修复逻辑开始：处理 Pixiv 主页无图问题 ✅✅✅
+        String finalQuery = (query ?? '').trim();
+
+        // 1. 如果 Query 为空，尝试使用 Rule 定义的默认关键字
+        if (finalQuery.isEmpty) {
+          if (rule.defaultKeyword != null && rule.defaultKeyword!.trim().isNotEmpty) {
+            finalQuery = rule.defaultKeyword!.trim();
+          }
+        }
+
+        // 2. 如果还是为空（规则也没配），强制兜底到 'ranking_daily' (日榜)
+        // 这样保证了主页永远不会因为空参数而返回空列表
+        if (finalQuery.isEmpty) {
+          finalQuery = 'ranking_daily';
+          _logger.debug('WallpaperService: Pixiv query empty, fallback to ranking_daily');
+        }
+        // ✅✅✅ 修复逻辑结束 ✅✅✅
+
         return await _pixivRepo.fetch(
           rule,
           page: page,
-          query: query,
+          query: finalQuery, // 使用处理后的 Query
           filterParams: filterParams,
         );
       }
 
+      // 通用引擎本身已经有 defaultKeyword 的处理逻辑，可以直接透传
       return await _engine.fetch(
         rule,
         page: page,
