@@ -135,11 +135,22 @@ class _HomePageState extends State<HomePage> {
   // ---------- Pixiv Web Login ----------
   void _openPixivWebLogin(BuildContext context) async {
     // ✅ 必须从 Provider 取全局 logger，避免你本地 new 导致日志系统割裂
-    final PrismLogger logger = context.read<PrismLogger>();
+    final PrismLogger logger = this.context.read<PrismLogger>();
 
-    final sourceManager = context.read<SourceManager>();
-    final wallpaperService = context.read<WallpaperService>();
+    final sourceManager = this.context.read<SourceManager>();
+    final wallpaperService = this.context.read<WallpaperService>();
     final rule = sourceManager.activeRule;
+
+    // ✅ 关键修复：在打开 sheet 之前，用 HomePage 的 State.context 预先缓存 HomeController
+    // 之后整个 sheet 生命周期中都不要再 read Provider（避免 Element deactivated -> Element.widget null）。
+    late final HomeController homeController;
+    try {
+      homeController = this.context.read<HomeController>();
+    } catch (e, st) {
+      logger.log('Pixiv pre-read HomeController failed (UI): $e\n$st');
+      _snack('无法获取 HomeController（页面状态异常），请返回重试');
+      return;
+    }
 
     String targetUA = PixivClient.kMobileUserAgent;
     if (rule != null && rule.headers != null) {
@@ -199,7 +210,7 @@ class _HomePageState extends State<HomePage> {
     bool saving = false;
 
     await showModalBottomSheet<void>(
-      context: context,
+      context: this.context,
       isDismissible: false,
       enableDrag: false,
       isScrollControlled: true,
@@ -237,8 +248,8 @@ class _HomePageState extends State<HomePage> {
           }
 
           /// ✅ 修复点：
-          /// - 绝不在 post-frame 回调中使用 context.read（会触发 Element.widget 为 null 的崩溃）
-          /// - pop 之前先缓存 HomeController 实例，后续只调实例方法
+          /// - sheet 内不再使用 context.read<HomeController>()，全部使用外层缓存的 homeController
+          /// - pop 后 refresh 依旧延迟到下一帧，避免 UI 竞态
           Future<void> doSave() async {
             if (saving) return;
 
@@ -253,16 +264,6 @@ class _HomePageState extends State<HomePage> {
             if (active == null) {
               logger.log('Pixiv save failed (UI): activeRule null');
               snack(ctx, '保存失败：activeRule 为空');
-              return;
-            }
-
-            // ✅ 关键：提前取 HomeController，避免 post-frame 用 context.read 崩溃
-            HomeController? homeController;
-            try {
-              homeController = context.read<HomeController>();
-            } catch (e, st) {
-              logger.log('Pixiv pre-read HomeController failed (UI): $e\n$st');
-              snack(ctx, '保存失败：无法获取 HomeController');
               return;
             }
 
@@ -287,12 +288,11 @@ class _HomePageState extends State<HomePage> {
                 Navigator.pop(ctx);
               }
 
-              // ✅ 延迟到下一帧再刷新（但不再使用 context.read）
+              // ✅ 延迟到下一帧再刷新（不依赖 Provider lookup）
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 () async {
                   try {
-                    // 这里可以不依赖 mounted/context；即便 UI 正在切换，也不该崩
-                    await homeController!.refresh();
+                    await homeController.refresh();
 
                     if (mounted && _scrollController.hasClients) {
                       _scrollController.animateTo(
