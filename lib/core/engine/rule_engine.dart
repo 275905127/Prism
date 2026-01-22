@@ -32,7 +32,6 @@ class RuleEngine {
     dynamic cur = source;
     for (final part in path.split('.')) {
       if (cur == null) return null;
-
       if (cur is Map) {
         cur = cur[part];
         continue;
@@ -88,20 +87,36 @@ class RuleEngine {
     return '${v.substring(0, 12)}***';
   }
 
+  /// ✅ 修复核心：安全处理 Headers 脱敏，防止 value 为 null 时崩溃
   Map<String, String> _maskHeaders(Map<String, String> headers) {
-    final m = Map<String, String>.from(headers);
-    if (m.containsKey('Authorization')) m['Authorization'] = _mask(m['Authorization']!);
-    if (m.containsKey('apikey')) m['apikey'] = _mask(m['apikey']!);
-    if (m.containsKey('Api-Key')) m['Api-Key'] = _mask(m['Api-Key']!);
-    if (m.containsKey('X-Api-Key')) m['X-Api-Key'] = _mask(m['X-Api-Key']!);
-    if (m.containsKey('Cookie')) m['Cookie'] = '***';
-    return m;
+    // 1. 允许 dynamic，防止 map 内有 null 时直接崩
+    final m = Map<String, dynamic>.from(headers);
+
+    String safeVal(dynamic v) => v?.toString() ?? '';
+
+    if (m.containsKey('Authorization')) {
+      m['Authorization'] = _mask(safeVal(m['Authorization']));
+    }
+    if (m.containsKey('apikey')) {
+      m['apikey'] = _mask(safeVal(m['apikey']));
+    }
+    if (m.containsKey('Api-Key')) {
+      m['Api-Key'] = _mask(safeVal(m['Api-Key']));
+    }
+    if (m.containsKey('X-Api-Key')) {
+      m['X-Api-Key'] = _mask(safeVal(m['X-Api-Key']));
+    }
+    if (m.containsKey('Cookie')) {
+      m['Cookie'] = '***';
+    }
+
+    // 2. 转回 String Map，确保无 null
+    return m.map((k, v) => MapEntry(k, safeVal(v)));
   }
 
   void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
     // ✅ 重要节点：请求开始（单行）
     _logger?.log('REQ ${rule.id} GET $url');
-
     // ✅ 高频细节：放到 debug
     _logger?.debug('    params=$params');
     _logger?.debug('    headers=${_maskHeaders(headers)}');
@@ -110,7 +125,6 @@ class RuleEngine {
   void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
     // ✅ 重要节点：响应摘要（单行）
     _logger?.log('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
-
     // ✅ 高频细节：body 截断，仅 debug
     final s = (data == null) ? '' : data.toString();
     if (s.isNotEmpty) {
@@ -167,7 +181,6 @@ class RuleEngine {
   // ---------- 参数写入（空参过滤统一入口） ----------
   void _putParam(Map<String, dynamic> params, String key, dynamic value) {
     if (value == null) return;
-
     if (value is String) {
       if (value.trim().isEmpty) return;
       params[key] = value;
@@ -188,7 +201,6 @@ class RuleEngine {
   // 支持 rule.url 里写 {keyword}/{word}/{q}，用于 Pixiv 这种 keyword 在 path 的接口
   String _buildRequestUrl(SourceRule rule, String? finalQuery) {
     final u = rule.url;
-
     final hasTpl = u.contains('{keyword}') || u.contains('{word}') || u.contains('{q}');
     if (!hasTpl) return u;
 
@@ -216,7 +228,6 @@ class RuleEngine {
       ..._defaultUA(),
       ...?rule.headers,
     };
-
     // apiKey
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
@@ -263,7 +274,6 @@ class RuleEngine {
 
     // ✅✅✅ 关键字策略
     String? finalQuery = query;
-
     if ((finalQuery == null || finalQuery.trim().isEmpty) &&
         rule.defaultKeyword != null &&
         rule.defaultKeyword!.trim().isNotEmpty) {
@@ -271,7 +281,7 @@ class RuleEngine {
     }
 
     if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
-      throw Exception('该图源需要关键词：query 为空（请先搜索或在规则里设置 default_keyword）');
+      throw ArgumentError('keyword_required'); // 让 ErrorMapper 捕获
     }
 
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
@@ -283,7 +293,6 @@ class RuleEngine {
 
     // ✅ URL 占位符（Pixiv 等：keyword 在 path）
     final String requestUrl = _buildRequestUrl(rule, finalQuery);
-
     // ✅✅✅ 分页策略（page / offset / cursor）
     if (rule.responseType != 'random') {
       if (rule.paramPage.isNotEmpty) {
@@ -393,7 +402,6 @@ class RuleEngine {
         }
 
         if (finalUrl == null) return null;
-
         final uri = Uri.parse(finalUrl);
         if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
           final newQueryParams = Map<String, String>.from(uri.queryParameters);
@@ -407,7 +415,6 @@ class RuleEngine {
         return null;
       }
     });
-
     final results = await Future.wait(futures);
 
     final List<UniWallpaper> wallpapers = [];
@@ -439,10 +446,8 @@ class RuleEngine {
     final match = listPath.read(jsonMap).firstOrNull;
 
     if (match == null || match.value is! List) return [];
-
     final List list = match.value as List;
     final out = <UniWallpaper>[];
-
     for (final item in list) {
       String thumb = _getValue<String>(rule.thumbPath, item) ?? '';
       String full = _getValue<String>(rule.fullPath, item) ?? thumb;
@@ -453,7 +458,6 @@ class RuleEngine {
       }
 
       final id = _stableId(rule, item, thumb, full);
-
       if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
 
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
@@ -487,7 +491,6 @@ class RuleEngine {
     required Map<String, dynamic>? filterParams,
   }) async {
     _logReq(rule, requestUrl, params, headers);
-
     // ✅ 定点 debug（仅 debug 输出，避免刷屏）
     const String kDebugRuleId = 'smithsonian_open_access_images';
     final bool dbg = rule.id == kDebugRuleId;
@@ -514,7 +517,6 @@ class RuleEngine {
           validateStatus: (s) => s != null && s < 500,
         ),
       );
-
       _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
 
       final sc = response.statusCode ?? 0;
@@ -593,7 +595,6 @@ class RuleEngine {
     Map<String, List<String>> mergeMulti,
   ) async {
     List<Map<String, dynamic>> paramSets = [Map<String, dynamic>.from(baseParams)];
-
     mergeMulti.forEach((key, values) {
       final List<Map<String, dynamic>> next = [];
       for (final ps in paramSets) {
@@ -605,7 +606,6 @@ class RuleEngine {
       }
       paramSets = next;
     });
-
     // ✅ 重要节点：merge 统计（单行）
     _logger?.log('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
 
@@ -614,7 +614,6 @@ class RuleEngine {
 
     for (final ps in paramSets) {
       _logReq(rule, requestUrl, ps, headers);
-
       try {
         final resp = await _dio.get(
           requestUrl,
@@ -627,7 +626,6 @@ class RuleEngine {
             validateStatus: (s) => s != null && s < 500,
           ),
         );
-
         _logResp(rule, resp.statusCode, resp.realUri.toString(), resp.data);
 
         final sc = resp.statusCode ?? 0;
