@@ -237,8 +237,8 @@ class _HomePageState extends State<HomePage> {
           }
 
           /// ✅ 修复点：
-          /// - pop sheet 后的 refresh 延迟到下一帧，规避生命周期竞态导致的 null-assert 崩溃
-          /// - 所有 catch 记录 stacktrace，便于 CI 精确定位
+          /// - 绝不在 post-frame 回调中使用 context.read（会触发 Element.widget 为 null 的崩溃）
+          /// - pop 之前先缓存 HomeController 实例，后续只调实例方法
           Future<void> doSave() async {
             if (saving) return;
 
@@ -253,6 +253,16 @@ class _HomePageState extends State<HomePage> {
             if (active == null) {
               logger.log('Pixiv save failed (UI): activeRule null');
               snack(ctx, '保存失败：activeRule 为空');
+              return;
+            }
+
+            // ✅ 关键：提前取 HomeController，避免 post-frame 用 context.read 崩溃
+            HomeController? homeController;
+            try {
+              homeController = context.read<HomeController>();
+            } catch (e, st) {
+              logger.log('Pixiv pre-read HomeController failed (UI): $e\n$st');
+              snack(ctx, '保存失败：无法获取 HomeController');
               return;
             }
 
@@ -272,25 +282,19 @@ class _HomePageState extends State<HomePage> {
 
               snack(ctx, '已保存，正在刷新…');
 
-              // ✅ 先关闭 sheet（避免 ctx/context 生命周期导致的空指针）
+              // ✅ 先关闭 sheet
               if (ctx.mounted && Navigator.of(ctx).canPop()) {
                 Navigator.pop(ctx);
               }
 
-              // ✅ 关键修复：延迟到下一帧再 refresh，避免 pop + Provider rebuild 竞态触发空断言
-              if (!mounted) {
-                logger.log('Pixiv refresh skipped (UI): HomePage unmounted');
-                return;
-              }
-
+              // ✅ 延迟到下一帧再刷新（但不再使用 context.read）
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 () async {
                   try {
-                    if (!mounted) return;
+                    // 这里可以不依赖 mounted/context；即便 UI 正在切换，也不该崩
+                    await homeController!.refresh();
 
-                    await context.read<HomeController>().refresh();
-
-                    if (_scrollController.hasClients) {
+                    if (mounted && _scrollController.hasClients) {
                       _scrollController.animateTo(
                         0,
                         duration: const Duration(milliseconds: 200),
