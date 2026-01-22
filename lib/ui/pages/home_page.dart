@@ -10,10 +10,10 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart';
-import '../../core/pixiv/pixiv_repository.dart';
 import '../../core/pixiv/pixiv_client.dart';
 import '../../core/utils/prism_logger.dart';
 
+import '../controllers/home_controller.dart';
 import '../widgets/foggy_app_bar.dart';
 import '../widgets/filter_sheet.dart';
 import 'log_page.dart';
@@ -30,23 +30,11 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final ScrollController _scrollController = ScrollController();
 
-  List<UniWallpaper> _wallpapers = [];
-  bool _loading = false;
-  int _page = 1;
-  bool _hasMore = true;
-  bool _isScrolled = false;
-
-  Map<String, dynamic> _currentFilters = {};
-  String? _currentRuleId;
+  // 避免重复弹 SnackBar
+  String _lastShownError = '';
 
   static String _pixivCookiePrefsKey(String ruleId) => 'pixiv_cookie_$ruleId';
   static const String _kPixivPrefsKey = 'pixiv_preferences_v1';
-
-  @override
-  void initState() {
-    super.initState();
-    _scrollController.addListener(_onScroll);
-  }
 
   @override
   void dispose() {
@@ -54,32 +42,7 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  Future<void> _initSource() async {
-    await _loadFilters();
-    await _loadPixivPreferences();
-    await _applyPixivCookieIfNeeded();
-    _fetchData(refresh: true);
-  }
-
-  Future<void> _loadPixivPreferences() async {
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
-    if (rule == null || !context.read<WallpaperService>().isPixivRule(rule)) return;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final jsonStr = prefs.getString(_kPixivPrefsKey);
-      if (jsonStr != null) {
-        final m = jsonDecode(jsonStr);
-        context.read<WallpaperService>().setPixivPreferences(
-              imageQuality: m['quality'],
-              showAi: m['show_ai'],
-              mutedTags: (m['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
-            );
-      }
-    } catch (_) {}
-  }
-
+  // ---------- Pixiv Preferences ----------
   Future<void> _savePixivPreferences() async {
     try {
       final service = context.read<WallpaperService>();
@@ -94,147 +57,22 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
-  Future<void> _applyPixivCookieIfNeeded() async {
-    final PrismLogger logger = const AppLogLogger();
-
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
-    if (rule == null) return;
-    if (!context.read<WallpaperService>().isPixivRule(rule)) return;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-
-      final fromPrefs = (prefs.getString(_pixivCookiePrefsKey(rule.id)) ?? '').trim();
-
-      String fromHeaders = '';
-      final h = rule.headers;
-      if (h != null) {
-        fromHeaders = ((h['Cookie'] ?? h['cookie'])?.toString() ?? '').trim();
-      }
-
-      final selected = fromPrefs.isNotEmpty ? fromPrefs : fromHeaders;
-
-      context.read<WallpaperService>().setPixivCookie(selected.isEmpty ? null : selected);
-
-      logger.log(
-        'Pixiv apply cookie (UI) rule=${rule.id} prefsLen=${fromPrefs.length} headersLen=${fromHeaders.length} selectedLen=${selected.length}',
-      );
-
-      if (fromPrefs.isEmpty && fromHeaders.isNotEmpty) {
-        await prefs.setString(_pixivCookiePrefsKey(rule.id), fromHeaders);
-        logger.log('Pixiv apply cookie (UI) backfilled prefs from rule.headers');
-      }
-    } catch (e) {
-      const AppLogLogger().log('Pixiv apply cookie (UI) failed: $e');
-    }
+  // ---------- UI helpers ----------
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
   }
 
-  Future<void> _loadFilters() async {
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
-    if (rule == null) return;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final String? jsonStr = prefs.getString('filter_prefs_${rule.id}');
-      if (!mounted) return;
-
-      setState(() {
-        if (jsonStr != null && jsonStr.isNotEmpty) {
-          _currentFilters = json.decode(jsonStr);
-        } else {
-          _currentFilters = {};
-        }
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _saveFilters(Map<String, dynamic> filters) async {
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
-    if (rule == null) return;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (filters.isEmpty) {
-        await prefs.remove('filter_prefs_${rule.id}');
-      } else {
-        await prefs.setString('filter_prefs_${rule.id}', json.encode(filters));
-      }
-    } catch (_) {}
-  }
-
-  void _onScroll() {
-    final isScrolled = _scrollController.hasClients && _scrollController.offset > 0;
-    if (isScrolled != _isScrolled) setState(() => _isScrolled = isScrolled);
-
-    if (_loading || !_hasMore) return;
-    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
-      _fetchData(refresh: false);
-    }
-  }
-
-  Future<void> _fetchData({bool refresh = false}) async {
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
-    if (rule == null) return;
-    if (_loading) return;
-
-    setState(() {
-      _loading = true;
-      if (refresh) {
-        _page = 1;
-        _hasMore = true;
-      }
-    });
-
-    try {
-      final data = await context.read<WallpaperService>().fetch(
-            rule,
-            page: _page,
-            filterParams: _currentFilters,
-          );
-
-      if (!mounted) return;
-
-      setState(() {
-        if (refresh) {
-          _wallpapers = data;
-          _hasMore = data.isNotEmpty;
-          if (_scrollController.hasClients) _scrollController.jumpTo(0);
-        } else {
-          final newItems = data.where((newItem) {
-            return !_wallpapers.any((existing) => existing.id == newItem.id);
-          }).toList();
-
-          if (newItems.isEmpty) {
-            _hasMore = false;
-          } else {
-            _wallpapers.addAll(newItems);
-          }
-        }
-
-        if (data.isEmpty) _hasMore = false;
-        else _page++;
-
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      if (refresh) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载失败: $e')));
-      }
-    }
-  }
-
+  // ---------- Filter sheet ----------
   void _showFilterSheet() {
     final rule = context.read<SourceManager>().activeRule;
     if (rule == null || rule.filters.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("当前图源不支持筛选")));
+      _snack("当前图源不支持筛选");
       return;
     }
+
+    final home = context.read<HomeController>();
 
     showModalBottomSheet(
       context: context,
@@ -242,43 +80,41 @@ class _HomePageState extends State<HomePage> {
       isScrollControlled: true,
       builder: (_) => FilterSheet(
         filters: rule.filters,
-        currentValues: _currentFilters,
+        currentValues: home.currentFilters,
         onApply: (newValues) {
-          setState(() => _currentFilters = newValues);
-          _saveFilters(newValues);
-          _fetchData(refresh: true);
+          home.applyFilters(newValues);
         },
       ),
     );
   }
 
+  // ---------- Import rule ----------
   void _showImportDialog(BuildContext context) {
     final TextEditingController controller = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
-        insetPadding: const EdgeInsets.symmetric(horizontal: 30), 
+        backgroundColor: const Color(0xFFFFFFFF),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 30),
         title: const Text('导入图源规则'),
-        // 🔥🔥🔥 核心修改：用 SizedBox 包裹内容并指定 width
         content: SizedBox(
-          width: 300, // 👈 在这里设置固定宽度
+          width: 300,
           child: TextField(
-          controller: controller,
-          maxLines: 10,
-          decoration: InputDecoration(
-            hintText: '在此粘贴 JSON 内容...',
-            filled: true,
-            fillColor: const Color(0xFFF3F3F3), // 🔥 F3F3F3
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10), // 🔥 Radius 10
-              borderSide: BorderSide.none, // 🔥 No border
+            controller: controller,
+            maxLines: 10,
+            decoration: InputDecoration(
+              hintText: '在此粘贴 JSON 内容...',
+              filled: true,
+              fillColor: const Color(0xFFF3F3F3),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.all(12),
             ),
-            contentPadding: const EdgeInsets.all(12),
+            style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
           ),
-          style: const TextStyle(fontSize: 12, fontFamily: "monospace"),
-         ),
         ),
         actions: [
           TextButton(
@@ -288,7 +124,7 @@ class _HomePageState extends State<HomePage> {
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: Colors.black,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () {
               if (controller.text.isEmpty) return;
@@ -296,7 +132,7 @@ class _HomePageState extends State<HomePage> {
                 context.read<SourceManager>().addRule(controller.text);
                 Navigator.pop(ctx);
               } catch (_) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('JSON 格式错误')));
+                _snack('JSON 格式错误');
               }
             },
             child: const Text('导入'),
@@ -306,6 +142,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ---------- Pixiv Web Login ----------
   void _openPixivWebLogin(BuildContext context) async {
     final PrismLogger logger = const AppLogLogger();
 
@@ -438,22 +275,31 @@ class _HomePageState extends State<HomePage> {
               await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
               logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
 
-              () async {
-                try {
-                  final prefs = await SharedPreferences.getInstance();
-                  final key = _pixivCookiePrefsKey(active.id);
-                  await prefs.setString(key, cookie);
-                  logger.log('Pixiv cookie backup saved to prefs key=$key');
-                } catch (e) {
-                  logger.log('Pixiv cookie backup prefs failed: $e');
-                }
-              }();
+              // 备份到 prefs
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                final key = _pixivCookiePrefsKey(active.id);
+                await prefs.setString(key, cookie);
+                logger.log('Pixiv cookie backup saved to prefs key=$key');
+              } catch (e) {
+                logger.log('Pixiv cookie backup prefs failed: $e');
+              }
 
               snack(ctx, '已保存，正在刷新…');
 
               if (ctx.mounted) Navigator.pop(ctx);
 
-              if (mounted) _fetchData(refresh: true);
+              // 由 HomeController 统一刷新（避免 UI 直接改分页状态）
+              if (mounted) {
+                await context.read<HomeController>().refresh();
+                if (_scrollController.hasClients) {
+                  _scrollController.animateTo(
+                    0,
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                  );
+                }
+              }
 
               logger.log('Pixiv save success (UI)');
             } catch (e) {
@@ -590,83 +436,82 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setState) {
           return AlertDialog(
-            backgroundColor: const Color(0xFFFFFFFF), // 🔥 FFFFFF
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), // 🔥 Radius 10
+            backgroundColor: const Color(0xFFFFFFFF),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             insetPadding: const EdgeInsets.symmetric(horizontal: 30),
             title: const Text('Pixiv 设置'),
-            // 🔥🔥🔥 核心修改：用 SizedBox 包裹 SingleChildScrollView
             content: SizedBox(
-              width: 300, // 👈 在这里设置固定宽度
+              width: 300,
               child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('账户', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(service.hasPixivCookie ? '已设置 Cookie' : '未登录', style: const TextStyle(fontSize: 14)),
-                    subtitle: const Text('建议使用 Web 登录自动抓取', style: TextStyle(fontSize: 12)),
-                    trailing: FilledButton.tonal(
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('账户', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(service.hasPixivCookie ? '已设置 Cookie' : '未登录', style: const TextStyle(fontSize: 14)),
+                      subtitle: const Text('建议使用 Web 登录自动抓取', style: TextStyle(fontSize: 12)),
+                      trailing: FilledButton.tonal(
+                        style: FilledButton.styleFrom(
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _openPixivWebLogin(context);
+                        },
+                        child: const Text('Web 登录'),
                       ),
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _openPixivWebLogin(context);
+                    ),
+                    const SizedBox(height: 16),
+                    const Text('画质偏好', style: TextStyle(fontWeight: FontWeight.bold)),
+                    DropdownButton<String>(
+                      value: quality,
+                      isExpanded: true,
+                      underline: Container(height: 1, color: Colors.grey[300]),
+                      items: const [
+                        DropdownMenuItem(value: 'original', child: Text('原图 (Original) - 极耗流量')),
+                        DropdownMenuItem(value: 'regular', child: Text('标准 (Regular) - 推荐')),
+                        DropdownMenuItem(value: 'small', child: Text('缩略图 (Small) - 极省流')),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) setState(() => quality = v);
                       },
-                      child: const Text('Web 登录'),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('画质偏好', style: TextStyle(fontWeight: FontWeight.bold)),
-                  DropdownButton<String>(
-                    value: quality,
-                    isExpanded: true,
-                    underline: Container(height: 1, color: Colors.grey[300]),
-                    items: const [
-                      DropdownMenuItem(value: 'original', child: Text('原图 (Original) - 极耗流量')),
-                      DropdownMenuItem(value: 'regular', child: Text('标准 (Regular) - 推荐')),
-                      DropdownMenuItem(value: 'small', child: Text('缩略图 (Small) - 极省流')),
-                    ],
-                    onChanged: (v) {
-                      if (v != null) setState(() => quality = v);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('显示 AI 生成作品', style: TextStyle(fontWeight: FontWeight.bold)),
-                      Switch(
-                        value: showAi,
-                        activeColor: Colors.black,
-                        onChanged: (v) => setState(() => showAi = v),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('屏蔽标签 (空格分隔)', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: mutedController,
-                    decoration: InputDecoration(
-                      hintText: '例如: R-18G AI生成 ...',
-                      filled: true,
-                      fillColor: const Color(0xFFF3F3F3), // 🔥 F3F3F3
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10), // 🔥 Radius 10
-                        borderSide: BorderSide.none, // 🔥 No border
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('显示 AI 生成作品', style: TextStyle(fontWeight: FontWeight.bold)),
+                        Switch(
+                          value: showAi,
+                          activeColor: Colors.black,
+                          onChanged: (v) => setState(() => showAi = v),
+                        ),
+                      ],
                     ),
-                    style: const TextStyle(fontSize: 13),
-                    maxLines: 2,
-                  ),
-                ],
-               ),
-             ),
+                    const SizedBox(height: 16),
+                    const Text('屏蔽标签 (空格分隔)', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: mutedController,
+                      decoration: InputDecoration(
+                        hintText: '例如: R-18G AI生成 ...',
+                        filled: true,
+                        fillColor: const Color(0xFFF3F3F3),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                      ),
+                      style: const TextStyle(fontSize: 13),
+                      maxLines: 2,
+                    ),
+                  ],
+                ),
+              ),
             ),
             actions: [
               TextButton(
@@ -676,21 +521,24 @@ class _HomePageState extends State<HomePage> {
               FilledButton(
                 style: FilledButton.styleFrom(
                   backgroundColor: Colors.black,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), // Button radius match
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 ),
-                onPressed: () {
-                  final tags = mutedController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
+                onPressed: () async {
+                  final tags =
+                      mutedController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
 
                   service.setPixivPreferences(
                     imageQuality: quality,
                     showAi: showAi,
                     mutedTags: tags,
                   );
-                  _savePixivPreferences();
+                  await _savePixivPreferences();
 
-                  Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设置已保存，刷新后生效')));
-                  _fetchData(refresh: true);
+                  if (ctx.mounted) Navigator.pop(ctx);
+
+                  _snack('设置已保存，刷新后生效');
+
+                  await context.read<HomeController>().refresh();
                 },
                 child: const Text('保存'),
               ),
@@ -701,13 +549,12 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ---------- Grid helpers ----------
   Map<String, String>? _buildSafeImageHeaders({
     required UniWallpaper paper,
-    required dynamic activeRule,
+    required Map<String, String>? baseHeaders,
   }) {
-    final service = context.read<WallpaperService>();
-    final base = service.getImageHeaders(activeRule);
-    final headers = <String, String>{...?(base ?? const <String, String>{})};
+    final headers = <String, String>{...?(baseHeaders ?? const <String, String>{})};
 
     final u = paper.thumbUrl.trim();
     final isPximg = u.contains('pximg.net');
@@ -722,7 +569,12 @@ class _HomePageState extends State<HomePage> {
     return headers;
   }
 
-  Widget _buildWallpaperItem(UniWallpaper paper) {
+  Widget _buildWallpaperItem({
+    required BuildContext context,
+    required UniWallpaper paper,
+    required Map<String, String>? baseHeaders,
+    required int memCacheWidth,
+  }) {
     Color? borderColor;
     if (paper.grade != null) {
       final g = paper.grade!.toLowerCase();
@@ -736,13 +588,15 @@ class _HomePageState extends State<HomePage> {
     const double kRadius = 6.0;
     const double kBorderWidth = 1.5;
 
-    final activeRule = context.read<SourceManager>().activeRule;
-    final headers = _buildSafeImageHeaders(paper: paper, activeRule: activeRule);
+    final headers = _buildSafeImageHeaders(paper: paper, baseHeaders: baseHeaders);
 
     final imageWidget = CachedNetworkImage(
       imageUrl: paper.thumbUrl,
       httpHeaders: headers,
       fit: BoxFit.fitWidth,
+      memCacheWidth: memCacheWidth,
+      fadeInDuration: Duration.zero,
+      fadeOutDuration: Duration.zero,
       placeholder: (c, u) => Container(
         color: Colors.grey[100],
         alignment: Alignment.center,
@@ -769,60 +623,66 @@ class _HomePageState extends State<HomePage> {
 
     final List<Widget> badges = [];
     if (paper.isUgoira) {
-      badges.add(Container(
-        margin: const EdgeInsets.only(right: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-        decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), borderRadius: BorderRadius.circular(4)),
-        child: const Text('GIF', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
-      ));
+      badges.add(
+        Container(
+          margin: const EdgeInsets.only(right: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), borderRadius: BorderRadius.circular(4)),
+          child: const Text('GIF', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+        ),
+      );
     }
     if (paper.isAi) {
-      badges.add(Container(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-        decoration: BoxDecoration(color: Colors.blueAccent.withOpacity(0.7), borderRadius: BorderRadius.circular(4)),
-        child: const Text('AI', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
-      ));
+      badges.add(
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          decoration: BoxDecoration(color: Colors.blueAccent.withOpacity(0.7), borderRadius: BorderRadius.circular(4)),
+          child: const Text('AI', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+        ),
+      );
     }
 
-    final content = Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(kRadius),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(kRadius),
-        child: Stack(
-          fit: StackFit.passthrough,
-          children: [
-            imageWidget,
-            if (borderColor != null)
-              Positioned.fill(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.transparent,
-                    border: Border.all(
-                      color: borderColor,
-                      width: kBorderWidth,
-                      strokeAlign: BorderSide.strokeAlignInside,
+    final content = RepaintBoundary(
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(kRadius),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(kRadius),
+          child: Stack(
+            fit: StackFit.passthrough,
+            children: [
+              imageWidget,
+              if (borderColor != null)
+                Positioned.fill(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.transparent,
+                      border: Border.all(
+                        color: borderColor,
+                        width: kBorderWidth,
+                        strokeAlign: BorderSide.strokeAlignInside,
+                      ),
+                      borderRadius: BorderRadius.circular(kRadius),
                     ),
-                    borderRadius: BorderRadius.circular(kRadius),
                   ),
                 ),
-              ),
-            if (badges.isNotEmpty)
-              Positioned(
-                top: 6,
-                right: 6,
-                child: Row(mainAxisSize: MainAxisSize.min, children: badges),
-              ),
-          ],
+              if (badges.isNotEmpty)
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Row(mainAxisSize: MainAxisSize.min, children: badges),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -835,26 +695,34 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    const AppLogLogger().log('HOME_PAGE_VERSION=2026-01-21_SAVE_IN_SHEET_V1');
-
     final manager = context.watch<SourceManager>();
+    final home = context.watch<HomeController>();
+
     final activeRule = manager.activeRule;
     final hasFilters = activeRule != null && activeRule.filters.isNotEmpty;
 
-    if (activeRule != null && activeRule.id != _currentRuleId) {
-      _currentRuleId = activeRule.id;
+    // 统一从 Service 取 headers：detail 与 thumb 分开处理（thumb 可能需要补 referer/ua）
+    final baseHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
+    final showPixivSettings = context.read<WallpaperService>().isPixivRule(activeRule);
+
+    // 统一错误出口：HomeController 不触达 BuildContext
+    final err = home.lastError ?? '';
+    if (err.isNotEmpty && err != _lastShownError) {
+      _lastShownError = err;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _initSource();
+        if (!mounted) return;
+        _snack(err);
       });
     }
 
-    final detailHeaders = context.read<WallpaperService>().getImageHeaders(activeRule);
-    final showPixivSettings = context.read<WallpaperService>().isPixivRule(activeRule);
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final width = MediaQuery.of(context).size.width;
+    final memCacheWidth = ((width / 2) * dpr).round().clamp(200, 1200);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: FoggyAppBar(
-        isScrolled: _isScrolled,
+        isScrolled: home.isScrolled,
         title: Text(
           activeRule?.name ?? 'Prism',
           style: const TextStyle(fontWeight: FontWeight.bold),
@@ -866,17 +734,26 @@ class _HomePageState extends State<HomePage> {
           ),
           if (hasFilters)
             IconButton(
-              icon: Icon(Icons.tune, color: _currentFilters.isNotEmpty ? Colors.black : Colors.grey[700]),
+              icon: Icon(Icons.tune, color: home.currentFilters.isNotEmpty ? Colors.black : Colors.grey[700]),
               onPressed: _showFilterSheet,
             ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () => _fetchData(refresh: true),
+            onPressed: () async {
+              await home.refresh();
+              if (!mounted) return;
+              if (_scrollController.hasClients) {
+                _scrollController.animateTo(
+                  0,
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                );
+              }
+            },
           ),
         ],
       ),
       drawer: Drawer(
-        // 🔥 Radius 8 for right corners
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.only(
             topRight: Radius.circular(8),
@@ -956,70 +833,86 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       ),
-      body: Stack(
-        children: [
-          _wallpapers.isEmpty && !_loading
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.photo_library_outlined, size: 60, color: Colors.grey[300]),
-                      const SizedBox(height: 10),
-                      Text(
-                        activeRule == null ? "请先导入图源" : (_hasMore ? "暂无数据" : "没有更多图片了"),
-                        style: TextStyle(color: Colors.grey[400]),
-                      ),
-                    ],
-                  ),
-                )
-              : MasonryGridView.count(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.only(top: 100, left: 6, right: 6, bottom: 6),
-                  crossAxisCount: 2,
-                  mainAxisSpacing: 6,
-                  crossAxisSpacing: 6,
-                  itemCount: _wallpapers.length + (_hasMore ? 0 : 1),
-                  itemBuilder: (context, index) {
-                    if (index == _wallpapers.length) {
-                      return Container(
-                        padding: const EdgeInsets.all(20),
-                        alignment: Alignment.center,
-                        child: Text("— End —", style: TextStyle(color: Colors.grey[300], fontSize: 12)),
-                      );
-                    }
+      body: NotificationListener<ScrollNotification>(
+        onNotification: (n) {
+          if (n.metrics.axis != Axis.vertical) return false;
+          home.onScroll(
+            offset: n.metrics.pixels,
+            maxScrollExtent: n.metrics.maxScrollExtent,
+          );
+          return false;
+        },
+        child: Stack(
+          children: [
+            home.wallpapers.isEmpty && !home.loading
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.photo_library_outlined, size: 60, color: Colors.grey[300]),
+                        const SizedBox(height: 10),
+                        Text(
+                          activeRule == null ? "请先导入图源" : (home.hasMore ? "暂无数据" : "没有更多图片了"),
+                          style: TextStyle(color: Colors.grey[400]),
+                        ),
+                      ],
+                    ),
+                  )
+                : MasonryGridView.count(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.only(top: 100, left: 6, right: 6, bottom: 6),
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 6,
+                    crossAxisSpacing: 6,
+                    itemCount: home.wallpapers.length + (home.hasMore ? 0 : 1),
+                    itemBuilder: (context, index) {
+                      if (index == home.wallpapers.length) {
+                        return Container(
+                          padding: const EdgeInsets.all(20),
+                          alignment: Alignment.center,
+                          child: Text("— End —", style: TextStyle(color: Colors.grey[300], fontSize: 12)),
+                        );
+                      }
 
-                    final paper = _wallpapers[index];
-                    return GestureDetector(
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => WallpaperDetailPage(
-                            wallpaper: paper,
-                            headers: detailHeaders,
+                      final paper = home.wallpapers[index];
+                      return GestureDetector(
+                        key: ValueKey('${paper.sourceId}::${paper.id}'),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => WallpaperDetailPage(
+                              wallpaper: paper,
+                              headers: baseHeaders,
+                            ),
                           ),
                         ),
-                      ),
-                      child: _buildWallpaperItem(paper),
-                    );
-                  },
-                ),
-          if (_loading && _page == 1)
-            Positioned.fill(
-              child: Container(
-                color: Colors.white.withOpacity(0.6),
-                child: const Center(
-                  child: CircularProgressIndicator(color: Colors.black),
+                        child: _buildWallpaperItem(
+                          context: context,
+                          paper: paper,
+                          baseHeaders: baseHeaders,
+                          memCacheWidth: memCacheWidth,
+                        ),
+                      );
+                    },
+                  ),
+            if (home.loading && home.page == 1)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.white.withOpacity(0.6),
+                  child: const Center(
+                    child: CircularProgressIndicator(color: Colors.black),
+                  ),
                 ),
               ),
-            ),
-          if (_loading && _page > 1)
-            const Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: Colors.black),
-            ),
-        ],
+            if (home.loading && home.page > 1)
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: Colors.black),
+              ),
+          ],
+        ),
       ),
     );
   }
