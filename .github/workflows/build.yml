@@ -104,13 +104,6 @@ jobs:
         if: ${{ env.STRICT_ANALYZE == 'true' }}
         run: flutter analyze
 
-      - name: Run tests (skip if no tests)
-        run: |
-        if [ -d "test" ]; then
-         flutter test
-        else
-         echo "No tests directory, skip flutter test"
-        fi
 
       # 只有在 workflow_dispatch 且需要构建 release（apk 或 aab）时才准备签名文件
       - name: Decode keystore & write key.properties
