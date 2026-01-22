@@ -170,13 +170,34 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     );
   }
 
-  void _searchSimilar() {
-    showSearch(
-      context: context,
-      delegate: WallpaperSearchDelegate(),
-      query: 'like:${widget.wallpaper.id}',
-    );
+  String _buildSimilarQuery(UniWallpaper w) {
+  final validTags = w.tags
+      .where((t) => t.length >= 2)
+      .where((t) => !t.startsWith('ai'))
+      .where((t) => !t.startsWith('r-'))
+      .take(4)
+      .toList();
+
+  if (validTags.isNotEmpty) {
+    return validTags.join(' ');
   }
+
+  if (w.uploader.isNotEmpty) {
+    return 'user:${w.uploader}';
+  }
+
+  return '';
+}
+
+void _searchSimilar() {
+  final query = _buildSimilarQuery(widget.wallpaper);
+
+  showSearch(
+    context: context,
+    delegate: WallpaperSearchDelegate(),
+    query: query,
+  );
+}
 
   void _snack(String msg) {
     if (!mounted) return;
@@ -297,58 +318,45 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                   const SizedBox(height: 24),
 
                   InkWell(
-                    onTap: () => _searchUploader(uploaderName),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
-                      child: Row(
-                        children: [
-                          CircleAvatar(
-                            radius: 20,
-                            backgroundColor: _accentColor,
-                            child: Text(
-                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  "上传者: $uploaderName",
-                                  style: const TextStyle(
-                                    color: _textColor,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                const Text(
-                                  "点击查看更多作品",
-                                  style: TextStyle(color: _subTextColor, fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: _accentColor),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: const Row(
-                              children: [
-                                Icon(Icons.add, size: 16, color: _accentColor),
-                                SizedBox(width: 4),
-                                Text("关注", style: TextStyle(color: _accentColor, fontWeight: FontWeight.bold)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+  onTap: () => _searchUploader(uploaderName),
+  borderRadius: BorderRadius.circular(8),
+  child: Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
+    child: Row(
+      children: [
+        CircleAvatar(
+          radius: 20,
+          backgroundColor: _accentColor,
+          child: Text(
+            uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "上传者: $uploaderName",
+                style: const TextStyle(
+                  color: _textColor,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const Text(
+                "查看该作者的更多作品",
+                style: TextStyle(color: _subTextColor, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        const Icon(Icons.chevron_right, color: Colors.grey),
+      ],
+    ),
+  ),
+),
 
                   const SizedBox(height: 20),
 
@@ -376,15 +384,18 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
-                      icon: const Icon(Icons.image_search, color: _textColor),
-                      label: const Text("查找相似图片 (Similar)", style: TextStyle(color: _textColor)),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        side: const BorderSide(color: Color(0xFFDDDDDD)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                      onPressed: _searchSimilar,
-                    ),
+  icon: const Icon(Icons.auto_awesome, color: _textColor),
+  label: const Text(
+    "查看更多相似作品",
+    style: TextStyle(color: _textColor),
+  ),
+  style: OutlinedButton.styleFrom(
+    padding: const EdgeInsets.symmetric(vertical: 14),
+    side: const BorderSide(color: Color(0xFFDDDDDD)),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+  ),
+  onPressed: _searchSimilar,
+),
                   ),
 
                   const SizedBox(height: 24),
