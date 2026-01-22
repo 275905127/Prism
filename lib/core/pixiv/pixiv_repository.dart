@@ -1,5 +1,5 @@
 // lib/core/pixiv/pixiv_repository.dart
-import 'dart:async';
+import 'dart:async'; // ✅ 新增引用
 import 'package:dio/dio.dart';
 import '../models/uni_wallpaper.dart';
 import '../utils/prism_logger.dart';
@@ -103,13 +103,16 @@ class PixivRepository {
   static const Duration _kLoginCacheTtl = Duration(minutes: 5);
   bool? _cachedLoginOk;
   DateTime? _cachedLoginAt;
-  bool _checkingLogin = false;
+  
+  // ✅ 修复：使用 Future 变量配合 Completer 消除 Race Condition
   Future<bool>? _checkingLoginFuture;
+
   bool? get cachedLoginOk => _cachedLoginOk;
 
   void _invalidateLoginCache() {
     _cachedLoginOk = null;
     _cachedLoginAt = null;
+    // 注意：这里不要暴力置空 _checkingLoginFuture，让正在进行的检查自然完成
   }
 
   Future<bool> _getLoginOkCached() async {
@@ -132,32 +135,37 @@ class PixivRepository {
       }
     }
 
-    if (_checkingLogin && _checkingLoginFuture != null) {
+    // ✅ 修复核心：如果正在检查，直接返回同一个 Future，防止 null check 错误
+    if (_checkingLoginFuture != null) {
       _logger?.debug('PixivRepo: login check already running -> await');
       return _checkingLoginFuture!;
     }
 
-    _checkingLogin = true;
-    _checkingLoginFuture = () async {
+    // 创建 Completer 来控制流程
+    final completer = Completer<bool>();
+    _checkingLoginFuture = completer.future;
+
+    // 启动异步任务
+    (() async {
       try {
         _logger?.log('PixivRepo: login check start');
         final ok = await _client.checkLogin();
         _cachedLoginOk = ok;
         _cachedLoginAt = DateTime.now();
         _logger?.log('PixivRepo: login check done -> $ok');
-        return ok;
+        completer.complete(ok);
       } catch (e) {
         _cachedLoginOk = false;
         _cachedLoginAt = DateTime.now();
         _logger?.log('PixivRepo: login check exception -> false error=$e');
-        return false;
+        completer.complete(false);
       } finally {
-        _checkingLogin = false;
+        // 只有在任务完全结束后才清除 Future 引用
         _checkingLoginFuture = null;
       }
-    }();
+    })();
 
-    return _checkingLoginFuture!;
+    return completer.future;
   }
 
   Future<bool> getLoginOk(dynamic rule) async {
@@ -181,15 +189,14 @@ class PixivRepository {
 
       // 只有当规则里真的有 cookie/ua 时才覆盖，否则保持当前态
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
-        _client.updateConfig(cookie: cookie ?? '', userAgent: ua);
-        _invalidateLoginCache();
-
-        // 规则注入属于“解释性关键路径”，但可能频繁：降到 debug
-        if (ua != null && ua.isNotEmpty) {
-          _logger?.debug('PixivRepo: config synced: UA updated (len=${ua.length})');
-        }
-        if (cookie != null && cookie.isNotEmpty) {
-          _logger?.debug('PixivRepo: config synced: Cookie injected (len=${cookie.length})');
+        // 简单的去重检查：如果和现有的一样就不触发 setCookie
+        if (cookie != null && cookie.isNotEmpty && cookie != _client.buildImageHeaders()['Cookie']) {
+           _client.updateConfig(cookie: cookie, userAgent: ua);
+           _invalidateLoginCache();
+           _logger?.debug('PixivRepo: config synced: Cookie injected (len=${cookie.length})');
+        } else if (ua != null && ua.isNotEmpty) {
+           _client.updateConfig(userAgent: ua);
+           _logger?.debug('PixivRepo: config synced: UA updated');
         }
       }
     } catch (e) {
