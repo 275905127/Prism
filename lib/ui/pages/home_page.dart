@@ -134,23 +134,32 @@ class _HomePageState extends State<HomePage> {
 
   // ---------- Pixiv Web Login ----------
   void _openPixivWebLogin(BuildContext context) async {
-    // ✅ 必须从 Provider 取全局 logger，避免你本地 new 导致日志系统割裂
-    final PrismLogger logger = this.context.read<PrismLogger>();
-
-    final sourceManager = this.context.read<SourceManager>();
-    final wallpaperService = this.context.read<WallpaperService>();
-    final rule = sourceManager.activeRule;
-
-    // ✅ 关键修复：在打开 sheet 之前，用 HomePage 的 State.context 预先缓存 HomeController
-    // 之后整个 sheet 生命周期中都不要再 read Provider（避免 Element deactivated -> Element.widget null）。
+    // ✅ 彻底防回归：在进入 sheet 之前，把 Provider 里需要的依赖一次性缓存下来
+    // sheet 生命周期内不再做任何 context.read<T>()，避免 Element deactivated 导致崩溃。
+    late final PrismLogger logger;
+    late final SourceManager sourceManager;
+    late final WallpaperService wallpaperService;
     late final HomeController homeController;
+
     try {
+      logger = this.context.read<PrismLogger>();
+      sourceManager = this.context.read<SourceManager>();
+      wallpaperService = this.context.read<WallpaperService>();
       homeController = this.context.read<HomeController>();
     } catch (e, st) {
-      logger.log('Pixiv pre-read HomeController failed (UI): $e\n$st');
-      _snack('无法获取 HomeController（页面状态异常），请返回重试');
+      // 这里如果都读不到，说明页面树/Provider 已经异常，不应该继续打开登录页
+      // 直接提示用户返回重试，避免后续更深层崩溃。
+      // 注意：这里不依赖 logger（可能也读不到）
+      if (mounted) {
+        _snack('页面状态异常，无法打开 Pixiv 登录（请返回重试）');
+      }
+      // 尽量输出到 debug 控制台（CI 也能看到部分）
+      // ignore: avoid_print
+      print('Pixiv pre-read providers failed: $e\n$st');
       return;
     }
+
+    final rule = sourceManager.activeRule;
 
     String targetUA = PixivClient.kMobileUserAgent;
     if (rule != null && rule.headers != null) {
@@ -247,9 +256,10 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
-          /// ✅ 修复点：
-          /// - sheet 内不再使用 context.read<HomeController>()，全部使用外层缓存的 homeController
-          /// - pop 后 refresh 依旧延迟到下一帧，避免 UI 竞态
+          /// ✅ 彻底防回归：
+          /// - sheet 内不再做任何 context.read<T>()
+          /// - refresh 使用外层缓存的 homeController
+          /// - pop 后 refresh 仍延迟到下一帧，避免 UI 竞态
           Future<void> doSave() async {
             if (saving) return;
 
