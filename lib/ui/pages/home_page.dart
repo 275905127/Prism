@@ -189,8 +189,8 @@ class _HomePageState extends State<HomePage> {
         final accNames = cookiesAcc.map((c) => c.name).toSet().toList()..sort();
         logger.log('Pixiv cookie snapshot: pixiv.net=[${mainNames.join(', ')}]');
         logger.log('Pixiv cookie snapshot: accounts.pixiv.net=[${accNames.join(', ')}]');
-      } catch (e) {
-        logger.log('Pixiv cookie snapshot failed: $e');
+      } catch (e, st) {
+        logger.log('Pixiv cookie snapshot failed: $e\n$st');
       }
     }
 
@@ -230,82 +230,92 @@ class _HomePageState extends State<HomePage> {
                 await logCookieNamesSnapshot();
                 snack(ctx, '未检测到 PHPSESSID（已写入日志页）');
               }
-            } catch (e) {
-              logger.log('Pixiv manual check exception: $e');
+            } catch (e, st) {
+              logger.log('Pixiv manual check exception: $e\n$st');
               snack(ctx, '检测异常：$e');
             }
           }
 
-          /// ✅ 彻底修复：保存 Cookie 的逻辑完全 Null-safe，并且只走两条正确路径：
-          /// - WallpaperService.setPixivCookieForRule（持久化 + 注入 repo）
-          /// - SourceManager.updateRuleHeader（写入 rule.headers 并持久化 rules_v2）
+          /// ✅ 修复点：
+          /// - pop sheet 后的 refresh 延迟到下一帧，规避生命周期竞态导致的 null-assert 崩溃
+          /// - 所有 catch 记录 stacktrace，便于 CI 精确定位
           Future<void> doSave() async {
-  if (saving) return;
+            if (saving) return;
 
-  final cookie = sheetCookie.trim();
-  if (cookie.isEmpty) {
-    logger.log('Pixiv save blocked (UI): cookie empty');
-    snack(ctx, 'Cookie 为空，无法保存');
-    return;
-  }
+            final cookie = sheetCookie.trim();
+            if (cookie.isEmpty) {
+              logger.log('Pixiv save blocked (UI): cookie empty');
+              snack(ctx, 'Cookie 为空，无法保存');
+              return;
+            }
 
-  final active = sourceManager.activeRule;
-  if (active == null) {
-    logger.log('Pixiv save failed (UI): activeRule null');
-    snack(ctx, '保存失败：activeRule 为空');
-    return;
-  }
+            final active = sourceManager.activeRule;
+            if (active == null) {
+              logger.log('Pixiv save failed (UI): activeRule null');
+              snack(ctx, '保存失败：activeRule 为空');
+              return;
+            }
 
-  saving = true;
-  if (ctx.mounted) setModalState(() {});
+            saving = true;
+            if (ctx.mounted) setModalState(() {});
 
-  logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
+            logger.log('Pixiv save stage entered (UI) cookieLen=${cookie.length} rule=${active.id}');
 
-  try {
-    // 1) 通过 Service 保存（包含 prefs 保存 + repo 注入）
-    await wallpaperService.setPixivCookieForRule(active.id, cookie);
-    logger.log('Pixiv cookie persisted via WallpaperService (UI) len=${cookie.length}');
+            try {
+              // 1) 通过 Service 保存（包含 prefs 保存 + repo 注入）
+              await wallpaperService.setPixivCookieForRule(active.id, cookie);
+              logger.log('Pixiv cookie persisted via WallpaperService (UI) len=${cookie.length}');
 
-    // 2) 写入 rule.headers 并持久化 rules_v2
-    await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
-    logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
+              // 2) 写入 rule.headers 并持久化 rules_v2
+              await sourceManager.updateRuleHeader(active.id, 'Cookie', cookie);
+              logger.log('Pixiv cookie written into rule.headers (UI) rule=${active.id}');
 
-    snack(ctx, '已保存，正在刷新…');
+              snack(ctx, '已保存，正在刷新…');
 
-    // ✅ 先关闭 sheet（避免 ctx/context 生命周期导致的空指针）
-    if (ctx.mounted && Navigator.of(ctx).canPop()) {
-      Navigator.pop(ctx);
-    }
+              // ✅ 先关闭 sheet（避免 ctx/context 生命周期导致的空指针）
+              if (ctx.mounted && Navigator.of(ctx).canPop()) {
+                Navigator.pop(ctx);
+              }
 
-    // ✅ 刷新一定要捕获异常：即使 HomeController 内部有 null-assert，也不会让 UI 整段失败
-    try {
-      if (mounted) {
-        await context.read<HomeController>().refresh();
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            0,
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOut,
-          );
-        }
-      }
-      logger.log('Pixiv refresh done (UI)');
-    } catch (e) {
-      // 这里吃掉异常并提示，避免你看到 “save failed” 但实际上 cookie 已经保存了
-      logger.log('Pixiv refresh failed (UI): $e');
-      if (mounted) {
-        _snack('已保存 Cookie，但刷新失败：$e');
-      }
-    }
+              // ✅ 关键修复：延迟到下一帧再 refresh，避免 pop + Provider rebuild 竞态触发空断言
+              if (!mounted) {
+                logger.log('Pixiv refresh skipped (UI): HomePage unmounted');
+                return;
+              }
 
-    logger.log('Pixiv save success (UI)');
-  } catch (e) {
-    logger.log('Pixiv save failed (UI): $e');
-    snack(ctx, '保存失败：$e');
-    saving = false;
-    if (ctx.mounted) setModalState(() {});
-  }
-}
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                () async {
+                  try {
+                    if (!mounted) return;
+
+                    await context.read<HomeController>().refresh();
+
+                    if (_scrollController.hasClients) {
+                      _scrollController.animateTo(
+                        0,
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOut,
+                      );
+                    }
+
+                    logger.log('Pixiv refresh done (UI)');
+                  } catch (e, st) {
+                    logger.log('Pixiv refresh failed (UI): $e\n$st');
+                    if (mounted) {
+                      _snack('已保存 Cookie，但刷新失败：$e');
+                    }
+                  }
+                }();
+              });
+
+              logger.log('Pixiv save success (UI)');
+            } catch (e, st) {
+              logger.log('Pixiv save failed (UI): $e\n$st');
+              snack(ctx, '保存失败：$e');
+              saving = false;
+              if (ctx.mounted) setModalState(() {});
+            }
+          }
 
           final bool saveEnabled = sheetDetected && sheetCookie.isNotEmpty;
 
@@ -397,8 +407,8 @@ class _HomePageState extends State<HomePage> {
                           await logCookieNamesSnapshot();
                           if (ctx.mounted) snack(ctx, '自动检测失败（已写入日志页），可点击「我已登录」手动检测');
                         }
-                      } catch (e) {
-                        logger.log('Pixiv auto check exception: $e');
+                      } catch (e, st) {
+                        logger.log('Pixiv auto check exception: $e\n$st');
                         if (ctx.mounted) snack(ctx, '自动检测异常：$e');
                       }
                     },
