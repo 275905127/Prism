@@ -18,6 +18,9 @@ import '../utils/prism_logger.dart';
 /// - 统一持久化（filters / pixiv prefs / cookie）
 /// - 统一图片 Headers 策略（防 403）
 /// - 统一错误映射（对 UI 输出友好文案）
+///
+/// 重要约束：
+/// - hydratePixivContext 必须“永不抛异常”，否则会导致 HomeController.refresh 链路被打断，从而表现为“刷不出图”
 class WallpaperService {
   final Dio _dio;
   final RuleEngine _engine;
@@ -50,57 +53,135 @@ class WallpaperService {
   PixivPreferences get pixivPreferences => _pixivRepo.prefs;
   PixivPagesConfig get pixivPagesConfig => _pixivRepo.pagesConfig;
 
+  /// Pixiv 上下文注水：
+  /// - 读取 cookie（prefs 优先，其次 rule.headers）
+  /// - 读取 pixiv prefs
+  ///
+  /// 关键：此函数不能抛异常，也不能在“未读到 cookie”时清空 repo cookie
   Future<void> hydratePixivContext(SourceRule rule) async {
     if (!isPixivRule(rule)) return;
 
-    // 1) cookie: prefs 优先，其次 rule.headers
-    String? cookie = await _prefs.loadPixivCookie(rule.id);
-
-    final h = rule.headers;
-    final fromHeaders = ((h?['Cookie'] ?? h?['cookie'])?.toString() ?? '').trim();
-    if ((cookie ?? '').trim().isEmpty && fromHeaders.isNotEmpty) {
-      cookie = fromHeaders;
-      await _prefs.savePixivCookie(rule.id, cookie); // 回填备份
-      _logger.debug('WallpaperService: backfilled pixiv cookie from rule.headers rule=${rule.id}');
+    // ---- 1) cookie ----
+    String? cookieFromPrefs;
+    try {
+      cookieFromPrefs = await _prefs.loadPixivCookie(rule.id);
+    } catch (e) {
+      // prefs 内部可能有 !，这里必须兜底
+      _logger.debug('WallpaperService: loadPixivCookie failed: $e');
+      cookieFromPrefs = null;
     }
 
-    _pixivRepo.setCookie((cookie ?? '').trim().isEmpty ? null : cookie);
+    final h = rule.headers;
+    final cookieFromHeaders = ((h?['Cookie'] ?? h?['cookie'])?.toString() ?? '').trim();
 
-    // 2) prefs
-    final raw = await _prefs.loadPixivPrefsRaw();
+    // 优先 prefs，其次 headers
+    String resolved = (cookieFromPrefs ?? '').trim();
+    if (resolved.isEmpty && cookieFromHeaders.isNotEmpty) {
+      resolved = cookieFromHeaders;
+
+      // 回填备份：失败也不能影响刷新/请求
+      try {
+        await _prefs.savePixivCookie(rule.id, resolved);
+        _logger.debug('WallpaperService: backfilled pixiv cookie from rule.headers rule=${rule.id}');
+      } catch (e) {
+        _logger.debug('WallpaperService: backfill savePixivCookie failed: $e');
+      }
+    }
+
+    // ✅ 关键：没有 cookie 时绝不主动清空 repo（避免登录态震荡）
+    if (resolved.isNotEmpty) {
+      _pixivRepo.setCookie(resolved);
+    } else {
+      _logger.debug('WallpaperService: pixiv cookie empty for rule=${rule.id} (keep repo state)');
+    }
+
+    // ---- 2) pixiv prefs ----
+    Map<String, dynamic>? raw;
+    try {
+      raw = await _prefs.loadPixivPrefsRaw();
+    } catch (e) {
+      _logger.debug('WallpaperService: loadPixivPrefsRaw failed: $e');
+      raw = null;
+    }
+
     if (raw != null) {
-      _pixivRepo.updatePreferences(
-        _pixivRepo.prefs.copyWith(
-          imageQuality: raw['quality']?.toString(),
-          showAi: raw['show_ai'] == true,
-          mutedTags: (raw['muted_tags'] as List?)?.map((e) => e.toString()).toList(),
-        ),
-      );
+      try {
+        final mutedRaw = raw['muted_tags'];
+        List<String>? muted;
+        if (mutedRaw is List) {
+          muted = mutedRaw.map((e) => e.toString()).toList();
+        } else if (mutedRaw is String && mutedRaw.trim().isNotEmpty) {
+          // 兼容旧格式：string -> split
+          muted = mutedRaw.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
+        }
+
+        _pixivRepo.updatePreferences(
+          _pixivRepo.prefs.copyWith(
+            imageQuality: raw['quality']?.toString(),
+            showAi: raw['show_ai'] == true,
+            mutedTags: muted,
+          ),
+        );
+      } catch (e) {
+        // prefs 格式异常也不能阻断请求
+        _logger.debug('WallpaperService: apply pixiv prefs failed: $e');
+      }
     }
   }
 
   Future<void> persistPixivPreferences() async {
     final p = _pixivRepo.prefs;
-    await _prefs.savePixivPrefsRaw({
-      'quality': p.imageQuality,
-      'show_ai': p.showAi,
-      'muted_tags': p.mutedTags,
-    });
+    try {
+      await _prefs.savePixivPrefsRaw({
+        'quality': p.imageQuality,
+        'show_ai': p.showAi,
+        'muted_tags': p.mutedTags,
+      });
+    } catch (e) {
+      // 不能影响主流程
+      _logger.debug('WallpaperService: savePixivPrefsRaw failed: $e');
+    }
   }
 
+  /// 保存 Pixiv Cookie（rule 粒度）
+  /// - cookie 为空：清除 prefs；并清除 repo cookie
+  /// - cookie 非空：保存 prefs；并注入 repo
+  ///
+  /// 注意：这里允许清空 repo，因为这是显式“保存/清空”的入口
   Future<void> setPixivCookieForRule(String ruleId, String? cookie) async {
     final c = (cookie ?? '').trim();
-    await _prefs.savePixivCookie(ruleId, c.isEmpty ? null : c);
+
+    try {
+      await _prefs.savePixivCookie(ruleId, c.isEmpty ? null : c);
+    } catch (e) {
+      // prefs 失败也不应该让 UI 保存流程崩掉（否则会出现你看到的 save failed）
+      _logger.debug('WallpaperService: savePixivCookie failed: $e');
+    }
+
+    // repo 注入不依赖 prefs
     _pixivRepo.setCookie(c.isEmpty ? null : c);
+
     _logger.log(c.isEmpty ? 'Pixiv cookie cleared' : 'Pixiv cookie updated');
   }
 
   // -------------------- filters persistence --------------------
 
-  Future<Map<String, dynamic>> loadFilters(String ruleId) => _prefs.loadFilters(ruleId);
+  Future<Map<String, dynamic>> loadFilters(String ruleId) async {
+    try {
+      return await _prefs.loadFilters(ruleId);
+    } catch (e) {
+      _logger.debug('WallpaperService: loadFilters failed: $e');
+      return <String, dynamic>{};
+    }
+  }
 
-  Future<void> saveFilters(String ruleId, Map<String, dynamic> filters) =>
-      _prefs.saveFilters(ruleId, filters);
+  Future<void> saveFilters(String ruleId, Map<String, dynamic> filters) async {
+    try {
+      await _prefs.saveFilters(ruleId, filters);
+    } catch (e) {
+      _logger.debug('WallpaperService: saveFilters failed: $e');
+    }
+  }
 
   // -------------------- image headers --------------------
 
@@ -115,7 +196,10 @@ class WallpaperService {
 
   Future<bool> getPixivLoginOk(SourceRule rule) async {
     if (!isPixivRule(rule)) return false;
+
+    // hydrate 不允许抛异常
     await hydratePixivContext(rule);
+
     try {
       return await _pixivRepo.getLoginOk(rule);
     } catch (e) {
@@ -131,7 +215,9 @@ class WallpaperService {
   }) async {
     try {
       if (isPixivRule(rule)) {
+        // hydrate 不允许阻断 pixiv fetch
         await hydratePixivContext(rule);
+
         return await _pixivRepo.fetch(
           rule,
           page: page,
@@ -217,5 +303,4 @@ class WallpaperService {
     });
     return out.isEmpty ? null : out;
   }
-
 }
