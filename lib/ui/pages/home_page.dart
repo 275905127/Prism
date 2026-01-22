@@ -267,7 +267,7 @@ class _HomePageState extends State<HomePage> {
               // 备份到 prefs
               try {
                 await context.read<WallpaperService>().setPixivCookieForRule(active.id, cookie);
-                logger.log('Pixiv cookie backup saved to prefs key=$key');
+                logger.log('Pixiv cookie backup saved for rule=${active.id}');
               } catch (e) {
                 logger.log('Pixiv cookie backup prefs failed: $e');
               }
