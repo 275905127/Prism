@@ -9,11 +9,9 @@ import '../utils/prism_logger.dart';
 
 /// SourceManager manages the rule list and currently active rule.
 ///
-/// Architecture constraints:
+/// Constraints:
 /// - MUST NOT depend on SharedPreferences directly (use [PreferencesStore]).
-/// - UI should depend on SourceManager state only; persistence happens here.
 class SourceManager extends ChangeNotifier {
-  // ✅ Versioned keys to isolate legacy/bad rules
   static const String _kRulesKey = 'prism_rules_v2';
   static const String _kActiveKey = 'prism_active_id_v2';
 
@@ -46,8 +44,7 @@ class SourceManager extends ChangeNotifier {
             parsed.add(SourceRule.fromJson(m));
           }
         } catch (e) {
-          // Skip broken items, but keep others
-          _logger.w('SourceManager', 'Skip invalid rule item: $e');
+          _logger.log('SourceManager: skip invalid rule item: $e');
         }
       }
       _rules = parsed;
@@ -56,11 +53,11 @@ class SourceManager extends ChangeNotifier {
       if (activeId != null) {
         _activeRule = _rules.where((r) => r.id == activeId).cast<SourceRule?>().firstOrNull;
       }
-
       _activeRule ??= _rules.isNotEmpty ? _rules.first : null;
+
       notifyListeners();
     } catch (e) {
-      _logger.e('SourceManager', 'Load rules failed: $e');
+      _logger.log('SourceManager: load rules failed: $e');
       _rules = [];
       _activeRule = null;
       notifyListeners();
@@ -82,19 +79,19 @@ class SourceManager extends ChangeNotifier {
       await _save();
       notifyListeners();
     } catch (e) {
-      // Keep message user-friendly; caller can map further if needed
       throw Exception('规则格式错误: $e');
     }
   }
 
   void setActive(String id) {
     if (_rules.isEmpty) return;
+
     final target = _rules.firstWhere(
       (r) => r.id == id,
       orElse: () => _rules.first,
     );
     _activeRule = target;
-    _save(); // fire-and-forget; persistence is best-effort
+    _save(); // best-effort
     notifyListeners();
   }
 
@@ -105,11 +102,10 @@ class SourceManager extends ChangeNotifier {
       _activeRule = _rules.isNotEmpty ? _rules.first : null;
     }
 
-    _save(); // fire-and-forget
+    _save(); // best-effort
     notifyListeners();
   }
 
-  /// ✅ Update a rule's headers using an immutable approach: toJson -> mutate -> fromJson.
   Future<void> updateRuleHeaders(String ruleId, Map<String, String>? headers) async {
     if (_rules.isEmpty) return;
 
@@ -118,8 +114,6 @@ class SourceManager extends ChangeNotifier {
 
     final old = _rules[idx];
     final m = Map<String, dynamic>.from(old.toJson());
-
-    // headers may be null (meaning clear)
     m['headers'] = headers;
 
     final updated = SourceRule.fromJson(m);
@@ -133,7 +127,6 @@ class SourceManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// ✅ Update a single header (e.g., Cookie). If [value] is empty, remove the key.
   Future<void> updateRuleHeader(String ruleId, String key, String? value) async {
     if (key.trim().isEmpty) return;
 
@@ -146,7 +139,6 @@ class SourceManager extends ChangeNotifier {
     final v = value?.trim() ?? '';
     if (v.isEmpty) {
       h.remove(key);
-      // Clean case variants to avoid duplicates
       if (key.toLowerCase() == 'cookie') {
         h.remove('cookie');
         h.remove('Cookie');
@@ -169,12 +161,11 @@ class SourceManager extends ChangeNotifier {
         await _prefs.remove(_kActiveKey);
       }
     } catch (e) {
-      _logger.e('SourceManager', 'Save rules failed: $e');
+      _logger.log('SourceManager: save rules failed: $e');
     }
   }
 }
 
-/// ✅ firstOrNull without extra deps
 extension _FirstOrNullExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
