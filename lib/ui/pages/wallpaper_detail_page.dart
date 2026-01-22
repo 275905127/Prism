@@ -9,17 +9,15 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/models/uni_wallpaper.dart';
+import '../../core/manager/source_manager.dart';
 import '../../core/services/wallpaper_service.dart';
 import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
-  final Map<String, String>? headers;
-
   const WallpaperDetailPage({
     super.key,
     required this.wallpaper,
-    this.headers,
   });
 
   @override
@@ -96,7 +94,10 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     try {
       final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
             url: widget.wallpaper.fullUrl,
-            headers: widget.headers,
+            headers: context.read<WallpaperService>().imageHeadersFor(
+              wallpaper: widget.wallpaper,
+              rule: context.read<SourceManager>().activeRule,
+            ),
           );
 
       final String extension = _detectExtension(imageBytes);
@@ -210,7 +211,10 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                     tag: heroTag,
                     child: CachedNetworkImage(
                       imageUrl: w.fullUrl,
-                      httpHeaders: widget.headers,
+                      httpHeaders: context.read<WallpaperService>().imageHeadersFor(
+                        wallpaper: w,
+                        rule: context.read<SourceManager>().activeRule,
+                      ),
                       fit: BoxFit.contain, // 居中包含
                       placeholder: (_, __) => const Center(
                         child: CircularProgressIndicator(color: _accentColor),
