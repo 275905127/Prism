@@ -132,8 +132,8 @@ class HomeController extends ChangeNotifier {
     if (rule != null) {
       try {
         await _service.saveFilters(rule.id, _currentFilters);
-      } catch (e) {
-        _logger.debug('HomeController: saveFilters failed: $e');
+      } catch (e, st) {
+        _logger.debug('HomeController: saveFilters failed: $e\n$st');
       }
     }
     await refresh();
@@ -169,15 +169,15 @@ class HomeController extends ChangeNotifier {
       if (_disposed) return;
       if (_currentRuleId != localRuleId) return;
       notifyListeners();
-    } catch (e) {
-      _logger.debug('HomeController: loadFilters failed: $e');
+    } catch (e, st) {
+      _logger.debug('HomeController: loadFilters failed: $e\n$st');
     }
 
     try {
       await _service.hydratePixivContext(rule);
-    } catch (e) {
+    } catch (e, st) {
       // 这里不让异常中断刷新，否则就会表现为“刷不出图”
-      _logger.debug('HomeController: hydratePixivContext failed: $e');
+      _logger.debug('HomeController: hydratePixivContext failed: $e\n$st');
     }
 
     // 不管 hydrate 成功与否都刷新
@@ -236,15 +236,15 @@ class HomeController extends ChangeNotifier {
 
       _loading = false;
       notifyListeners();
-    } catch (e) {
+    } catch (e, st) {
       if (_disposed) return;
       if (seq != _requestSeq) return;
       if (_currentRuleId != localRuleId) return;
 
       _loading = false;
 
-      // 真实异常写日志，UI 只拿友好提示
-      _logger.debug('HomeController: fetch failed: $e');
+      // 真实异常写日志（带堆栈），UI 只拿友好提示
+      _logger.debug('HomeController: fetch failed: $e\n$st');
 
       final msg = (e is PrismException) ? e.userMessage : '加载失败，请稍后重试。';
       _lastError = msg;
