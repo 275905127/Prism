@@ -37,6 +37,24 @@ class RuleEngine implements BaseImageSource {
   @override
   Future<bool> checkLoginStatus(SourceRule rule) async => true;
 
+  // ============================================================
+  // ✅ FIX #1：统一 URL 解析
+  // - 绝对 URL（http/https）必须原样返回
+  // - 仅相对路径才拼 imagePrefix
+  // ============================================================
+  String _resolveImageUrl(String? raw, SourceRule rule) {
+    if (raw == null) return '';
+    final s = raw.toString().trim();
+    if (s.isEmpty) return '';
+    final lower = s.toLowerCase();
+    if (lower.startsWith('http://') || lower.startsWith('https://')) return s;
+
+    final prefix = rule.imagePrefix;
+    if (prefix == null || prefix.trim().isEmpty) return s;
+
+    return prefix + s;
+  }
+
   @override
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
@@ -171,8 +189,6 @@ class RuleEngine implements BaseImageSource {
 
   // ============================================================
   // ✅ 新增：详情补全（供 WallpaperService / DetailPage 调用）
-  // - 若 rule.detailUrl 未配置：直接返回原 wallpaper（只靠列表数据）
-  // - 若配置了：GET detailUrl（支持 {id}），按 detailRootPath 定位 root，再走同一套通配字段解析
   // ============================================================
   Future<UniWallpaper> fetchDetail(
     SourceRule rule,
@@ -272,7 +288,6 @@ class RuleEngine implements BaseImageSource {
   String _normalizeText(String? s) {
     final v = (s ?? '').trim();
     if (v.isEmpty) return '';
-    // 避免 "null"/"undefined" 之类污染 UI
     final low = v.toLowerCase();
     if (low == 'null' || low == 'undefined' || low == 'nan') return '';
     return v;
@@ -290,8 +305,12 @@ class RuleEngine implements BaseImageSource {
     }
     final s = raw.toString().trim();
     if (s.isEmpty) return const [];
-    // 常见分隔符：逗号/空格/分号/竖线
-    final parts = s.split(RegExp(r'[,;\| ]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toSet().toList();
+    final parts = s
+        .split(RegExp(r'[,;\| ]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
     return parts;
   }
 
@@ -316,7 +335,6 @@ class RuleEngine implements BaseImageSource {
   dynamic _selectRoot(String? rootPath, dynamic json) {
     final p = (rootPath ?? '').trim();
     if (p.isEmpty || p == '.' || p == r'$') return json;
-    // 允许 JsonPath 或 dotPath
     return _getValue<dynamic>(p, json) ?? json;
   }
 
@@ -530,6 +548,7 @@ class RuleEngine implements BaseImageSource {
         return null;
       }
     });
+
     final results = await Future.wait(futures);
     final List<UniWallpaper> wallpapers = [];
     for (final url in results) {
@@ -558,13 +577,14 @@ class RuleEngine implements BaseImageSource {
     final out = <UniWallpaper>[];
 
     for (final item in list) {
-      String thumb = _getValue<String>(rule.thumbPath, item) ?? '';
-      String full = _getValue<String>(rule.fullPath, item) ?? thumb;
+      // ============================================================
+      // ✅ FIX #2：这里改为“统一 URL 解析”，不再用旧的 imagePrefix 拼接逻辑
+      // ============================================================
+      final rawThumb = _getValue<String>(rule.thumbPath, item);
+      final rawFull = _getValue<String>(rule.fullPath, item);
 
-      if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
-        if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
-        if (!full.startsWith('http')) full = rule.imagePrefix! + full;
-      }
+      String thumb = _resolveImageUrl(rawThumb, rule);
+      String full = _resolveImageUrl(rawFull ?? rawThumb, rule);
 
       final id = _stableId(rule, item, thumb, full);
       if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
