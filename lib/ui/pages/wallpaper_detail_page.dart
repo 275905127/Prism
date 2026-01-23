@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/services/wallpaper_service.dart';
+import '../widgets/foggy_app_bar.dart'; [span_0](start_span)//[span_0](end_span) 引用 FoggyHelper
 import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
@@ -50,7 +51,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   // 缓存，避免 build 期间 provider lookup / 反复计算引发重建抖动
   Map<String, String>? _cachedHeaders;
 
-  // Wallhaven Light Theme Colors
+  // Colors
   static const Color _bgColor = Colors.white;
   static const Color _textColor = Color(0xFF333333);
   static const Color _subTextColor = Color(0xFF777777);
@@ -311,7 +312,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
     final resolvedHeaders = _cachedHeaders ?? _resolveImageHeaders();
 
-    // ✅ 详情信息项：从两阶段补全后的 _wallpaper 读取（Stage 2 成功就会更新这些值）
+    // ✅ 详情信息项：从两阶段补全后的 _wallpaper 读取
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown User";
     final String viewsCount = w.views.isNotEmpty ? w.views : "-";
     final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
@@ -324,47 +325,39 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
 
     final double viewportH = _imageViewportHeight(context, w);
+    
+    [span_1](start_span)//[span_1](end_span) 使用 FoggyHelper 构建渐变
+    final gradientDeco = FoggyHelper.getDecoration(isBottom: false); 
 
     return Scaffold(
       backgroundColor: _bgColor,
-      body: CustomScrollView(
-        physics: const BouncingScrollPhysics(),
-        slivers: [
-          SliverToBoxAdapter(
-            child: SafeArea(
-              bottom: false,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 8, top: 6),
-                  child: IconButton(
-                    icon: const _BackButtonBadge(),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: GestureDetector(
-              onDoubleTap: _onDoubleTap,
-              child: SizedBox(
-                height: viewportH,
-                width: double.infinity,
-                child: Container(
-                  color: Colors.transparent,
-                  child: Hero(
-                    tag: heroTag,
-                    child: ClipRect(
-                      child: InteractiveViewer(
-                        transformationController: _transformController,
-                        minScale: 1.0,
-                        maxScale: 4.0,
-                        clipBehavior: Clip.hardEdge,
-                        child: SizedBox.expand(
-                          child: _FullImageOnly(
-                            url: w.fullUrl,
-                            headers: resolvedHeaders,
+      body: Stack(
+        children: [
+          CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(
+                child: GestureDetector(
+                  onDoubleTap: _onDoubleTap,
+                  child: SizedBox(
+                    height: viewportH,
+                    width: double.infinity,
+                    child: Container(
+                      color: Colors.transparent,
+                      child: Hero(
+                        tag: heroTag,
+                        child: ClipRect(
+                          child: InteractiveViewer(
+                            transformationController: _transformController,
+                            minScale: 1.0,
+                            maxScale: 4.0,
+                            clipBehavior: Clip.hardEdge,
+                            child: SizedBox.expand(
+                              child: _FullImageOnly(
+                                url: w.fullUrl,
+                                headers: resolvedHeaders,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -372,169 +365,189 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                   ),
                 ),
               ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Container(
-              color: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 操作栏
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+              SliverToBoxAdapter(
+                child: Container(
+                  color: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildSimpleAction(Icons.crop_free, "设为壁纸", () => _snack("暂未实现")),
-                      _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
-                      _buildSimpleAction(Icons.share, "分享", _shareImage),
-                      _buildSimpleAction(
-                        Icons.download,
-                        "下载原图",
-                        _isDownloading ? null : _saveImage,
-                        isProcessing: _isDownloading,
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  // ✅ 详情补全状态（轻提示，不打扰）
-                  if (!_detailHydrated)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: Text(
-                        '正在补全详情信息…',
-                        style: TextStyle(color: _subTextColor, fontSize: 12),
-                      ),
-                    ),
-
-                  const SizedBox(height: 24),
-                  const Divider(height: 1, color: Color(0xFFEEEEEE)),
-                  const SizedBox(height: 24),
-
-                  // 上传者
-                  InkWell(
-                    onTap: () => _searchUploader(uploaderName),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
-                      child: Row(
+                      // 操作栏
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
                         children: [
-                          CircleAvatar(
-                            radius: 20,
-                            backgroundColor: _accentColor,
-                            child: Text(
-                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                            ),
+                          _buildSimpleAction(Icons.crop_free, "设为壁纸", () => _snack("暂未实现")),
+                          _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
+                          _buildSimpleAction(Icons.share, "分享", _shareImage),
+                          _buildSimpleAction(
+                            Icons.download,
+                            "下载原图",
+                            _isDownloading ? null : _saveImage,
+                            isProcessing: _isDownloading,
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  "上传者: $uploaderName",
-                                  style: const TextStyle(
-                                    color: _textColor,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                const Text(
-                                  "查看该作者的更多作品",
-                                  style: TextStyle(color: _subTextColor, fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const Icon(Icons.chevron_right, color: Colors.grey),
                         ],
                       ),
-                    ),
-                  ),
 
-                  const SizedBox(height: 20),
+                      const SizedBox(height: 12),
 
-                  // ✅ 详细参数（你说“被删完了”的就是这一块：这里完整恢复）
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF9F9F9),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      children: [
-                        _buildInfoRow(Icons.visibility, "$viewsCount 浏览", Icons.favorite, "$favsCount 收藏"),
+                      // ✅ 详情补全状态（轻提示）
+                      if (!_detailHydrated)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text(
+                            '正在补全详情信息…',
+                            style: TextStyle(color: _subTextColor, fontSize: 12),
+                          ),
+                        ),
+
+                      const SizedBox(height: 24),
+                      const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                      const SizedBox(height: 24),
+
+                      // 上传者
+                      InkWell(
+                        onTap: () => _searchUploader(uploaderName),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 20,
+                                backgroundColor: _accentColor,
+                                child: Text(
+                                  uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
+                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      "上传者: $uploaderName",
+                                      style: const TextStyle(
+                                        color: _textColor,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                    const Text(
+                                      "查看该作者的更多作品",
+                                      style: TextStyle(color: _subTextColor, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.chevron_right, color: Colors.grey),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 20),
+
+                      // ✅ 详细参数展示
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF9F9F9),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          children: [
+                            _buildInfoRow(Icons.visibility, "$viewsCount 浏览", Icons.favorite, "$favsCount 收藏"),
+                            const SizedBox(height: 12),
+                            _buildInfoRow(Icons.aspect_ratio, resolution, Icons.sd_storage, fileSize),
+                            const SizedBox(height: 12),
+                            _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
+                            const SizedBox(height: 12),
+                            _buildInfoRow(
+                              Icons.image,
+                              fileType,
+                              Icons.link,
+                              "查看源地址",
+                              isLink: true,
+                              onTapLink: () {
+                                Clipboard.setData(ClipboardData(text: w.fullUrl));
+                                _snack("✅ 源地址已复制");
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 20),
+
+                      // 相似搜索（跳搜索页）
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.auto_awesome, color: _textColor),
+                          label: const Text(
+                            "查看更多相似作品",
+                            style: TextStyle(color: _textColor),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            side: const BorderSide(color: Color(0xFFDDDDDD)),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                          onPressed: _searchSimilar,
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // ✅ 内嵌相似推荐列表
+                      _buildInlineSimilarSection(),
+
+                      const SizedBox(height: 24),
+
+                      if (w.tags.isNotEmpty) ...[
+                        const Row(
+                          children: [
+                            Icon(Icons.label, size: 18, color: _subTextColor),
+                            SizedBox(width: 8),
+                            Text(
+                              "Tags",
+                              style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 12),
-                        _buildInfoRow(Icons.aspect_ratio, resolution, Icons.sd_storage, fileSize),
-                        const SizedBox(height: 12),
-                        _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
-                        const SizedBox(height: 12),
-                        _buildInfoRow(
-                          Icons.image,
-                          fileType,
-                          Icons.link,
-                          "查看源地址",
-                          isLink: true,
-                          onTapLink: () {
-                            Clipboard.setData(ClipboardData(text: w.fullUrl));
-                            _snack("✅ 源地址已复制");
-                          },
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: w.tags.map((tag) => _buildTag(tag)).toList(),
                         ),
                       ],
-                    ),
+
+                      SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
+                    ],
                   ),
+                ),
+              ),
+            ],
+          ),
 
-                  const SizedBox(height: 20),
-
-                  // 相似搜索（跳搜索页）
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.auto_awesome, color: _textColor),
-                      label: const Text(
-                        "查看更多相似作品",
-                        style: TextStyle(color: _textColor),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        side: const BorderSide(color: Color(0xFFDDDDDD)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                      onPressed: _searchSimilar,
-                    ),
-                  ),
-
-                  const SizedBox(height: 16),
-
-                  // ✅ 内嵌相似推荐列表（不用跳走）
-                  _buildInlineSimilarSection(),
-
-                  const SizedBox(height: 24),
-
-                  if (w.tags.isNotEmpty) ...[
-                    const Row(
-                      children: [
-                        Icon(Icons.label, size: 18, color: _subTextColor),
-                        SizedBox(width: 8),
-                        Text(
-                          "Tags",
-                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: w.tags.map((tag) => _buildTag(tag)).toList(),
-                    ),
-                  ],
-
-                  SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
-                ],
+          [span_2](start_span)// ✅[span_2](end_span) 顶部雾化渐变栏
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              height: MediaQuery.of(context).padding.top + kToolbarHeight,
+              decoration: gradientDeco,
+              child: AppBar(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                scrolledUnderElevation: 0,
+                leading: IconButton(
+                  icon: const _BackButtonBadge(),
+                  onPressed: () => Navigator.pop(context),
+                ),
               ),
             ),
           ),
