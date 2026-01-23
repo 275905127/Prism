@@ -134,24 +134,37 @@ class WallpaperService {
   }
 
   /// ✅ 统一构造“相似搜索 query”
-  String buildSimilarQuery(UniWallpaper w) {
-    final validTags = w.tags
-        .map((t) => t.trim())
-        .where((t) => t.length >= 2)
-        .where((t) => !t.toLowerCase().startsWith('ai'))
-        .where((t) => !t.toLowerCase().startsWith('r-'))
-        .take(4)
-        .toList(growable: false);
-
-    if (validTags.isNotEmpty) return validTags.join(' ');
-
-    final uploader = w.uploader.trim();
-    if (uploader.isNotEmpty && uploader.toLowerCase() != 'unknown user') {
-      return 'user:$uploader';
-    }
-
-    return '';
+/// - Wallhaven：强制用 like:{id} 对齐官方“相似搜索”
+/// - 其他：tags fallback（最多 4 个）
+String buildSimilarQuery(
+  UniWallpaper w, {
+  required SourceRule rule,
+}) {
+  // ✅ Wallhaven 官方一致：按图片ID相似
+  final rid = (rule.id).toLowerCase();
+  if (rid == 'wallhaven_ultimate_v3' || rid.startsWith('wallhaven')) {
+    final id = w.id.trim();
+    if (id.isNotEmpty) return 'like:$id';
   }
+
+  // ✅ fallback：tags
+  final validTags = w.tags
+      .map((t) => t.trim())
+      .where((t) => t.length >= 2)
+      .where((t) => !t.toLowerCase().startsWith('ai'))
+      .where((t) => !t.toLowerCase().startsWith('r-'))
+      .take(4)
+      .toList(growable: false);
+
+  if (validTags.isNotEmpty) return validTags.join(' ');
+
+  final uploader = w.uploader.trim();
+  if (uploader.isNotEmpty && uploader.toLowerCase() != 'unknown user') {
+    return 'user:$uploader';
+  }
+
+  return '';
+}
 
   /// ✅ 统一“相似作品”入口（Pixiv 优先官方推荐；失败回退 query 搜索）
   ///
