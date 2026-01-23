@@ -65,15 +65,14 @@ class PixivClient {
     updateConfig(cookie: cookie);
   }
 
-  /// ✅ 修复：安全设置 Header，防止 _cookie 在并发/时序问题下为空时解包崩溃
+  /// ✅ 安全设置 Header，避免 _cookie 在并发/时序问题下为空时解包崩溃
   void _refreshHeaders() {
     final headers = <String, dynamic>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     };
-    
-    // 安全获取
+
     final c = _cookie;
     if (c != null && c.trim().isNotEmpty) {
       headers['Cookie'] = c;
@@ -86,25 +85,21 @@ class PixivClient {
     );
   }
 
-  /// ✅ 修复：同样进行安全检查
   Map<String, String> buildImageHeaders() {
     final out = <String, String>{
       'User-Agent': _userAgent,
       'Referer': 'https://www.pixiv.net/',
     };
-    
-    // 安全获取
+
     final c = _cookie;
     if (c != null && c.trim().isNotEmpty) {
       out['Cookie'] = c;
     }
-    
+
     return out;
   }
 
   void _installDebugInterceptors() {
-    // 注意：这里会移除已有的 InterceptorsWrapper（你目前项目就是这么写的）
-    // 如果你后续在 Dio 上也用 InterceptorsWrapper 做别的事，建议改成只移除“PixivClient 自己加的”那一个。
     _dio.interceptors.removeWhere((i) => i is InterceptorsWrapper);
     _dio.interceptors.add(
       InterceptorsWrapper(
@@ -122,7 +117,6 @@ class PixivClient {
           handler.next(resp);
         },
         onError: (e, handler) {
-          // 错误属于关键信息：走 _log
           _log?.call('PixivClient ERR ${e.type} ${e.requestOptions.path} $e');
           handler.next(e);
         },
@@ -290,11 +284,170 @@ class PixivClient {
       return [];
     }
   }
+
+  /// ✅ 详情补全：用于“阶段 2”补全 uploader/tags/view/bookmark/createDate
+  Future<PixivIllustDetail?> getIllustDetail(String illustId) async {
+    if (illustId.trim().isEmpty) return null;
+    try {
+      final resp = await _dio.get('/ajax/illust/$illustId');
+      if ((resp.statusCode ?? 0) >= 400) return null;
+      final data = resp.data;
+      if (data is! Map) return null;
+      final body = data['body'];
+      if (body is! Map) return null;
+      final detail = PixivIllustDetail.fromBody(body);
+      return detail.id.isEmpty ? null : detail;
+    } catch (e) {
+      _log?.call('PixivClient.getIllustDetail exception: $e');
+      return null;
+    }
+  }
+
+  /// ✅ user: 通配：用户名 -> userId（取第一个匹配）
+  ///
+  /// 说明：Pixiv 的 users 搜索返回结构可能随时间变化，因此这里用“多形态解析”：
+  /// - body.users / body.user / body.userPreview / body.items 等都尝试一下
+  Future<String?> resolveUserIdByName(String userName) async {
+    final q = userName.trim();
+    if (q.isEmpty) return null;
+
+    try {
+      // 常见路径：/ajax/search/users/<word>?word=<word>&p=1
+      final resp = await _dio.get(
+        '/ajax/search/users/${Uri.encodeComponent(q)}',
+        queryParameters: {'word': q, 'p': 1},
+      );
+      if ((resp.statusCode ?? 0) >= 400) return null;
+
+      final data = resp.data;
+      if (data is! Map) return null;
+      final body = data['body'];
+      if (body is! Map) return null;
+
+      dynamic candidates = body['users'] ?? body['user'] ?? body['items'] ?? body['userPreviews'];
+      if (candidates is Map && candidates['data'] is List) {
+        candidates = candidates['data'];
+      }
+
+      if (candidates is! List || candidates.isEmpty) return null;
+
+      for (final c in candidates) {
+        if (c is! Map) continue;
+        final id = (c['userId'] ?? c['id'] ?? c['user_id'])?.toString().trim() ?? '';
+        if (id.isNotEmpty) return id;
+      }
+      return null;
+    } catch (e) {
+      _log?.call('PixivClient.resolveUserIdByName exception: $e');
+      return null;
+    }
+  }
 }
 
 // =========================================================
-// Data Models  (必须存在，否则 Repository 侧全崩)
+// Data Models
 // =========================================================
+
+class PixivIllustDetail {
+  final String id;
+  final String userId;
+  final String userName;
+  final List<String> tags;
+  final int viewCount;
+  final int bookmarkCount;
+  final String createDate; // ISO string from pixiv
+  final int width;
+  final int height;
+  final int xRestrict;
+  final int illustType;
+  final int aiType;
+
+  const PixivIllustDetail({
+    required this.id,
+    required this.userId,
+    required this.userName,
+    required this.tags,
+    required this.viewCount,
+    required this.bookmarkCount,
+    required this.createDate,
+    required this.width,
+    required this.height,
+    required this.xRestrict,
+    required this.illustType,
+    required this.aiType,
+  });
+
+  bool get isUgoira => illustType == 2;
+  bool get isAi => aiType == 2;
+
+  factory PixivIllustDetail.fromBody(Map body) {
+    final id = (body['illustId'] ?? body['id'])?.toString() ?? '';
+    final userId = (body['userId'] ?? body['user_id'])?.toString() ?? '';
+    final userName = (body['userName'] ?? body['user_name'])?.toString() ?? '';
+
+    final viewCount = _parseInt(body['viewCount'] ?? body['view_count']);
+    final bookmarkCount = _parseInt(body['bookmarkCount'] ?? body['bookmark_count']);
+
+    final createDate = (body['createDate'] ?? body['uploadDate'] ?? body['create_date'] ?? '')?.toString() ?? '';
+
+    final width = _parseInt(body['width']);
+    final height = _parseInt(body['height']);
+    final xRestrict = _parseInt(body['xRestrict'] ?? body['x_restrict']);
+    final illustType = _parseInt(body['illustType'] ?? body['illust_type']);
+    final aiType = _parseInt(body['aiType'] ?? body['ai_type']);
+
+    final tags = _parseTagsFromDetail(body['tags']);
+
+    return PixivIllustDetail(
+      id: id,
+      userId: userId,
+      userName: userName,
+      tags: tags,
+      viewCount: viewCount,
+      bookmarkCount: bookmarkCount,
+      createDate: createDate,
+      width: width,
+      height: height,
+      xRestrict: xRestrict,
+      illustType: illustType,
+      aiType: aiType,
+    );
+  }
+
+  static int _parseInt(dynamic v) {
+    if (v is int) return v;
+    if (v is String) return int.tryParse(v) ?? 0;
+    return 0;
+  }
+
+  static List<String> _parseTagsFromDetail(dynamic tagsNode) {
+    // 常见结构： { tags: [ { tag: "xxx", ...}, ...] }
+    // 或： { tags: { tags: [ { tag: "xxx"} ] } }
+    // 或：直接是 List<String>
+    if (tagsNode == null) return const [];
+
+    dynamic node = tagsNode;
+    if (node is Map) {
+      node = node['tags'] ?? node['data'] ?? node['items'];
+    }
+    if (node is List) {
+      final out = <String>[];
+      for (final e in node) {
+        if (e is String) {
+          final s = e.trim();
+          if (s.isNotEmpty) out.add(s);
+          continue;
+        }
+        if (e is Map) {
+          final s = (e['tag'] ?? e['name'] ?? e['value'])?.toString().trim() ?? '';
+          if (s.isNotEmpty) out.add(s);
+        }
+      }
+      return out;
+    }
+    return const [];
+  }
+}
 
 class PixivIllustBrief {
   final String id;
@@ -307,6 +460,13 @@ class PixivIllustBrief {
   final int illustType;
   final int aiType;
 
+  // ✅ 新增：用于详情页/相似搜索的关键字段（优先从列表阶段拿）
+  final String userId;
+  final String userName;
+  final int viewCount;
+  final int bookmarkCount;
+  final String createDate;
+
   const PixivIllustBrief({
     required this.id,
     required this.title,
@@ -317,12 +477,20 @@ class PixivIllustBrief {
     this.tags = const [],
     this.illustType = 0,
     this.aiType = 0,
+    this.userId = '',
+    this.userName = '',
+    this.viewCount = 0,
+    this.bookmarkCount = 0,
+    this.createDate = '',
   });
+
   bool get isUgoira => illustType == 2;
   bool get isAi => aiType == 2;
+
   factory PixivIllustBrief.fromJson(dynamic json) {
     if (json is! Map) return _empty();
     if (json['id'] == null) return _empty();
+
     return PixivIllustBrief(
       id: _parseString(json['id']),
       title: _parseString(json['title']),
@@ -333,11 +501,20 @@ class PixivIllustBrief {
       tags: _parseTags(json['tags']),
       illustType: _parseInt(json['illustType']),
       aiType: _parseInt(json['aiType']),
+
+      // search/artworks 里经常存在（但不保证）
+      userId: _parseString(json['userId'] ?? json['user_id']),
+      userName: _parseString(json['userName'] ?? json['user_name']),
+      viewCount: _parseInt(json['viewCount'] ?? json['view_count']),
+      bookmarkCount: _parseInt(json['bookmarkCount'] ?? json['bookmark_count']),
+      createDate: _parseString(json['createDate'] ?? json['create_date'] ?? json['uploadDate']),
     );
   }
 
   factory PixivIllustBrief.fromMap(dynamic json) {
     if (json is! Map) return _empty();
+
+    // touch/ajax/ranking、touch/ajax/user/illusts 返回字段常用下划线
     return PixivIllustBrief(
       id: _parseString(json['id']),
       title: _parseString(json['title']),
@@ -348,6 +525,12 @@ class PixivIllustBrief {
       tags: _parseTags(json['tags']),
       illustType: _parseInt(json['illust_type']),
       aiType: _parseInt(json['ai_type']),
+
+      userId: _parseString(json['user_id'] ?? json['userId']),
+      userName: _parseString(json['user_name'] ?? json['userName']),
+      viewCount: _parseInt(json['view_count'] ?? json['viewCount']),
+      bookmarkCount: _parseInt(json['bookmark_count'] ?? json['bookmarkCount']),
+      createDate: _parseString(json['create_date'] ?? json['createDate'] ?? json['upload_date'] ?? json['uploadDate']),
     );
   }
 
@@ -359,14 +542,19 @@ class PixivIllustBrief {
         height: 0,
         xRestrict: 0,
       );
+
   static String _parseString(dynamic v) => v?.toString() ?? '';
+
   static int _parseInt(dynamic v) {
     if (v is int) return v;
     if (v is String) return int.tryParse(v) ?? 0;
     return 0;
   }
 
-  static List<String> _parseTags(dynamic v) => (v is List) ? v.map((e) => e.toString()).toList() : [];
+  static List<String> _parseTags(dynamic v) {
+    if (v is List) return v.map((e) => e.toString()).toList();
+    return const [];
+  }
 }
 
 class PixivPageUrls {
@@ -374,12 +562,14 @@ class PixivPageUrls {
   final String regular;
   final String small;
   final String thumbMini;
+
   const PixivPageUrls({
     required this.original,
     required this.regular,
     required this.small,
     required this.thumbMini,
   });
+
   factory PixivPageUrls.fromJson(dynamic json) {
     if (json is! Map) return _empty();
     final urls = json['urls'];
