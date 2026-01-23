@@ -313,25 +313,62 @@ class RuleEngine implements BaseImageSource {
   }
 
   List<String> _normalizeTags(dynamic raw) {
-    if (raw == null) return const [];
-    if (raw is List) {
-      final out = raw
-          .map((e) => (e?.toString() ?? '').trim())
-          .where((s) => s.isNotEmpty)
-          .toSet()
-          .toList();
-      return out;
+  if (raw == null) return const [];
+
+  // 1️⃣ List：可能是 List<String> 或 List<Map>
+  if (raw is List) {
+    final out = <String>{};
+
+    for (final e in raw) {
+      if (e == null) continue;
+
+      // List<String>
+      if (e is String) {
+        final t = e.trim();
+        if (t.isNotEmpty) out.add(t);
+        continue;
+      }
+
+      // List<Map>（Wallhaven / 通用 REST API）
+      if (e is Map) {
+        String pick(Map m, String k) => (m[k]?.toString() ?? '').trim();
+
+        final name  = pick(e, 'name');
+        final tag   = pick(e, 'tag');
+        final label = pick(e, 'label');
+        final alias = pick(e, 'alias');
+
+        final t = name.isNotEmpty
+            ? name
+            : tag.isNotEmpty
+                ? tag
+                : label.isNotEmpty
+                    ? label
+                    : alias;
+
+        if (t.isNotEmpty) out.add(t);
+        continue;
+      }
+
+      // fallback
+      final s = e.toString().trim();
+      if (s.isNotEmpty) out.add(s);
     }
-    final s = raw.toString().trim();
-    if (s.isEmpty) return const [];
-    final parts = s
-        .split(RegExp(r'[,;\| ]+'))
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toSet()
-        .toList();
-    return parts;
+
+    return out.toList(growable: false);
   }
+
+  // 2️⃣ String：兜底拆分
+  final s = raw.toString().trim();
+  if (s.isEmpty) return const [];
+
+  return s
+      .split(RegExp(r'[,\;|\ ]+'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toSet()
+      .toList(growable: false);
+}
 
   String? _pickFirstString(List<String> candidates, dynamic source) {
     final v = _pickFirstDynamic(candidates, source);
