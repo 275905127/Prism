@@ -124,6 +124,56 @@ class _FilterSheetState extends State<FilterSheet> {
     );
   }
 
+  // =========================
+  // ✅ 兼容：Option name/value 读取
+  // =========================
+
+  String _readOptionValue(dynamic option) {
+    if (option == null) return '';
+    try {
+      final v = (option as dynamic).value;
+      if (v != null) return v.toString();
+    } catch (_) {}
+
+    // 兼容某些 schema 可能用 id/key
+    try {
+      final v = (option as dynamic).id;
+      if (v != null) return v.toString();
+    } catch (_) {}
+    try {
+      final v = (option as dynamic).key;
+      if (v != null) return v.toString();
+    } catch (_) {}
+
+    return option.toString();
+  }
+
+  String _readOptionName(dynamic option) {
+    if (option == null) return '';
+    try {
+      final v = (option as dynamic).name;
+      if (v != null && v.toString().trim().isNotEmpty) return v.toString();
+    } catch (_) {}
+
+    // 兼容 SourceFilterOption 常见字段：label/title/text
+    try {
+      final v = (option as dynamic).label;
+      if (v != null && v.toString().trim().isNotEmpty) return v.toString();
+    } catch (_) {}
+    try {
+      final v = (option as dynamic).title;
+      if (v != null && v.toString().trim().isNotEmpty) return v.toString();
+    } catch (_) {}
+    try {
+      final v = (option as dynamic).text;
+      if (v != null && v.toString().trim().isNotEmpty) return v.toString();
+    } catch (_) {}
+
+    // 最后兜底：用 value
+    final val = _readOptionValue(option).trim();
+    return val.isNotEmpty ? val : option.toString();
+  }
+
   // 🔥 构建 Pixiv 专属区域 (排行榜 + 收藏数)
   Widget _buildPixivExtras() {
     final bool isRanking = _selectedRankingMode.isNotEmpty;
@@ -131,6 +181,7 @@ class _FilterSheetState extends State<FilterSheet> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // 1. 排行榜选择器
         const Padding(
           padding: EdgeInsets.fromLTRB(20, 10, 20, 8),
           child: Text("排行榜 (Ranking)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
@@ -151,6 +202,8 @@ class _FilterSheetState extends State<FilterSheet> {
             ],
           ),
         ),
+
+        // 2. 最小收藏数 (仅普通搜索模式有效)
         Opacity(
           opacity: isRanking ? 0.4 : 1.0,
           child: Column(
@@ -172,8 +225,8 @@ class _FilterSheetState extends State<FilterSheet> {
               Slider(
                 value: _minBookmarks,
                 min: 0,
-                max: 20000,
-                divisions: 20,
+                max: 20000, // 2万收藏
+                divisions: 20, // 1000 一档
                 activeColor: Colors.black,
                 inactiveColor: Colors.grey[200],
                 label: _minBookmarks.toInt().toString(),
@@ -208,6 +261,7 @@ class _FilterSheetState extends State<FilterSheet> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide.none),
         onSelected: (val) {
           setState(() {
+            // 点击已选中的不做取消，必须切回“普通搜索”来取消
             if (val) _selectedRankingMode = modeValue;
           });
         },
@@ -249,6 +303,7 @@ class _FilterSheetState extends State<FilterSheet> {
             ),
           ),
           const Divider(height: 1),
+
           Flexible(
             child: ListView(
               shrinkWrap: true,
@@ -258,6 +313,7 @@ class _FilterSheetState extends State<FilterSheet> {
               ],
             ),
           ),
+
           Padding(
             padding: const EdgeInsets.all(20),
             child: SizedBox(
@@ -269,6 +325,7 @@ class _FilterSheetState extends State<FilterSheet> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 onPressed: () {
+                  // 🔥 保存 Pixiv 专属状态到 tempValues
                   if (isPixiv) {
                     if (_selectedRankingMode.isNotEmpty) {
                       _tempValues['mode'] = _selectedRankingMode;
@@ -308,7 +365,7 @@ class _FilterSheetState extends State<FilterSheet> {
 
     final bool isRankingMode = _selectedRankingMode.isNotEmpty;
     if (isPixiv && isRankingMode && (filter.key == 'mode' || filter.key == 'order')) {
-      return const SizedBox();
+      return const SizedBox(); // 直接隐藏，或者置灰
     }
 
     final bool shouldShowLoginHint = isPixiv &&
@@ -344,33 +401,36 @@ class _FilterSheetState extends State<FilterSheet> {
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
-            // ✅ 关键修复点：FilterOption -> SourceFilterOption
-            children: filter.options.map<Widget>((SourceFilterOption option) {
+            // ✅ 这里不再绑定具体 option 类型，避免 model 迭代期间 CI 反复炸
+            children: filter.options.map<Widget>((option) {
               final dynamic val = _tempValues[filter.key];
+
+              final String optValue = _readOptionValue(option);
+              final String optName = _readOptionName(option);
 
               bool isSelected = false;
               if (isMulti) {
                 final List<String> list = (val is List) ? val.map((e) => e.toString()).toList() : <String>[];
-                isSelected = list.contains(option.value);
+                isSelected = list.contains(optValue);
               } else {
-                isSelected = (val?.toString() ?? '') == option.value;
+                isSelected = (val?.toString() ?? '') == optValue;
               }
 
               final bool locked = isPixiv
                   ? _isOptionLockedForPixiv(
                       filterKey: filter.key,
-                      optionValue: option.value,
+                      optionValue: optValue,
                       hasCookie: hasCookie,
                       loginOk: loginOk,
                       loginResolved: loginResolved,
                     )
                   : false;
 
-              final chip = FilterChip(
+              final FilterChip chip = FilterChip(
                 label: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(option.name),
+                    Text(optName),
                     if (locked) ...[
                       const SizedBox(width: 6),
                       const Icon(Icons.lock_outline, size: 14, color: Colors.grey),
@@ -397,14 +457,14 @@ class _FilterSheetState extends State<FilterSheet> {
                             final List<String> list =
                                 (val is List) ? val.map((e) => e.toString()).toList() : <String>[];
                             if (selected) {
-                              if (!list.contains(option.value)) list.add(option.value);
+                              if (!list.contains(optValue)) list.add(optValue);
                             } else {
-                              list.remove(option.value);
+                              list.remove(optValue);
                             }
                             _tempValues[filter.key] = list;
                           } else {
                             if (selected) {
-                              _tempValues[filter.key] = option.value;
+                              _tempValues[filter.key] = optValue;
                             } else {
                               _tempValues.remove(filter.key);
                             }
