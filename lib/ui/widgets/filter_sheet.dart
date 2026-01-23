@@ -36,7 +36,7 @@ class _FilterSheetState extends State<FilterSheet> {
   void initState() {
     super.initState();
     _tempValues = <String, dynamic>{};
-    
+
     // 1. 复制通用 Filters
     widget.currentValues.forEach((key, value) {
       if (value is List) {
@@ -50,7 +50,7 @@ class _FilterSheetState extends State<FilterSheet> {
     if (_tempValues.containsKey('min_bookmarks')) {
       _minBookmarks = double.tryParse(_tempValues['min_bookmarks'].toString()) ?? 0;
     }
-    
+
     final mode = _tempValues['mode']?.toString() ?? '';
     if (['daily', 'weekly', 'monthly', 'rookie', 'original', 'male', 'female'].contains(mode)) {
       _selectedRankingMode = mode;
@@ -65,7 +65,7 @@ class _FilterSheetState extends State<FilterSheet> {
     final activeRule = context.read<SourceManager>().activeRule;
     final service = context.read<WallpaperService>();
     final isPixiv = service.isPixivRule(activeRule);
-    
+
     if (!isPixiv || activeRule == null) return;
     if (_pixivLoginFuture != null) return;
 
@@ -131,7 +131,6 @@ class _FilterSheetState extends State<FilterSheet> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 1. 排行榜选择器
         const Padding(
           padding: EdgeInsets.fromLTRB(20, 10, 20, 8),
           child: Text("排行榜 (Ranking)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
@@ -152,8 +151,6 @@ class _FilterSheetState extends State<FilterSheet> {
             ],
           ),
         ),
-        
-        // 2. 最小收藏数 (仅普通搜索模式有效)
         Opacity(
           opacity: isRanking ? 0.4 : 1.0,
           child: Column(
@@ -175,14 +172,16 @@ class _FilterSheetState extends State<FilterSheet> {
               Slider(
                 value: _minBookmarks,
                 min: 0,
-                max: 20000, // 2万收藏
-                divisions: 20, // 1000 一档
+                max: 20000,
+                divisions: 20,
                 activeColor: Colors.black,
                 inactiveColor: Colors.grey[200],
                 label: _minBookmarks.toInt().toString(),
-                onChanged: isRanking ? null : (v) {
-                  setState(() => _minBookmarks = v);
-                },
+                onChanged: isRanking
+                    ? null
+                    : (v) {
+                        setState(() => _minBookmarks = v);
+                      },
               ),
             ],
           ),
@@ -209,7 +208,6 @@ class _FilterSheetState extends State<FilterSheet> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide.none),
         onSelected: (val) {
           setState(() {
-            // 点击已选中的不做取消，必须切回“普通搜索”来取消
             if (val) _selectedRankingMode = modeValue;
           });
         },
@@ -251,20 +249,15 @@ class _FilterSheetState extends State<FilterSheet> {
             ),
           ),
           const Divider(height: 1),
-          
           Flexible(
             child: ListView(
               shrinkWrap: true,
               children: [
-                // 🔥 如果是 Pixiv，插入专属控件
                 if (isPixiv) _buildPixivExtras(),
-
-                // 通用 Filters
                 ...widget.filters.map((filter) => _buildFilterGroup(filter)),
               ],
             ),
           ),
-          
           Padding(
             padding: const EdgeInsets.all(20),
             child: SizedBox(
@@ -276,24 +269,20 @@ class _FilterSheetState extends State<FilterSheet> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 onPressed: () {
-                  // 🔥 保存 Pixiv 专属状态到 tempValues
                   if (isPixiv) {
                     if (_selectedRankingMode.isNotEmpty) {
-                      _tempValues['mode'] = _selectedRankingMode; // 覆盖 mode 为 ranking_daily 等
-                      _tempValues.remove('min_bookmarks'); // 排行榜不带收藏数
+                      _tempValues['mode'] = _selectedRankingMode;
+                      _tempValues.remove('min_bookmarks');
                     } else {
-                      // 普通模式
                       if (_minBookmarks > 0) {
                         _tempValues['min_bookmarks'] = _minBookmarks.toInt();
                       } else {
                         _tempValues.remove('min_bookmarks');
                       }
-                      
-                      // 如果之前选了 ranking，现在切回普通，需要确保 mode 不是 ranking_xxx
-                      // 这里假设 default mode 在 generic filters 里有处理，或者依赖 repository 默认值
+
                       final currentMode = _tempValues['mode']?.toString() ?? '';
-                      if (currentMode.startsWith('ranking_') || ['daily','weekly'].contains(currentMode)) {
-                         _tempValues.remove('mode'); // 移除排行榜模式，回退到默认
+                      if (currentMode.startsWith('ranking_') || ['daily', 'weekly'].contains(currentMode)) {
+                        _tempValues.remove('mode');
                       }
                     }
                   }
@@ -317,10 +306,9 @@ class _FilterSheetState extends State<FilterSheet> {
     final bool loginResolved = _pixivLoginOk != null;
     final bool loginOk = _pixivLoginOk == true;
 
-    // 如果当前选了排行榜模式，锁定通用的 mode 和 order 选项，避免用户混淆
     final bool isRankingMode = _selectedRankingMode.isNotEmpty;
     if (isPixiv && isRankingMode && (filter.key == 'mode' || filter.key == 'order')) {
-      return const SizedBox(); // 直接隐藏，或者置灰
+      return const SizedBox();
     }
 
     final bool shouldShowLoginHint = isPixiv &&
@@ -356,7 +344,8 @@ class _FilterSheetState extends State<FilterSheet> {
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
-            children: filter.options.map<Widget>((FilterOption option) {
+            // ✅ 关键修复点：FilterOption -> SourceFilterOption
+            children: filter.options.map<Widget>((SourceFilterOption option) {
               final dynamic val = _tempValues[filter.key];
 
               bool isSelected = false;
@@ -377,7 +366,7 @@ class _FilterSheetState extends State<FilterSheet> {
                     )
                   : false;
 
-              final FilterChip chip = FilterChip(
+              final chip = FilterChip(
                 label: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
