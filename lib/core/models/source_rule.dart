@@ -338,12 +338,33 @@ class SourceFilterOption {
     return s.trim().isEmpty ? def : s;
   }
 
+  static String _pickFirst(Map<String, dynamic> json, List<String> keys, {String def = ''}) {
+    for (final k in keys) {
+      final v = json[k];
+      final s = (v?.toString() ?? '').trim();
+      if (s.isNotEmpty) return s;
+    }
+    return def;
+  }
+
   factory SourceFilterOption.fromJson(Map<String, dynamic> json) {
+    // ✅ 兼容旧配置：name -> label
+    // ✅ 兼容更多写法：title/text -> label
+    // ✅ value 也兼容 id/key
+    final value = _pickFirst(json, ['value', 'id', 'key'], def: '');
+    final label = _pickFirst(json, ['label', 'name', 'title', 'text'], def: value);
+
     return SourceFilterOption(
-      label: _asString(json['label'], def: _asString(json['value'])),
-      value: _asString(json['value']),
+      label: label,
+      value: value,
     );
   }
 
+  // ✅ 输出时保持兼容：依旧用 label/value
+  // （旧配置用 name/value 也能读；新配置建议用 label/value）
   Map<String, dynamic> toJson() => {'label': label, 'value': value};
+
+  // ✅ 防止 UI 或日志出现 Instance of 'SourceFilterOption'
+  @override
+  String toString() => label.trim().isNotEmpty ? label : value;
 }
