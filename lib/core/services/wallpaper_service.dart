@@ -75,6 +75,22 @@ class WallpaperService {
 
       await source.restoreSession(prefs: _prefs, rule: rule);
 
+    // ✅ Wallhaven 兼容：relevance 必须配合 q/like，否则可能返回空 data
+      Map<String, dynamic>? effectiveFilters = filterParams;
+      final isWallhaven = rule.id.toLowerCase().contains('wallhaven') ||
+          rule.url.toLowerCase().contains('wallhaven.cc/api/v1');
+
+      final q = (query ?? '').trim();
+      if (isWallhaven) {
+        effectiveFilters = Map<String, dynamic>.from(filterParams ?? const {});
+        final sorting = (effectiveFilters['sorting'] ?? '').toString().trim().toLowerCase();
+
+        // 没有 q 时，强制改成 date_added（否则 relevance 可能空结果）
+        if (q.isEmpty && sorting == 'relevance') {
+          effectiveFilters['sorting'] = 'date_added';
+        }
+      }
+
       return await source.fetch(
         rule,
         page: page,
