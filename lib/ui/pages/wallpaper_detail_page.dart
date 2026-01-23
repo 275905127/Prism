@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:gal/gal.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -16,8 +15,9 @@ import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
-  final Map<String, String>? headers;
 
+  /// Compatibility: allow callers (e.g. SearchDelegate) to pass headers explicitly.
+  final Map<String, String>? headers;
   const WallpaperDetailPage({
     super.key,
     required this.wallpaper,
@@ -28,30 +28,29 @@ class WallpaperDetailPage extends StatefulWidget {
   State<WallpaperDetailPage> createState() => _WallpaperDetailPageState();
 }
 
-class _WallpaperDetailPageState extends State<WallpaperDetailPage>
-    with SingleTickerProviderStateMixin {
+class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTickerProviderStateMixin {
   bool _isDownloading = false;
 
-  // ===== 详情（两阶段） =====
+  // ✅ 详情补全后的 wallpaper（两阶段模型 Stage 2）
   late UniWallpaper _wallpaper;
+
   bool _detailHydrating = false;
   bool _detailHydrated = false;
 
-  // ===== 相似列表 =====
-  bool _similarExpanded = false;
+  // ✅ 相似推荐（内嵌列表）
   bool _similarLoading = false;
-  bool _similarHasMore = true;
-  int _similarPage = 1;
-  final List<UniWallpaper> _similarList = [];
+  bool _similarLoaded = false;
+  List<UniWallpaper> _similar = const [];
 
-  // ===== 图片缩放 =====
-  final TransformationController _transformController =
-      TransformationController();
+  // 图片缩放控制
+  final TransformationController _transformController = TransformationController();
   late final AnimationController _animationController;
   Animation<Matrix4>? _animation;
 
+  // 缓存，避免 build 期间 provider lookup / 反复计算引发重建抖动
   Map<String, String>? _cachedHeaders;
 
+  // Wallhaven Light Theme Colors
   static const Color _bgColor = Colors.white;
   static const Color _textColor = Color(0xFF333333);
   static const Color _subTextColor = Color(0xFF777777);
@@ -68,7 +67,9 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
       duration: const Duration(milliseconds: 200),
     )..addListener(() {
         final a = _animation;
-        if (a != null) _transformController.value = a.value;
+        if (a != null) {
+          _transformController.value = a.value;
+        }
       });
   }
 
@@ -77,9 +78,16 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
     super.didChangeDependencies();
     _cachedHeaders ??= _resolveImageHeaders();
 
+    // ✅ 只触发一次详情补全（Stage 2）
     if (!_detailHydrated && !_detailHydrating) {
       _detailHydrating = true;
       _hydrateDetailIfPossible();
+    }
+
+    // ✅ 只触发一次相似推荐加载（不依赖详情补全完成）
+    if (!_similarLoaded && !_similarLoading) {
+      _similarLoading = true;
+      _loadSimilarInline();
     }
   }
 
@@ -87,10 +95,12 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
     try {
       final rule = context.read<SourceManager>().activeRule;
       if (rule == null) {
+        if (!mounted) return;
         setState(() => _detailHydrated = true);
         return;
       }
 
+      // ✅ 新版 WallpaperService：fetchDetail({base, rule}) —— Stage 2 真正补全发生在 Service/Engine
       final updated = await context.read<WallpaperService>().fetchDetail(
             base: _wallpaper,
             rule: rule,
@@ -102,9 +112,49 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
         _detailHydrated = true;
       });
     } catch (_) {
-      if (mounted) setState(() => _detailHydrated = true);
+      // 详情补全失败不影响页面展示（保持“列表数据”）
+      if (!mounted) return;
+      setState(() => _detailHydrated = true);
     } finally {
       _detailHydrating = false;
+    }
+  }
+
+  Future<void> _loadSimilarInline() async {
+    try {
+      final rule = context.read<SourceManager>().activeRule;
+      if (rule == null) {
+        if (!mounted) return;
+        setState(() {
+          _similar = const [];
+          _similarLoaded = true;
+        });
+        return;
+      }
+
+      final service = context.read<WallpaperService>();
+
+      // ✅ 相似推荐：优先走 fetchSimilar（Pixiv 可专用；其他走 query fallback）
+      final list = await service.fetchSimilar(
+        seed: _wallpaper,
+        rule: rule,
+        page: 1,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        // 去重：避免把自己塞回来
+        _similar = list.where((e) => e.id != _wallpaper.id).take(18).toList(growable: false);
+        _similarLoaded = true;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _similar = const [];
+        _similarLoaded = true;
+      });
+    } finally {
+      _similarLoading = false;
     }
   }
 
@@ -115,53 +165,22 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
     super.dispose();
   }
 
-  // ================= 相似加载 =================
-
-  void _toggleSimilar() {
-    setState(() => _similarExpanded = !_similarExpanded);
-    if (_similarExpanded && _similarList.isEmpty) {
-      _loadSimilar();
+  void _onDoubleTap() {
+    final matrix = _transformController.value;
+    if (matrix.getMaxScaleOnAxis() > 1.0) {
+      _animation = Matrix4Tween(begin: matrix, end: Matrix4.identity()).animate(_animationController);
+      _animationController.forward(from: 0);
+    } else {
+      final zoomed = Matrix4.identity()..scale(2.0);
+      _animation = Matrix4Tween(begin: matrix, end: zoomed).animate(_animationController);
+      _animationController.forward(from: 0);
     }
   }
-
-  Future<void> _loadSimilar() async {
-    if (_similarLoading || !_similarHasMore) return;
-
-    final rule = context.read<SourceManager>().activeRule;
-    if (rule == null) return;
-
-    setState(() => _similarLoading = true);
-
-    try {
-      final list = await context.read<WallpaperService>().fetchSimilar(
-            seed: _wallpaper,
-            rule: rule,
-            page: _similarPage,
-          );
-
-      if (!mounted) return;
-      setState(() {
-        if (list.isEmpty) {
-          _similarHasMore = false;
-        } else {
-          _similarList.addAll(
-            list.where((e) => e.id != _wallpaper.id),
-          );
-          _similarPage++;
-        }
-      });
-    } catch (_) {
-      if (mounted) _snack("加载相似作品失败");
-    } finally {
-      if (mounted) setState(() => _similarLoading = false);
-    }
-  }
-
-  // ================= 辅助 =================
 
   Map<String, String>? _resolveImageHeaders() {
-    if (widget.headers != null && widget.headers!.isNotEmpty)
-      return widget.headers;
+    final passed = widget.headers;
+    if (passed != null && passed.isNotEmpty) return passed;
+
     final rule = context.read<SourceManager>().activeRule;
     return context.read<WallpaperService>().imageHeadersFor(
           wallpaper: _wallpaper,
@@ -169,313 +188,669 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
         );
   }
 
-  void _onDoubleTap() {
-    final m = _transformController.value;
-    final end = m.getMaxScaleOnAxis() > 1
-        ? Matrix4.identity()
-        : (Matrix4.identity()..scale(2.0));
-    _animation = Matrix4Tween(begin: m, end: end).animate(_animationController);
-    _animationController.forward(from: 0);
+  String _detectExtension(Uint8List bytes) {
+    if (bytes.length < 12) return 'jpg';
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return 'jpg';
+    if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) return 'png';
+    if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) return 'gif';
+    if (bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return 'webp';
+    return 'jpg';
   }
 
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content: Text(msg), duration: const Duration(milliseconds: 1400)),
+  Future<void> _saveImage() async {
+    if (_isDownloading) return;
+
+    try {
+      final hasAccess = await Gal.hasAccess();
+      if (!hasAccess) {
+        final granted = await Gal.requestAccess();
+        if (!granted) {
+          if (mounted) _snack("❌ 需要相册权限");
+          return;
+        }
+      }
+    } catch (_) {}
+
+    setState(() => _isDownloading = true);
+    if (mounted) _snack("正在下载原图...");
+
+    try {
+      final headers = _cachedHeaders ?? _resolveImageHeaders();
+
+      final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
+            url: _wallpaper.fullUrl,
+            headers: headers,
+          );
+
+      final String extension = _detectExtension(imageBytes);
+      final String fileName = "prism_${_wallpaper.sourceId}_${_wallpaper.id}.$extension";
+
+      await Gal.putImageBytes(
+        imageBytes,
+        album: 'Prism',
+        name: fileName,
+      );
+
+      if (mounted) _snack("✅ 已保存到相册");
+    } on GalException catch (e) {
+      if (mounted) _snack("❌ 保存失败: ${e.type.message}");
+    } catch (e) {
+      if (mounted) _snack("❌ 下载错误: $e");
+    } finally {
+      if (mounted) setState(() => _isDownloading = false);
+    }
+  }
+
+  void _shareImage() => Share.share(_wallpaper.fullUrl);
+
+  void _copyUrl() {
+    Clipboard.setData(ClipboardData(text: _wallpaper.fullUrl));
+    _snack("✅ 链接已复制");
+  }
+
+  void _searchUploader(String uploader) {
+    final u = uploader.trim();
+    if (u.isEmpty || u.toLowerCase() == 'unknown user') {
+      _snack("没有可用的上传者信息");
+      return;
+    }
+
+    showSearch(
+      context: context,
+      delegate: WallpaperSearchDelegate(),
+      query: 'user:$u',
     );
   }
 
-  // ================= Build Components =================
+  void _searchSimilar() {
+    final service = context.read<WallpaperService>();
+    final query = service.buildSimilarQuery(_wallpaper).trim();
 
-  // 构建元数据区域 (作者、标签、统计)
-  Widget _buildMetaInfo(UniWallpaper w) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 1. 作者与时间行
-          Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: Colors.grey[200],
-                radius: 18,
-                child: Text(
-                  w.uploader.isNotEmpty ? w.uploader[0].toUpperCase() : 'U',
-                  style: const TextStyle(
-                      color: Colors.black, fontWeight: FontWeight.bold),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      w.uploader,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: _textColor,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (w.createdAt.isNotEmpty)
-                      Text(
-                        w.createdAt,
-                        style:
-                            const TextStyle(fontSize: 12, color: _subTextColor),
-                      ),
-                  ],
-                ),
-              ),
-              // AI 标识
-              if (w.isAi)
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.blueAccent.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(4),
-                    border:
-                        Border.all(color: Colors.blueAccent.withOpacity(0.3)),
-                  ),
-                  child: const Text('AI 生成',
-                      style: TextStyle(fontSize: 10, color: Colors.blueAccent)),
-                ),
-            ],
-          ),
+    if (query.isEmpty) {
+      _snack("未能生成相似搜索条件");
+      return;
+    }
 
-          const SizedBox(height: 16),
+    showSearch(
+      context: context,
+      delegate: WallpaperSearchDelegate(),
+      query: query,
+    );
+  }
 
-          // 2. 数据统计行 (浏览、收藏、尺寸)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _buildStatItem(Icons.remove_red_eye_outlined,
-                  w.views.isEmpty ? '-' : w.views, '浏览'),
-              _buildStatItem(Icons.favorite_border,
-                  w.favorites.isEmpty ? '-' : w.favorites, '收藏'),
-              _buildStatItem(Icons.aspect_ratio,
-                  '${w.width.toInt()}x${w.height.toInt()}', '分辨率'),
-              _buildStatItem(
-                  Icons.data_usage, w.fileSize.isEmpty ? '-' : w.fileSize, '大小'),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-
-          // 3. 标签流
-          if (w.tags.isNotEmpty) ...[
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: w.tags.map((tag) {
-                return Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: _tagBgColor,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    tag,
-                    style: const TextStyle(fontSize: 12, color: _textColor),
-                  ),
-                );
-              }).toList(),
-            ),
-          ],
-        ],
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(color: Colors.white)),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Colors.black87,
+        duration: const Duration(milliseconds: 1500),
       ),
     );
   }
 
-  // 辅助小组件：单个统计项
-  Widget _buildStatItem(IconData icon, String value, String label) {
-    return Column(
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: _subTextColor),
-            const SizedBox(width: 4),
-            Text(value,
-                style:
-                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          ],
-        ),
-        const SizedBox(height: 2),
-        Text(label, style: const TextStyle(fontSize: 10, color: _subTextColor)),
-      ],
-    );
-  }
+  double _imageViewportHeight(BuildContext context, UniWallpaper w) {
+    final screenW = MediaQuery.of(context).size.width;
 
-  // ================= Main Build =================
+    if (w.width > 0 && w.height > 0) {
+      final ratio = w.width / w.height;
+      final h = screenW / ratio;
+      return h.clamp(220.0, 5000.0);
+    }
+
+    final screenH = MediaQuery.of(context).size.height;
+    final h = screenH * 0.85;
+    return h.clamp(320.0, 900.0);
+  }
 
   @override
   Widget build(BuildContext context) {
     final w = _wallpaper;
-    final headers = _cachedHeaders;
-    final topPadding = MediaQuery.of(context).padding.top;
+    final heroTag = '${w.sourceId}::${w.id}';
+
+    final resolvedHeaders = _cachedHeaders ?? _resolveImageHeaders();
+
+    // ✅ 详情信息项：从两阶段补全后的 _wallpaper 读取（Stage 2 成功就会更新这些值）
+    final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown User";
+    final String viewsCount = w.views.isNotEmpty ? w.views : "-";
+    final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
+    final String fileSize = w.fileSize.isNotEmpty ? w.fileSize : "-";
+    final String uploadDate = w.createdAt.isNotEmpty ? w.createdAt : "-";
+    final String fileType = w.mimeType.isNotEmpty ? w.mimeType : "image/jpeg";
+    final String category = (w.grade != null && w.grade!.trim().isNotEmpty) ? w.grade!.trim() : "General";
+
+    final hasSize = w.width > 0 && w.height > 0;
+    final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
+
+    final double viewportH = _imageViewportHeight(context, w);
 
     return Scaffold(
       backgroundColor: _bgColor,
-      // 使用 Stack 实现顶部悬浮栏覆盖
-      body: Stack(
-        children: [
-          // 底层内容滚动视图
-          CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              // 图片区域
-              SliverToBoxAdapter(
-                child: GestureDetector(
-                  onDoubleTap: _onDoubleTap,
+      body: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          SliverToBoxAdapter(
+            child: SafeArea(
+              bottom: false,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 6),
+                  child: IconButton(
+                    icon: const _BackButtonBadge(),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: GestureDetector(
+              onDoubleTap: _onDoubleTap,
+              child: SizedBox(
+                height: viewportH,
+                width: double.infinity,
+                child: Container(
+                  color: Colors.transparent,
                   child: Hero(
-                    tag: '${w.sourceId}::${w.id}',
-                    child: InteractiveViewer(
-                      transformationController: _transformController,
-                      minScale: 1,
-                      maxScale: 4,
-                      child: CachedNetworkImage(
-                        imageUrl: w.fullUrl,
-                        httpHeaders: headers,
-                        fit: BoxFit.contain,
+                    tag: heroTag,
+                    child: ClipRect(
+                      child: InteractiveViewer(
+                        transformationController: _transformController,
+                        minScale: 1.0,
+                        maxScale: 4.0,
+                        clipBehavior: Clip.hardEdge,
+                        child: SizedBox.expand(
+                          child: _FullImageOnly(
+                            url: w.fullUrl,
+                            headers: resolvedHeaders,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-
-              // 元数据展示区域 (新增)
-              SliverToBoxAdapter(
-                child: _buildMetaInfo(w),
-              ),
-
-              // 分割间距
-              const SliverToBoxAdapter(child: SizedBox(height: 8)),
-
-              // 相似入口按钮
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: OutlinedButton.icon(
-                    icon: Icon(
-                      _similarExpanded ? Icons.expand_less : Icons.auto_awesome,
-                      color: _textColor,
-                    ),
-                    label: Text(
-                      _similarExpanded ? "收起相似作品" : "查看更多相似作品",
-                      style: const TextStyle(color: _textColor),
-                    ),
-                    onPressed: _toggleSimilar,
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      side: const BorderSide(color: Color(0xFFEEEEEE)),
-                    ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Container(
+              color: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 操作栏
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildSimpleAction(Icons.crop_free, "设为壁纸", () => _snack("暂未实现")),
+                      _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
+                      _buildSimpleAction(Icons.share, "分享", _shareImage),
+                      _buildSimpleAction(
+                        Icons.download,
+                        "下载原图",
+                        _isDownloading ? null : _saveImage,
+                        isProcessing: _isDownloading,
+                      ),
+                    ],
                   ),
-                ),
-              ),
 
-              // 相似列表
-              if (_similarExpanded)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    child: MasonryGridView.count(
-                      crossAxisCount: 2,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      itemCount: _similarList.length,
-                      itemBuilder: (context, index) {
-                        final item = _similarList[index];
-                        return GestureDetector(
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    WallpaperDetailPage(wallpaper: item),
-                              ),
-                            );
-                          },
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: CachedNetworkImage(
-                              imageUrl: item.thumbUrl,
-                              httpHeaders: headers,
-                              fit: BoxFit.cover,
+                  const SizedBox(height: 12),
+
+                  // ✅ 详情补全状态（轻提示，不打扰）
+                  if (!_detailHydrated)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        '正在补全详情信息…',
+                        style: TextStyle(color: _subTextColor, fontSize: 12),
+                      ),
+                    ),
+
+                  const SizedBox(height: 24),
+                  const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                  const SizedBox(height: 24),
+
+                  // 上传者
+                  InkWell(
+                    onTap: () => _searchUploader(uploaderName),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 20,
+                            backgroundColor: _accentColor,
+                            child: Text(
+                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                             ),
                           ),
-                        );
-                      },
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "上传者: $uploaderName",
+                                  style: const TextStyle(
+                                    color: _textColor,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                                const Text(
+                                  "查看该作者的更多作品",
+                                  style: TextStyle(color: _subTextColor, fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, color: Colors.grey),
+                        ],
+                      ),
                     ),
                   ),
-                ),
 
-              if (_similarExpanded)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: _similarLoading
-                          ? const CircularProgressIndicator()
-                          : (_similarHasMore
-                              ? TextButton(
-                                  onPressed: _loadSimilar,
-                                  child: const Text("加载更多"),
-                                )
-                              : const Text(
-                                  "没有更多了",
-                                  style: TextStyle(color: _subTextColor),
-                                )),
+                  const SizedBox(height: 20),
+
+                  // ✅ 详细参数（你说“被删完了”的就是这一块：这里完整恢复）
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF9F9F9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      children: [
+                        _buildInfoRow(Icons.visibility, "$viewsCount 浏览", Icons.favorite, "$favsCount 收藏"),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(Icons.aspect_ratio, resolution, Icons.sd_storage, fileSize),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
+                        const SizedBox(height: 12),
+                        _buildInfoRow(
+                          Icons.image,
+                          fileType,
+                          Icons.link,
+                          "查看源地址",
+                          isLink: true,
+                          onTapLink: () {
+                            Clipboard.setData(ClipboardData(text: w.fullUrl));
+                            _snack("✅ 源地址已复制");
+                          },
+                        ),
+                      ],
                     ),
                   ),
-                ),
 
-              SliverToBoxAdapter(
-                child: SizedBox(
-                    height: MediaQuery.of(context).padding.bottom + 32),
-              ),
-            ],
-          ),
+                  const SizedBox(height: 20),
 
-          // 顶层悬浮：渐变雾化 AppBar
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: kToolbarHeight + topPadding,
-            child: Container(
-              padding: EdgeInsets.only(top: topPadding),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.white.withOpacity(0.9),
-                    Colors.white.withOpacity(0.7),
-                    Colors.white.withOpacity(0.0),
+                  // 相似搜索（跳搜索页）
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.auto_awesome, color: _textColor),
+                      label: const Text(
+                        "查看更多相似作品",
+                        style: TextStyle(color: _textColor),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: const BorderSide(color: Color(0xFFDDDDDD)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onPressed: _searchSimilar,
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // ✅ 内嵌相似推荐列表（不用跳走）
+                  _buildInlineSimilarSection(),
+
+                  const SizedBox(height: 24),
+
+                  if (w.tags.isNotEmpty) ...[
+                    const Row(
+                      children: [
+                        Icon(Icons.label, size: 18, color: _subTextColor),
+                        SizedBox(width: 8),
+                        Text(
+                          "Tags",
+                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: w.tags.map((tag) => _buildTag(tag)).toList(),
+                    ),
                   ],
-                  stops: const [0.0, 0.6, 1.0],
-                ),
-              ),
-              child: Row(
-                children: [
-                  const BackButton(color: Colors.black),
-                  const Expanded(child: SizedBox()),
-                  // 如果需要右上角按钮（如下载/分享），可以在这里添加
-                  // IconButton(icon: Icon(Icons.share), onPressed: () {}),
+
+                  SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
                 ],
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildInlineSimilarSection() {
+    // 未加载完成时，给轻量提示
+    if (!_similarLoaded) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 4),
+        child: Text(
+          '正在加载相似推荐…',
+          style: TextStyle(color: _subTextColor, fontSize: 12),
+        ),
+      );
+    }
+
+    if (_similar.isEmpty) {
+      return Row(
+        children: [
+          const Expanded(
+            child: Text(
+              '暂无相似推荐',
+              style: TextStyle(color: _subTextColor, fontSize: 12),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              if (_similarLoading) return;
+              setState(() {
+                _similarLoaded = false;
+                _similarLoading = true;
+              });
+              _loadSimilarInline();
+            },
+            child: const Text('重试'),
+          ),
+        ],
+      );
+    }
+
+    final rule = context.read<SourceManager>().activeRule;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.auto_awesome, size: 18, color: _subTextColor),
+            SizedBox(width: 8),
+            Text(
+              "相似推荐",
+              style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 128,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: _similar.length.clamp(0, 18),
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final it = _similar[index];
+              final headers = context.read<WallpaperService>().imageHeadersFor(wallpaper: it, rule: rule);
+
+              final tag = '${it.sourceId}::${it.id}';
+              return InkWell(
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => WallpaperDetailPage(
+                        wallpaper: it,
+                        headers: headers,
+                      ),
+                    ),
+                  );
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    width: 148,
+                    color: const Color(0xFFF3F3F3),
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Hero(
+                            tag: tag,
+                            child: CachedNetworkImage(
+                              imageUrl: it.thumbUrl.isNotEmpty ? it.thumbUrl : it.fullUrl,
+                              httpHeaders: headers,
+                              fit: BoxFit.cover,
+                              placeholder: (_, __) => const SizedBox.shrink(),
+                              errorWidget: (_, __, ___) => const Center(
+                                child: Icon(Icons.broken_image_outlined, color: Colors.grey),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: 8,
+                          bottom: 8,
+                          right: 8,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.45),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              it.uploader.isNotEmpty ? it.uploader : it.id,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white, fontSize: 11),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSimpleAction(IconData icon, String label, VoidCallback? onTap, {bool isProcessing = false}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          children: [
+            isProcessing
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor),
+                  )
+                : Icon(icon, color: _textColor, size: 26),
+            const SizedBox(height: 6),
+            Text(label, style: const TextStyle(color: _subTextColor, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(
+    IconData i1,
+    String t1,
+    IconData i2,
+    String t2, {
+    bool isLink = false,
+    VoidCallback? onTapLink,
+  }) {
+    Widget item(IconData i, String t, bool link, {VoidCallback? onTap}) {
+      final text = Text(
+        t,
+        style: TextStyle(
+          color: link ? _accentColor : _textColor,
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          decoration: link ? TextDecoration.underline : null,
+          decorationColor: _accentColor,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+
+      return Expanded(
+        child: Row(
+          children: [
+            Icon(i, size: 16, color: _accentColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: link
+                  ? InkWell(
+                      onTap: onTap,
+                      child: text,
+                    )
+                  : text,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        item(i1, t1, false),
+        const SizedBox(width: 16),
+        item(i2, t2, isLink, onTap: onTapLink),
+      ],
+    );
+  }
+
+  Widget _buildTag(String tag) {
+    return InkWell(
+      onTap: () {
+        showSearch(
+          context: context,
+          delegate: WallpaperSearchDelegate(),
+          query: tag,
+        );
+      },
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: _tagBgColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFE0E0E0)),
+        ),
+        child: Text(
+          tag,
+          style: const TextStyle(color: _textColor, fontSize: 13),
+        ),
+      ),
+    );
+  }
+}
+
+class _BackButtonBadge extends StatelessWidget {
+  const _BackButtonBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.95),
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: const [
+          BoxShadow(
+            blurRadius: 10,
+            offset: Offset(0, 4),
+            color: Color(0x1A000000),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(6),
+      child: const Icon(Icons.arrow_back, color: Colors.black),
+    );
+  }
+}
+
+class _FullImageOnly extends StatefulWidget {
+  final String url;
+  final Map<String, String>? headers;
+
+  const _FullImageOnly({
+    required this.url,
+    required this.headers,
+  });
+
+  @override
+  State<_FullImageOnly> createState() => _FullImageOnlyState();
+}
+
+class _FullImageOnlyState extends State<_FullImageOnly> {
+  bool _loaded = false;
+  bool _failed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fitted(Widget child) {
+      return Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: child,
+        ),
+      );
+    }
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: CachedNetworkImage(
+            imageUrl: widget.url,
+            httpHeaders: widget.headers,
+            fit: BoxFit.contain,
+            fadeInDuration: const Duration(milliseconds: 120),
+            placeholderFadeInDuration: const Duration(milliseconds: 60),
+            imageBuilder: (context, provider) {
+              if (!_loaded) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) setState(() => _loaded = true);
+                });
+              }
+              return fitted(Image(image: provider));
+            },
+            placeholder: (context, url) => const SizedBox.shrink(),
+            errorWidget: (context, url, error) {
+              if (!_failed) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) setState(() => _failed = true);
+                });
+              }
+              return const Center(child: Icon(Icons.broken_image_outlined, size: 46, color: Colors.grey));
+            },
+          ),
+        ),
+        if (!_loaded && !_failed)
+          const Positioned.fill(
+            child: Center(child: CircularProgressIndicator()),
+          ),
+      ],
     );
   }
 }
