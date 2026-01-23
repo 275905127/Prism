@@ -264,24 +264,32 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   void _searchSimilar() {
-    final service = context.read<WallpaperService>();
-    final query =
-    service.buildSimilarQuery(
-      _wallpaper,
-      rule: _rule, // 或当前页面持有的 SourceRule
-    ).trim();
+   final service = context.read<WallpaperService>();
+   final rule = context.read<SourceManager>().activeRule;
 
-    if (query.isEmpty) {
-      _snack("未能生成相似搜索条件");
-      return;
-    }
-
-    showSearch(
-      context: context,
-      delegate: WallpaperSearchDelegate(),
-      query: query,
-    );
+   if (rule == null) {
+     _snack("当前没有可用的图源规则");
+     return;
   }
+
+   final query = service
+      .buildSimilarQuery(
+        _wallpaper,
+        rule: rule,
+      )
+      .trim();
+
+   if (query.isEmpty) {
+    _snack("未能生成相似搜索条件");
+    return;
+  }
+
+   showSearch(
+    context: context,
+    delegate: WallpaperSearchDelegate(),
+    query: query,
+  );
+}
 
   void _snack(String msg) {
     if (!mounted) return;
