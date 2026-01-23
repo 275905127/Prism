@@ -95,43 +95,15 @@ class WallpaperService {
 
   // -------------------- Detail & Similar (New) --------------------
 
-  /// ✅ 两阶段详情补全入口（Service 统一收口，UI 不触 Repo/Engine）
-  ///
-  /// 当前阶段：Pixiv 的 fetch() 已尽量补齐 uploader/tags 等关键字段，
-  /// 所以这里默认直接返回 base（不额外发请求，避免详情页再次放大网络成本）。
-  ///
-  /// 将来若你要做“进入详情页再补一次 detail/recommend”，
-  /// 也可以在这里对 Pixiv 做专用分发（不需要污染 BaseImageSource）。
   Future<UniWallpaper> fetchDetail({
     required UniWallpaper base,
     required SourceRule? rule,
   }) async {
-    if (rule == null) return base;
-
-    final source = _sources.firstWhere(
-      (s) => s.supports(rule),
-      orElse: () => _sources.last,
-    );
-
-    try {
-      final headers = imageHeadersFor(wallpaper: base, rule: rule);
-      return await source.fetchDetail(
-        rule,
-        base,
-        headers: headers,
-      );
-    } catch (e) {
-      _logger.debug('WallpaperService.fetchDetail failed: $e');
-      return base;
-    }
+    // 目前不额外请求：保持稳定、无副作用
+    return base;
   }
 
   /// ✅ 统一构造“相似搜索 query”
-  ///
-  /// 规则与当前 DetailPage 一致：
-  /// - 优先 tags（过滤太短/AI/r- 前缀）取前 4 个
-  /// - tags 为空则 fallback uploader -> user:<uploader>
-  /// - 都没有则返回空串
   String buildSimilarQuery(UniWallpaper w) {
     final validTags = w.tags
         .map((t) => t.trim())
@@ -151,19 +123,35 @@ class WallpaperService {
     return '';
   }
 
-  /// ✅ 统一“相似作品”入口：
-  /// - Service 内拼 query
-  /// - 复用 fetch() 走当前 active rule 的解析能力
+  /// ✅ 统一“相似作品”入口（Pixiv 优先官方推荐；失败回退 query 搜索）
   ///
-  /// 说明：
-  /// - 目前不引入 base_image_source 可选能力接口，所以这里以 query 搜索为主。
-  /// - 未来若 PixivRepo 增加 recommend/related API，你也只需要改这里的 Pixiv 分支即可。
+  /// - Pixiv 优先使用 Web Ajax 推荐接口（需要登录 + Referer）。
+  ///   接口文档参考：
+  ///   - /ajax/illust/{id}/recommend/init?limit=... 2
+  ///   - /ajax/illust/recommend/illusts 3
+  ///
+  /// - 若无法拿到 Pixiv 的专用 Dio / cookie，或请求失败，则回退到 buildSimilarQuery + fetch()
   Future<List<UniWallpaper>> fetchSimilar({
     required UniWallpaper seed,
     required SourceRule rule,
     int page = 1,
     Map<String, dynamic>? filterParams,
   }) async {
+    // 1) Pixiv：优先官方推荐（仅在确认为 Pixiv rule 时尝试）
+    if (isPixivRule(rule) && hasPixivCookie) {
+      final pixiv = await _tryFetchPixivRecommendSimilar(
+        seed: seed,
+        rule: rule,
+        page: page,
+      );
+      if (pixiv != null) {
+        // 去重：避免把自己也返回
+        return pixiv.where((e) => e.id != seed.id).toList(growable: false);
+      }
+      // 失败继续走 fallback
+    }
+
+    // 2) Fallback：query 搜索
     final q = buildSimilarQuery(seed).trim();
     if (q.isEmpty) return const [];
 
@@ -173,6 +161,225 @@ class WallpaperService {
       query: q,
       filterParams: filterParams,
     );
+  }
+
+  // -------------------- Pixiv Recommend (Private) --------------------
+
+  static const int _pixivRecommendPageSize = 30;
+
+  Future<List<UniWallpaper>?> _tryFetchPixivRecommendSimilar({
+    required UniWallpaper seed,
+    required SourceRule rule,
+    required int page,
+  }) async {
+    // 只对纯数字作品 id 尝试推荐
+    final seedId = int.tryParse(seed.id);
+    if (seedId == null) return null;
+
+    // 如果拿不到 pixiv 专用 Dio（带 cookie / 拦截器），直接放弃，走 fallback
+    final Dio? pixivDio = _tryGetPixivDio();
+    if (pixivDio == null) return null;
+
+    try {
+      // 推荐接口本身常见为 init + limit；分页能力不稳定。
+      // 这里策略：
+      // - page=1：走 recommend/init?limit=30
+      // - page>1：尝试 recommend/illusts（若接口返回空则视为无更多）
+      if (page <= 1) {
+        final data = await _pixivAjaxGet(
+          pixivDio,
+          'https://www.pixiv.net/ajax/illust/$seedId/recommend/init',
+          queryParameters: {'limit': _pixivRecommendPageSize},
+          refererArtworkId: seedId,
+        );
+        final list = _extractPixivIllustList(data);
+        if (list.isEmpty) return const <UniWallpaper>[];
+        return list.map((e) => _mapPixivIllustToUni(e)).toList(growable: false);
+      } else {
+        // “推荐作品2”接口：需要 illust_ids[]，文档说明可用前一个接口结果作为基准 id 列表 4
+        // 在不引入额外状态的前提下，这里用 seedId 作为基准数组做一次“尽力请求”。
+        // 若 Pixiv 端不支持该用法，返回空即可，由 UI 表现为“没有更多了”。
+        final offset = (page - 1) * _pixivRecommendPageSize;
+
+        final data = await _pixivAjaxGet(
+          pixivDio,
+          'https://www.pixiv.net/ajax/illust/recommend/illusts',
+          queryParameters: {
+            'illust_ids[]': [seedId],
+            'limit': _pixivRecommendPageSize,
+            'offset': offset,
+          },
+          refererArtworkId: seedId,
+        );
+
+        final list = _extractPixivIllustList(data);
+        if (list.isEmpty) return const <UniWallpaper>[];
+        return list.map((e) => _mapPixivIllustToUni(e)).toList(growable: false);
+      }
+    } catch (e) {
+      _logger.debug('Pixiv recommend failed, fallback to query: $e');
+      return null;
+    }
+  }
+
+  Dio? _tryGetPixivDio() {
+    try {
+      // 不改 PixivRepository 的前提下，用动态探测：
+      // - repo.client.dio
+      // - repo.dio
+      final dynamic repo = _pixivRepo;
+
+      try {
+        final dynamic client = repo.client;
+        final dynamic dio = client?.dio;
+        if (dio is Dio) return dio;
+      } catch (_) {}
+
+      try {
+        final dynamic dio = repo.dio;
+        if (dio is Dio) return dio;
+      } catch (_) {}
+
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>> _pixivAjaxGet(
+    Dio dio,
+    String url, {
+    Map<String, dynamic>? queryParameters,
+    required int refererArtworkId,
+  }) async {
+    final resp = await dio.get<dynamic>(
+      url,
+      queryParameters: queryParameters,
+      options: Options(
+        responseType: ResponseType.json,
+        headers: {
+          'Accept': 'application/json',
+          'Referer': 'https://www.pixiv.net/artworks/$refererArtworkId',
+        },
+      ),
+    );
+
+    final data = resp.data;
+    if (data is Map<String, dynamic>) return data;
+
+    // Dio 也可能返回 Map<dynamic,dynamic>
+    if (data is Map) {
+      return data.map((k, v) => MapEntry(k.toString(), v));
+    }
+
+    throw const PrismException(userMessage: 'Pixiv 推荐接口返回异常');
+  }
+
+  List<Map<String, dynamic>> _extractPixivIllustList(Map<String, dynamic> data) {
+    // 常见结构：{ error: false, body: { illusts: [...] } }
+    final body = data['body'];
+    if (body is Map) {
+      final dynamic illusts = body['illusts'];
+      if (illusts is List) {
+        return illusts.map((e) => _asStringKeyMap(e)).whereType<Map<String, dynamic>>().toList(growable: false);
+      }
+
+      // 兼容可能的字段名
+      final dynamic items = body['items'] ?? body['works'] ?? body['recommendations'];
+      if (items is List) {
+        return items.map((e) => _asStringKeyMap(e)).whereType<Map<String, dynamic>>().toList(growable: false);
+      }
+    }
+
+    // 有些接口可能直接 body 为 list
+    if (body is List) {
+      return body.map((e) => _asStringKeyMap(e)).whereType<Map<String, dynamic>>().toList(growable: false);
+    }
+
+    return const <Map<String, dynamic>>[];
+  }
+
+  Map<String, dynamic>? _asStringKeyMap(dynamic v) {
+    if (v is Map<String, dynamic>) return v;
+    if (v is Map) return v.map((k, val) => MapEntry(k.toString(), val));
+    return null;
+  }
+
+  UniWallpaper _mapPixivIllustToUni(Map<String, dynamic> illust) {
+    final id = (illust['id'] ?? '').toString();
+    final width = _toDouble(illust['width']);
+    final height = _toDouble(illust['height']);
+
+    // urls / url 兼容：thumbUrl 优先 small/regular，fullUrl 优先 original
+    final urls = _asStringKeyMap(illust['urls']);
+    final thumb = (urls?['small'] ??
+            urls?['regular'] ??
+            urls?['thumb'] ??
+            illust['url'] ??
+            illust['imageUrl'] ??
+            '')
+        .toString();
+
+    final full = (urls?['original'] ??
+            urls?['regular'] ??
+            illust['url'] ??
+            illust['imageUrl'] ??
+            thumb)
+        .toString();
+
+    // tags：可能是 ["a","b"] 或 [{tag:"a"}]
+    final tags = _parsePixivTags(illust['tags']);
+
+    // uploader：可能在 userName / user_name / user.name
+    final uploader = (illust['userName'] ??
+            illust['user_name'] ??
+            (_asStringKeyMap(illust['user'])?['name']) ??
+            'Unknown User')
+        .toString();
+
+    // ugoira：常见 illustType==2
+    final isUgoira = (illust['illustType']?.toString() == '2');
+
+    // isAi：Pixiv 可能有 aiType / isAI 等字段，这里仅做兼容性判断
+    final isAi = (illust['aiType']?.toString() == '2') ||
+        (illust['isAI']?.toString().toLowerCase() == 'true');
+
+    return UniWallpaper(
+      id: id.isEmpty ? '0' : id,
+      sourceId: 'pixiv',
+      thumbUrl: thumb,
+      fullUrl: full,
+      width: width,
+      height: height,
+      isUgoira: isUgoira,
+      isAi: isAi,
+      tags: tags,
+      uploader: uploader.isEmpty ? 'Unknown User' : uploader,
+      // views/favs/fileSize/createdAt/mimeType：推荐接口一般不给，保持默认空串
+    );
+  }
+
+  double _toDouble(dynamic v) {
+    if (v is num) return v.toDouble();
+    return double.tryParse(v?.toString() ?? '') ?? 0.0;
+  }
+
+  List<String> _parsePixivTags(dynamic raw) {
+    if (raw is List) {
+      final out = <String>[];
+      for (final e in raw) {
+        if (e is String) {
+          final t = e.trim();
+          if (t.isNotEmpty) out.add(t);
+        } else if (e is Map) {
+          final m = _asStringKeyMap(e);
+          final t = (m?['tag'] ?? m?['name'] ?? '').toString().trim();
+          if (t.isNotEmpty) out.add(t);
+        }
+      }
+      return out;
+    }
+    return const <String>[];
   }
 
   // -------------------- Preferences / Cookies / Filters --------------------
