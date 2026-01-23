@@ -138,19 +138,31 @@ class WallpaperService {
 /// - 其他图源：直接返回空（不做 tag fallback）
 String buildSimilarQuery(
   UniWallpaper w, {
-  required SourceRule rule,
+  SourceRule? rule,
 }) {
-  final rid = rule.id.toLowerCase();
+  final rid = (rule?.id ?? '').toLowerCase();
+  final sid = (w.sourceId).toLowerCase();
 
-  // ✅ Wallhaven 官方相似：like:{id}
-  if (rid.contains('wallhaven')) {
-    final id = w.id.trim();
-    if (id.isNotEmpty) {
-      return 'like:$id';
-    }
-  }
+  // ✅ 只有 Wallhaven 才允许 like:id
+  final isWallhaven = rid == 'wallhaven_ultimate_v3' || rid.contains('wallhaven') || sid.contains('wallhaven');
+  final id = w.id.trim();
+  if (isWallhaven && id.isNotEmpty) return 'like:$id';
 
-  // ❌ 其他图源：不生成相似搜索
+  // ✅ Pixiv/其他：优先 tags
+  final tags = w.tags
+      .map((t) => t.trim())
+      .where((t) => t.length >= 2)
+      .take(4)
+      .toList(growable: false);
+  if (tags.isNotEmpty) return tags.join(' ');
+
+  // ✅ 再退：uploader
+  final u = w.uploader.trim();
+  if (u.isNotEmpty && u.toLowerCase() != 'unknown user') return 'user:$u';
+
+  // ✅ 最后兜底：别返回空（否则你就会看到“未能生成相似搜索条件”）
+  if (id.isNotEmpty) return id;
+
   return '';
 }
 
