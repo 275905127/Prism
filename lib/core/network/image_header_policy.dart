@@ -16,7 +16,9 @@ class ImageHeaderPolicy {
     if (rh != null) {
       rh.forEach((k, v) {
         if (v == null) return;
-        base[k.toString()] = v.toString();
+        final key = k.toString().trim();
+        if (key.isEmpty) return;
+        base[key] = v.toString();
       });
     }
 
@@ -30,6 +32,22 @@ class ImageHeaderPolicy {
         'User-Agent',
         () => 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       );
+      return base.isEmpty ? null : base;
+    }
+
+    // ✅ Wallhaven image CDN: often needs Referer + UA to avoid 403.
+    // Common hosts:
+    // - https://w.wallhaven.cc/full/...
+    // - https://th.wallhaven.cc/small/...
+    // - https://wallhaven.cc/...
+    if (lower.contains('wallhaven.cc') || lower.contains('w.wallhaven.cc') || lower.contains('th.wallhaven.cc')) {
+      base.putIfAbsent('Referer', () => 'https://wallhaven.cc/');
+      base.putIfAbsent(
+        'User-Agent',
+        () => 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      );
+      // 轻量兜底：部分 CDN 对 Accept 更敏感（不加也行，但加了更稳）
+      base.putIfAbsent('Accept', () => 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8');
     }
 
     return base.isEmpty ? null : base;
