@@ -21,7 +21,6 @@ class WallpaperService {
   final ErrorMapper _errorMapper;
   final ImageHeaderPolicy _imageHeaderPolicy;
   final PixivRepository _pixivRepo; // 仍保留引用以供 settings 使用
-  final RuleEngine _engine;
 
   // ✅ 核心：图源引擎列表
   late final List<BaseImageSource> _sources;
@@ -36,7 +35,6 @@ class WallpaperService {
     ImageHeaderPolicy imageHeaderPolicy = const ImageHeaderPolicy(),
   })  : _dio = dio,
         _pixivRepo = pixivRepo,
-        _engine = engine,
         _prefs = prefs,
         _logger = logger,
         _errorMapper = errorMapper,
@@ -75,22 +73,6 @@ class WallpaperService {
 
       await source.restoreSession(prefs: _prefs, rule: rule);
 
-    // ✅ Wallhaven 兼容：relevance 必须配合 q/like，否则可能返回空 data
-      Map<String, dynamic>? effectiveFilters = filterParams;
-      final isWallhaven = rule.id.toLowerCase().contains('wallhaven') ||
-          rule.url.toLowerCase().contains('wallhaven.cc/api/v1');
-
-      final q = (query ?? '').trim();
-      if (isWallhaven) {
-        effectiveFilters = Map<String, dynamic>.from(filterParams ?? const {});
-        final sorting = (effectiveFilters['sorting'] ?? '').toString().trim().toLowerCase();
-
-        // 没有 q 时，强制改成 date_added（否则 relevance 可能空结果）
-        if (q.isEmpty && sorting == 'relevance') {
-          effectiveFilters['sorting'] = 'date_added';
-        }
-      }
-
       return await source.fetch(
         rule,
         page: page,
@@ -113,13 +95,13 @@ class WallpaperService {
 
   // -------------------- Detail & Similar (New) --------------------
 
-  /// ✅ 两阶段模型入口：
-  /// - Pixiv：通常列表数据够用（你现有详情页 OK），这里保持 base
-  /// - 通用规则（RuleEngine）：若配置了 detail_url，则通过 RuleEngine.fetchDetail 补全 uploader/tags/views...
   Future<UniWallpaper> fetchDetail({
     required UniWallpaper base,
     required SourceRule? rule,
   }) async {
+    // ✅ Stage 2：按规则配置 detailUrl + candidates 进行详情补全
+    // - Pixiv：此阶段先不做专用详情（避免污染边界/引入新接口）
+    // - 通用规则：优先走 RuleEngine.fetchDetail(rule, base, headers: ...)
     if (rule == null) return base;
 
     try {
@@ -128,41 +110,31 @@ class WallpaperService {
         orElse: () => _sources.last,
       );
 
+      // 详情补全也要先 restore（有些图源需要 cookie/header）
       await source.restoreSession(prefs: _prefs, rule: rule);
 
-      // Pixiv：不强行走两阶段（PixivRepository 有自己逻辑）
-      if (source is PixivRepository) return base;
+      // Pixiv 先不做 stage2（你之前明确说先不做 pixiv detail）
+      if (isPixivRule(rule)) return base;
 
-      // 通用引擎：启用两阶段详情补全
-      if (source is RuleEngine) {
-        final headers = imageHeadersFor(wallpaper: base, rule: rule);
-        return await _engine.fetchDetail(rule, base, headers: headers);
-      }
+      // 给详情请求提供尽可能一致的 headers（含 rule.headers + policy）
+      final headers = imageHeadersFor(wallpaper: base, rule: rule);
 
+      // 不强依赖 BaseImageSource 扩展：动态探测 fetchDetail 方法
+      final dynamic dyn = source;
+      final dynamic result = await dyn.fetchDetail(rule, base, headers: headers);
+
+      if (result is UniWallpaper) return result;
       return base;
     } catch (e) {
+      // 详情补全失败不影响主流程：回退 base（DetailPage 仍能展示列表图）
       final mapped = _errorMapper.map(e);
       _logger.debug('WallpaperService.fetchDetail failed: ${mapped.debugMessage ?? mapped.userMessage}');
-      throw mapped;
+      return base;
     }
   }
 
   /// ✅ 统一构造“相似搜索 query”
-  ///
-  /// - Wallhaven：官方语法 q=like:<id>
-  /// - 其他：优先 tags，其次 uploader
-  String buildSimilarQuery(
-    UniWallpaper w, {
-    SourceRule? rule,
-  }) {
-    final bool isWallhaven = rule != null &&
-        ((rule.id.toLowerCase().contains('wallhaven')) || rule.url.contains('wallhaven.cc/api/v1/'));
-
-    if (isWallhaven) {
-      final id = w.id.trim();
-      if (id.isNotEmpty) return 'like:$id';
-    }
-
+  String buildSimilarQuery(UniWallpaper w) {
     final validTags = w.tags
         .map((t) => t.trim())
         .where((t) => t.length >= 2)
@@ -188,7 +160,7 @@ class WallpaperService {
   ///   - /ajax/illust/{id}/recommend/init?limit=... 2
   ///   - /ajax/illust/recommend/illusts 3
   ///
-  /// - Wallhaven 对齐官方：q=like:<id> + sorting=relevance + order=desc + purity 跟随 seed.grade + 去掉 seed 自己
+  /// - 若无法拿到 Pixiv 的专用 Dio / cookie，或请求失败，则回退到 buildSimilarQuery + fetch()
   Future<List<UniWallpaper>> fetchSimilar({
     required UniWallpaper seed,
     required SourceRule rule,
@@ -209,56 +181,16 @@ class WallpaperService {
       // 失败继续走 fallback
     }
 
-    // 2) Wallhaven：对齐官方行为
-    final bool isWallhaven =
-        (rule.id.toLowerCase().contains('wallhaven')) || rule.url.contains('wallhaven.cc/api/v1/');
-    if (isWallhaven) {
-      final q = buildSimilarQuery(seed, rule: rule).trim();
-      if (q.isEmpty) return const [];
-
-      final Map<String, dynamic> fp = <String, dynamic>{
-        ...?filterParams,
-      };
-
-      // 官方常见默认：relevance + desc（只在你没传时补齐）
-      fp.putIfAbsent('sorting', () => 'relevance');
-      fp.putIfAbsent('order', () => 'desc');
-
-      // purity 跟随 seed.grade（只在你没传 purity 时补齐）
-      if (!fp.containsKey('purity')) {
-        final g = (seed.grade ?? '').trim().toLowerCase();
-        if (g == 'nsfw') {
-          fp['purity'] = '001';
-        } else if (g == 'sketchy') {
-          fp['purity'] = '010';
-        } else if (g == 'sfw') {
-          fp['purity'] = '100';
-        }
-      }
-
-      final list = await fetch(
-        rule,
-        page: page,
-        query: q,
-        filterParams: fp,
-      );
-
-      // 去掉 seed 自己（官方常见）
-      return list.where((e) => e.id != seed.id).toList(growable: false);
-    }
-
-    // 3) 其他图源：fallback 走 query 搜索
-    final q = buildSimilarQuery(seed, rule: rule).trim();
+    // 2) Fallback：query 搜索
+    final q = buildSimilarQuery(seed).trim();
     if (q.isEmpty) return const [];
 
-    final list = await fetch(
+    return fetch(
       rule,
       page: page,
       query: q,
       filterParams: filterParams,
     );
-
-    return list.where((e) => e.id != seed.id).toList(growable: false);
   }
 
   // -------------------- Pixiv Recommend (Private) --------------------
@@ -379,10 +311,7 @@ class WallpaperService {
     if (body is Map) {
       final dynamic illusts = body['illusts'];
       if (illusts is List) {
-        return illusts
-            .map((e) => _asStringKeyMap(e))
-            .whereType<Map<String, dynamic>>()
-            .toList(growable: false);
+        return illusts.map((e) => _asStringKeyMap(e)).whereType<Map<String, dynamic>>().toList(growable: false);
       }
 
       // 兼容可能的字段名
@@ -421,7 +350,12 @@ class WallpaperService {
             '')
         .toString();
 
-    final full = (urls?['original'] ?? urls?['regular'] ?? illust['url'] ?? illust['imageUrl'] ?? thumb).toString();
+    final full = (urls?['original'] ??
+            urls?['regular'] ??
+            illust['url'] ??
+            illust['imageUrl'] ??
+            thumb)
+        .toString();
 
     // tags：可能是 ["a","b"] 或 [{tag:"a"}]
     final tags = _parsePixivTags(illust['tags']);
@@ -437,7 +371,8 @@ class WallpaperService {
     final isUgoira = (illust['illustType']?.toString() == '2');
 
     // isAi：Pixiv 可能有 aiType / isAI 等字段，这里仅做兼容性判断
-    final isAi = (illust['aiType']?.toString() == '2') || (illust['isAI']?.toString().toLowerCase() == 'true');
+    final isAi = (illust['aiType']?.toString() == '2') ||
+        (illust['isAI']?.toString().toLowerCase() == 'true');
 
     return UniWallpaper(
       id: id.isEmpty ? '0' : id,
