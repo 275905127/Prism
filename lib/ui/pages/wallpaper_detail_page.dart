@@ -212,11 +212,22 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   // ✅ 关键：固定图片展示区高度，避免 decode/布局变化导致“跳一下”
-  double _imageViewportHeight(BuildContext context) {
-    final screenH = MediaQuery.of(context).size.height;
-    final h = screenH * 0.85;
-    return h.clamp(320.0, 900.0);
+  double _imageViewportHeight(BuildContext context, UniWallpaper w) {
+  final screenW = MediaQuery.of(context).size.width;
+
+  // ✅ 有真实尺寸：用“按屏幕宽度铺满”计算高度 -> 不会产生上下多余区域
+  if (w.width > 0 && w.height > 0) {
+    final ratio = w.width / w.height; // width/height
+    final h = screenW / ratio;        // height = screenW * (height/width)
+    // 下限防止极端超扁图导致高度太小（可按喜好调）
+    return h.clamp(220.0, 5000.0);
   }
+
+  // ✅ 无尺寸：兜底（维持你原来的策略）
+  final screenH = MediaQuery.of(context).size.height;
+  final h = screenH * 0.85;
+  return h.clamp(320.0, 900.0);
+}
 
   @override
   Widget build(BuildContext context) {
