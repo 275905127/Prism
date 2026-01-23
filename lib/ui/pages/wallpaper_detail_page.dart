@@ -45,8 +45,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
   final List<UniWallpaper> _similarList = [];
 
   // ===== 图片缩放 =====
-  final TransformationController _transformController =
-      TransformationController();
+  final TransformationController _transformController = TransformationController();
   late final AnimationController _animationController;
   Animation<Matrix4>? _animation;
 
@@ -160,8 +159,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
   // ================= 辅助 =================
 
   Map<String, String>? _resolveImageHeaders() {
-    if (widget.headers != null && widget.headers!.isNotEmpty)
-      return widget.headers;
+    if (widget.headers != null && widget.headers!.isNotEmpty) return widget.headers;
     final rule = context.read<SourceManager>().activeRule;
     return context.read<WallpaperService>().imageHeadersFor(
           wallpaper: _wallpaper,
@@ -180,299 +178,115 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage>
 
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content: Text(msg), duration: const Duration(milliseconds: 1400)),
+      SnackBar(content: Text(msg), duration: const Duration(milliseconds: 1400)),
     );
   }
 
-  // ================= Build Components =================
-
-  // 构建元数据区域 (作者、标签、统计)
-  Widget _buildMetaInfo(UniWallpaper w) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 1. 作者与时间行
-          Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: Colors.grey[200],
-                radius: 18,
-                child: Text(
-                  w.uploader.isNotEmpty ? w.uploader[0].toUpperCase() : 'U',
-                  style: const TextStyle(
-                      color: Colors.black, fontWeight: FontWeight.bold),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      w.uploader,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: _textColor,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (w.createdAt.isNotEmpty)
-                      Text(
-                        w.createdAt,
-                        style:
-                            const TextStyle(fontSize: 12, color: _subTextColor),
-                      ),
-                  ],
-                ),
-              ),
-              // AI 标识
-              if (w.isAi)
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.blueAccent.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(4),
-                    border:
-                        Border.all(color: Colors.blueAccent.withOpacity(0.3)),
-                  ),
-                  child: const Text('AI 生成',
-                      style: TextStyle(fontSize: 10, color: Colors.blueAccent)),
-                ),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-
-          // 2. 数据统计行 (浏览、收藏、尺寸)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _buildStatItem(Icons.remove_red_eye_outlined,
-                  w.views.isEmpty ? '-' : w.views, '浏览'),
-              _buildStatItem(Icons.favorite_border,
-                  w.favorites.isEmpty ? '-' : w.favorites, '收藏'),
-              _buildStatItem(Icons.aspect_ratio,
-                  '${w.width.toInt()}x${w.height.toInt()}', '分辨率'),
-              _buildStatItem(
-                  Icons.data_usage, w.fileSize.isEmpty ? '-' : w.fileSize, '大小'),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-
-          // 3. 标签流
-          if (w.tags.isNotEmpty) ...[
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: w.tags.map((tag) {
-                return Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: _tagBgColor,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    tag,
-                    style: const TextStyle(fontSize: 12, color: _textColor),
-                  ),
-                );
-              }).toList(),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  // 辅助小组件：单个统计项
-  Widget _buildStatItem(IconData icon, String value, String label) {
-    return Column(
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: _subTextColor),
-            const SizedBox(width: 4),
-            Text(value,
-                style:
-                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          ],
-        ),
-        const SizedBox(height: 2),
-        Text(label, style: const TextStyle(fontSize: 10, color: _subTextColor)),
-      ],
-    );
-  }
-
-  // ================= Main Build =================
+  // ================= Build =================
 
   @override
   Widget build(BuildContext context) {
     final w = _wallpaper;
     final headers = _cachedHeaders;
-    final topPadding = MediaQuery.of(context).padding.top;
 
     return Scaffold(
       backgroundColor: _bgColor,
-      // 使用 Stack 实现顶部悬浮栏覆盖
-      body: Stack(
-        children: [
-          // 底层内容滚动视图
-          CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              // 图片区域
-              SliverToBoxAdapter(
-                child: GestureDetector(
-                  onDoubleTap: _onDoubleTap,
-                  child: Hero(
-                    tag: '${w.sourceId}::${w.id}',
-                    child: InteractiveViewer(
-                      transformationController: _transformController,
-                      minScale: 1,
-                      maxScale: 4,
-                      child: CachedNetworkImage(
-                        imageUrl: w.fullUrl,
-                        httpHeaders: headers,
-                        fit: BoxFit.contain,
-                      ),
-                    ),
+      body: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          SliverToBoxAdapter(
+            child: GestureDetector(
+              onDoubleTap: _onDoubleTap,
+              child: Hero(
+                tag: '${w.sourceId}::${w.id}',
+                child: InteractiveViewer(
+                  transformationController: _transformController,
+                  minScale: 1,
+                  maxScale: 4,
+                  child: CachedNetworkImage(
+                    imageUrl: w.fullUrl,
+                    httpHeaders: headers,
+                    fit: BoxFit.contain,
                   ),
                 ),
               ),
+            ),
+          ),
 
-              // 元数据展示区域 (新增)
-              SliverToBoxAdapter(
-                child: _buildMetaInfo(w),
-              ),
-
-              // 分割间距
-              const SliverToBoxAdapter(child: SizedBox(height: 8)),
-
-              // 相似入口按钮
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: OutlinedButton.icon(
-                    icon: Icon(
-                      _similarExpanded ? Icons.expand_less : Icons.auto_awesome,
-                      color: _textColor,
-                    ),
-                    label: Text(
-                      _similarExpanded ? "收起相似作品" : "查看更多相似作品",
-                      style: const TextStyle(color: _textColor),
-                    ),
-                    onPressed: _toggleSimilar,
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      side: const BorderSide(color: Color(0xFFEEEEEE)),
-                    ),
-                  ),
+          // ===== 相似入口按钮 =====
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: OutlinedButton.icon(
+                icon: Icon(
+                  _similarExpanded ? Icons.expand_less : Icons.auto_awesome,
+                  color: _textColor,
                 ),
+                label: Text(
+                  _similarExpanded ? "收起相似作品" : "查看更多相似作品",
+                  style: const TextStyle(color: _textColor),
+                ),
+                onPressed: _toggleSimilar,
               ),
+            ),
+          ),
 
-              // 相似列表
-              if (_similarExpanded)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    child: MasonryGridView.count(
-                      crossAxisCount: 2,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      itemCount: _similarList.length,
-                      itemBuilder: (context, index) {
-                        final item = _similarList[index];
-                        return GestureDetector(
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    WallpaperDetailPage(wallpaper: item),
-                              ),
-                            );
-                          },
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: CachedNetworkImage(
-                              imageUrl: item.thumbUrl,
-                              httpHeaders: headers,
-                              fit: BoxFit.cover,
-                            ),
+          // ===== 相似列表 =====
+          if (_similarExpanded)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: MasonryGridView.count(
+                  crossAxisCount: 2,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  itemCount: _similarList.length,
+                  itemBuilder: (context, index) {
+                    final item = _similarList[index];
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => WallpaperDetailPage(wallpaper: item),
                           ),
                         );
                       },
-                    ),
-                  ),
+                      child: CachedNetworkImage(
+                        imageUrl: item.thumbUrl,
+                        httpHeaders: headers,
+                        fit: BoxFit.cover,
+                      ),
+                    );
+                  },
                 ),
-
-              if (_similarExpanded)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: _similarLoading
-                          ? const CircularProgressIndicator()
-                          : (_similarHasMore
-                              ? TextButton(
-                                  onPressed: _loadSimilar,
-                                  child: const Text("加载更多"),
-                                )
-                              : const Text(
-                                  "没有更多了",
-                                  style: TextStyle(color: _subTextColor),
-                                )),
-                    ),
-                  ),
-                ),
-
-              SliverToBoxAdapter(
-                child: SizedBox(
-                    height: MediaQuery.of(context).padding.bottom + 32),
-              ),
-            ],
-          ),
-
-          // 顶层悬浮：渐变雾化 AppBar
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: kToolbarHeight + topPadding,
-            child: Container(
-              padding: EdgeInsets.only(top: topPadding),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.white.withOpacity(0.9),
-                    Colors.white.withOpacity(0.7),
-                    Colors.white.withOpacity(0.0),
-                  ],
-                  stops: const [0.0, 0.6, 1.0],
-                ),
-              ),
-              child: Row(
-                children: [
-                  const BackButton(color: Colors.black),
-                  const Expanded(child: SizedBox()),
-                  // 如果需要右上角按钮（如下载/分享），可以在这里添加
-                  // IconButton(icon: Icon(Icons.share), onPressed: () {}),
-                ],
               ),
             ),
+
+          if (_similarExpanded)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: _similarLoading
+                      ? const CircularProgressIndicator()
+                      : (_similarHasMore
+                          ? TextButton(
+                              onPressed: _loadSimilar,
+                              child: const Text("加载更多"),
+                            )
+                          : const Text(
+                              "没有更多了",
+                              style: TextStyle(color: _subTextColor),
+                            )),
+                ),
+              ),
+            ),
+
+          SliverToBoxAdapter(
+            child: SizedBox(height: MediaQuery.of(context).padding.bottom + 32),
           ),
         ],
       ),
