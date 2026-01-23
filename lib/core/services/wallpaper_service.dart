@@ -99,8 +99,38 @@ class WallpaperService {
     required UniWallpaper base,
     required SourceRule? rule,
   }) async {
-    // 目前不额外请求：保持稳定、无副作用
-    return base;
+    // ✅ Stage 2：按规则配置 detailUrl + candidates 进行详情补全
+    // - Pixiv：此阶段先不做专用详情（避免污染边界/引入新接口）
+    // - 通用规则：优先走 RuleEngine.fetchDetail(rule, base, headers: ...)
+    if (rule == null) return base;
+
+    try {
+      final source = _sources.firstWhere(
+        (s) => s.supports(rule),
+        orElse: () => _sources.last,
+      );
+
+      // 详情补全也要先 restore（有些图源需要 cookie/header）
+      await source.restoreSession(prefs: _prefs, rule: rule);
+
+      // Pixiv 先不做 stage2（你之前明确说先不做 pixiv detail）
+      if (isPixivRule(rule)) return base;
+
+      // 给详情请求提供尽可能一致的 headers（含 rule.headers + policy）
+      final headers = imageHeadersFor(wallpaper: base, rule: rule);
+
+      // 不强依赖 BaseImageSource 扩展：动态探测 fetchDetail 方法
+      final dynamic dyn = source;
+      final dynamic result = await dyn.fetchDetail(rule, base, headers: headers);
+
+      if (result is UniWallpaper) return result;
+      return base;
+    } catch (e) {
+      // 详情补全失败不影响主流程：回退 base（DetailPage 仍能展示列表图）
+      final mapped = _errorMapper.map(e);
+      _logger.debug('WallpaperService.fetchDetail failed: ${mapped.debugMessage ?? mapped.userMessage}');
+      return base;
+    }
   }
 
   /// ✅ 统一构造“相似搜索 query”
