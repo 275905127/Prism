@@ -7,12 +7,13 @@ import 'package:json_path/json_path.dart';
 
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
+import '../storage/preferences_store.dart';
 import '../utils/prism_logger.dart';
+import 'base_image_source.dart'; // ✅ 新增引入
 
-class RuleEngine {
-  /// ✅ 允许注入 Dio：让 WallpaperService 统一网络出口（拦截器/代理/重试/证书/UA/超时等）
-  /// ✅ 允许注入 Logger：核心层不再直接依赖 AppLog（UI 实现）
-  /// - 不传则内部自建默认 Dio（兼容旧用法）
+class RuleEngine implements BaseImageSource {
+  /// ✅ 允许注入 Dio：让 WallpaperService 统一网络出口
+  /// ✅ 允许注入 Logger：核心层不再直接依赖 AppLog
   RuleEngine({Dio? dio, PrismLogger? logger})
       : _dio = dio ?? Dio(),
         _logger = logger;
@@ -23,204 +24,30 @@ class RuleEngine {
   /// ✅ cursor 分页缓存：不同 query / filters 必须隔离
   final Map<String, dynamic> _cursorCache = {};
 
-  // ---------- 基础工具 ----------
+  // ==================== 接口实现 ====================
 
-  dynamic _readDotPath(dynamic source, String path) {
-    if (path.isEmpty) return null;
-    if (path == '.') return source;
+  @override
+  bool supports(SourceRule rule) => true; // 通用引擎作为兜底，支持所有
 
-    dynamic cur = source;
-    for (final part in path.split('.')) {
-      if (cur == null) return null;
-      if (cur is Map) {
-        cur = cur[part];
-        continue;
-      }
-
-      if (cur is List) {
-        final idx = int.tryParse(part);
-        if (idx == null || idx < 0 || idx >= cur.length) return null;
-        cur = cur[idx];
-        continue;
-      }
-
-      return null;
-    }
-    return cur;
+  @override
+  Future<void> restoreSession({
+    required PreferencesStore prefs,
+    required SourceRule rule,
+  }) async {
+    // 通用 JSON 规则通常无需会话恢复，未来可在此扩展 Token 读取逻辑
   }
 
-  T? _getValue<T>(String path, dynamic source) {
-    try {
-      if (path.isEmpty) return null;
-      if (path == '.') return source as T;
+  @override
+  Future<bool> checkLoginStatus(SourceRule rule) async => true; // 默认视为无需登录
 
-      final p = path.trimLeft();
-      if (p.startsWith(r'$')) {
-        final jp = JsonPath(path);
-        return jp.read(source).firstOrNull?.value as T?;
-      }
-
-      final v = _readDotPath(source, path);
-      return v as T?;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  num _toNum(dynamic x) {
-    if (x is num) return x;
-    return num.tryParse(x?.toString() ?? '') ?? 0;
-  }
-
-  Map<String, String> _defaultUA() => const {
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      };
-
-  // ---------- 日志：分级 & 打码 ----------
-  // 目标：
-  // - log：只留“重要节点”（请求开始/响应状态/合并统计/cursor 变化/错误）
-  // - debug：高频细节（params、headers、body 截断、smithsonian 定点结构等）
-
-  String _mask(String v) {
-    if (v.length <= 16) return '***';
-    return '${v.substring(0, 12)}***';
-  }
-
-  /// ✅ 修复核心：安全处理 Headers 脱敏，防止 value 为 null 时崩溃
-  Map<String, String> _maskHeaders(Map<String, String> headers) {
-    // 1. 允许 dynamic，防止 map 内有 null 时直接崩
-    final m = Map<String, dynamic>.from(headers);
-
-    String safeVal(dynamic v) => v?.toString() ?? '';
-
-    if (m.containsKey('Authorization')) {
-      m['Authorization'] = _mask(safeVal(m['Authorization']));
-    }
-    if (m.containsKey('apikey')) {
-      m['apikey'] = _mask(safeVal(m['apikey']));
-    }
-    if (m.containsKey('Api-Key')) {
-      m['Api-Key'] = _mask(safeVal(m['Api-Key']));
-    }
-    if (m.containsKey('X-Api-Key')) {
-      m['X-Api-Key'] = _mask(safeVal(m['X-Api-Key']));
-    }
-    if (m.containsKey('Cookie')) {
-      m['Cookie'] = '***';
-    }
-
-    // 2. 转回 String Map，确保无 null
-    return m.map((k, v) => MapEntry(k, safeVal(v)));
-  }
-
-  void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
-    // ✅ 重要节点：请求开始（单行）
-    _logger?.log('REQ ${rule.id} GET $url');
-    // ✅ 高频细节：放到 debug
-    _logger?.debug('    params=$params');
-    _logger?.debug('    headers=${_maskHeaders(headers)}');
-  }
-
-  void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
-    // ✅ 重要节点：响应摘要（单行）
-    _logger?.log('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
-    // ✅ 高频细节：body 截断，仅 debug
-    final s = (data == null) ? '' : data.toString();
-    if (s.isNotEmpty) {
-      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
-    }
-  }
-
-  void _logErr(SourceRule rule, int? status, String realUrl, Object e, dynamic data) {
-    // ✅ 错误永远是 log（必看）
-    _logger?.log('ERR ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
-    _logger?.log('    err=$e');
-
-    // body 也可以留在 debug，避免错误时刷屏（但仍保留可开关）
-    final s = (data == null) ? '' : data.toString();
-    if (s.isNotEmpty) {
-      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
-    }
-  }
-
-  // ---------- cursor key ----------
-
-  String _cursorKey(SourceRule r, String? q, Map<String, dynamic>? f) {
-    return '${r.id}|${q ?? ''}|${jsonEncode(f ?? {})}';
-  }
-
-  // offset 模式：猜测 pageSize（你不填 page_size 也能跑）
-  int _guessPageSize(SourceRule rule, Map<String, dynamic> params) {
-    for (final k in ['per_page', 'limit', 'rows', 'count', 'page_size']) {
-      final v = params[k];
-      if (v is num && v > 0) return v.toInt();
-      final vi = int.tryParse(v?.toString() ?? '');
-      if (vi != null && vi > 0) return vi;
-    }
-    return 20;
-  }
-
-  // ---------- 稳定 ID 兜底 ----------
-  String _stableId(SourceRule rule, dynamic item, String thumb, String full) {
-    try {
-      final raw = _getValue(rule.idPath, item);
-      final s = raw?.toString().trim();
-      if (s != null && s.isNotEmpty) return s;
-    } catch (_) {}
-
-    final f = full.trim();
-    if (f.isNotEmpty) return f;
-
-    final t = thumb.trim();
-    if (t.isNotEmpty) return t;
-
-    return DateTime.now().millisecondsSinceEpoch.toString();
-  }
-
-  // ---------- 参数写入（空参过滤统一入口） ----------
-  void _putParam(Map<String, dynamic> params, String key, dynamic value) {
-    if (value == null) return;
-    if (value is String) {
-      if (value.trim().isEmpty) return;
-      params[key] = value;
-      return;
-    }
-
-    if (value is List) {
-      final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
-      if (cleaned.isEmpty) return;
-      params[key] = cleaned;
-      return;
-    }
-
-    params[key] = value;
-  }
-
-  // ---------- URL template ----------
-  // 支持 rule.url 里写 {keyword}/{word}/{q}，用于 Pixiv 这种 keyword 在 path 的接口
-  String _buildRequestUrl(SourceRule rule, String? finalQuery) {
-    final u = rule.url;
-    final hasTpl = u.contains('{keyword}') || u.contains('{word}') || u.contains('{q}');
-    if (!hasTpl) return u;
-
-    final kw = (finalQuery ?? '').trim();
-    if (kw.isEmpty) {
-      throw Exception('该图源需要关键词：keyword 为空（url 含 {keyword}/{word}/{q}）');
-    }
-
-    final enc = Uri.encodeComponent(kw);
-    return u.replaceAll('{keyword}', enc).replaceAll('{word}', enc).replaceAll('{q}', enc);
-  }
-
-  // ---------- 对外入口 ----------
-
+  @override
   Future<List<UniWallpaper>> fetch(
     SourceRule rule, {
     int page = 1,
     String? query,
     Map<String, dynamic>? filterParams,
   }) async {
+    // ---------- 以下为原有 fetch 逻辑 ----------
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
@@ -228,6 +55,7 @@ class RuleEngine {
       ..._defaultUA(),
       ...?rule.headers,
     };
+    
     // apiKey
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
@@ -260,7 +88,7 @@ class RuleEngine {
           if (encode == 'merge') {
             mergeMulti[key] = cleaned;
           } else if (encode == 'repeat') {
-            params[key] = cleaned; // Dio 会变成重复 key
+            params[key] = cleaned;
           } else {
             final separator = filterRule?.separator ?? ',';
             final joined = cleaned.join(separator);
@@ -281,7 +109,7 @@ class RuleEngine {
     }
 
     if (rule.keywordRequired && (finalQuery == null || finalQuery.trim().isEmpty)) {
-      throw ArgumentError('keyword_required'); // 让 ErrorMapper 捕获
+      throw ArgumentError('keyword_required');
     }
 
     if (finalQuery != null && finalQuery.trim().isNotEmpty) {
@@ -289,11 +117,11 @@ class RuleEngine {
         _putParam(params, rule.paramKeyword, finalQuery.trim());
       }
     }
-    // ✅✅✅ 关键字策略结束
 
-    // ✅ URL 占位符（Pixiv 等：keyword 在 path）
+    // ✅ URL 占位符
     final String requestUrl = _buildRequestUrl(rule, finalQuery);
-    // ✅✅✅ 分页策略（page / offset / cursor）
+    
+    // ✅✅✅ 分页策略
     if (rule.responseType != 'random') {
       if (rule.paramPage.isNotEmpty) {
         if (rule.pageMode == 'offset') {
@@ -320,7 +148,6 @@ class RuleEngine {
         }
       }
     }
-    // ✅✅✅ 分页策略结束
 
     try {
       if (rule.responseType == 'random') {
@@ -344,7 +171,148 @@ class RuleEngine {
     }
   }
 
-  // ---------- random 模式（原样，只加日志） ----------
+  // ==================== 基础工具 & 私有方法 (保持不变) ====================
+
+  dynamic _readDotPath(dynamic source, String path) {
+    if (path.isEmpty) return null;
+    if (path == '.') return source;
+    dynamic cur = source;
+    for (final part in path.split('.')) {
+      if (cur == null) return null;
+      if (cur is Map) {
+        cur = cur[part];
+        continue;
+      }
+      if (cur is List) {
+        final idx = int.tryParse(part);
+        if (idx == null || idx < 0 || idx >= cur.length) return null;
+        cur = cur[idx];
+        continue;
+      }
+      return null;
+    }
+    return cur;
+  }
+
+  T? _getValue<T>(String path, dynamic source) {
+    try {
+      if (path.isEmpty) return null;
+      if (path == '.') return source as T;
+      final p = path.trimLeft();
+      if (p.startsWith(r'$')) {
+        final jp = JsonPath(path);
+        return jp.read(source).firstOrNull?.value as T?;
+      }
+      final v = _readDotPath(source, path);
+      return v as T?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  num _toNum(dynamic x) {
+    if (x is num) return x;
+    return num.tryParse(x?.toString() ?? '') ?? 0;
+  }
+
+  Map<String, String> _defaultUA() => const {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      };
+
+  String _mask(String v) {
+    if (v.length <= 16) return '***';
+    return '${v.substring(0, 12)}***';
+  }
+
+  Map<String, String> _maskHeaders(Map<String, String> headers) {
+    final m = Map<String, dynamic>.from(headers);
+    String safeVal(dynamic v) => v?.toString() ?? '';
+    if (m.containsKey('Authorization')) m['Authorization'] = _mask(safeVal(m['Authorization']));
+    if (m.containsKey('apikey')) m['apikey'] = _mask(safeVal(m['apikey']));
+    if (m.containsKey('Api-Key')) m['Api-Key'] = _mask(safeVal(m['Api-Key']));
+    if (m.containsKey('X-Api-Key')) m['X-Api-Key'] = _mask(safeVal(m['X-Api-Key']));
+    if (m.containsKey('Cookie')) m['Cookie'] = '***';
+    return m.map((k, v) => MapEntry(k, safeVal(v)));
+  }
+
+  void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
+    _logger?.log('REQ ${rule.id} GET $url');
+    _logger?.debug('    params=$params');
+    _logger?.debug('    headers=${_maskHeaders(headers)}');
+  }
+
+  void _logResp(SourceRule rule, int? status, String realUrl, dynamic data) {
+    _logger?.log('RESP ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
+    final s = (data == null) ? '' : data.toString();
+    if (s.isNotEmpty) {
+      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+    }
+  }
+
+  void _logErr(SourceRule rule, int? status, String realUrl, Object e, dynamic data) {
+    _logger?.log('ERR ${rule.id} status=${status ?? 'N/A'} url=$realUrl');
+    _logger?.log('    err=$e');
+    final s = (data == null) ? '' : data.toString();
+    if (s.isNotEmpty) {
+      _logger?.debug('    body=${s.length > 400 ? '${s.substring(0, 400)}...' : s}');
+    }
+  }
+
+  String _cursorKey(SourceRule r, String? q, Map<String, dynamic>? f) {
+    return '${r.id}|${q ?? ''}|${jsonEncode(f ?? {})}';
+  }
+
+  int _guessPageSize(SourceRule rule, Map<String, dynamic> params) {
+    for (final k in ['per_page', 'limit', 'rows', 'count', 'page_size']) {
+      final v = params[k];
+      if (v is num && v > 0) return v.toInt();
+      final vi = int.tryParse(v?.toString() ?? '');
+      if (vi != null && vi > 0) return vi;
+    }
+    return 20;
+  }
+
+  String _stableId(SourceRule rule, dynamic item, String thumb, String full) {
+    try {
+      final raw = _getValue(rule.idPath, item);
+      final s = raw?.toString().trim();
+      if (s != null && s.isNotEmpty) return s;
+    } catch (_) {}
+    final f = full.trim();
+    if (f.isNotEmpty) return f;
+    final t = thumb.trim();
+    if (t.isNotEmpty) return t;
+    return DateTime.now().millisecondsSinceEpoch.toString();
+  }
+
+  void _putParam(Map<String, dynamic> params, String key, dynamic value) {
+    if (value == null) return;
+    if (value is String) {
+      if (value.trim().isEmpty) return;
+      params[key] = value;
+      return;
+    }
+    if (value is List) {
+      final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+      if (cleaned.isEmpty) return;
+      params[key] = cleaned;
+      return;
+    }
+    params[key] = value;
+  }
+
+  String _buildRequestUrl(SourceRule rule, String? finalQuery) {
+    final u = rule.url;
+    final hasTpl = u.contains('{keyword}') || u.contains('{word}') || u.contains('{q}');
+    if (!hasTpl) return u;
+    final kw = (finalQuery ?? '').trim();
+    if (kw.isEmpty) {
+      throw Exception('该图源需要关键词：keyword 为空（url 含 {keyword}/{word}/{q}）');
+    }
+    final enc = Uri.encodeComponent(kw);
+    return u.replaceAll('{keyword}', enc).replaceAll('{word}', enc).replaceAll('{q}', enc);
+  }
 
   Future<List<UniWallpaper>> _fetchRandomMode(
     SourceRule rule,
@@ -354,19 +322,15 @@ class RuleEngine {
   ) async {
     const int batchSize = 6;
     const int delayMs = 300;
-
     _logReq(rule, requestUrl, params, headers);
 
     final futures = List.generate(batchSize, (index) async {
       await Future.delayed(Duration(milliseconds: index * delayMs));
-
       try {
         final requestParams = Map<String, dynamic>.from(params);
         requestParams['_t'] = DateTime.now().millisecondsSinceEpoch + index;
         requestParams['_r'] = Random().nextInt(10000);
-
         String? finalUrl;
-
         try {
           final response = await _dio.head(
             requestUrl,
@@ -400,7 +364,6 @@ class RuleEngine {
             return null;
           }
         }
-
         if (finalUrl == null) return null;
         final uri = Uri.parse(finalUrl);
         if (uri.queryParameters.containsKey('_t') || uri.queryParameters.containsKey('_r')) {
@@ -409,78 +372,61 @@ class RuleEngine {
           newQueryParams.remove('_r');
           finalUrl = uri.replace(queryParameters: newQueryParams).toString();
         }
-
         return finalUrl;
       } catch (_) {
         return null;
       }
     });
     final results = await Future.wait(futures);
-
     final List<UniWallpaper> wallpapers = [];
     for (final url in results) {
       if (url != null && url.startsWith('http')) {
         if (!wallpapers.any((w) => w.fullUrl == url)) {
-          wallpapers.add(
-            UniWallpaper(
-              id: url, // ✅ 稳定去重
-              sourceId: rule.id,
-              thumbUrl: url,
-              fullUrl: url,
-              width: 0,
-              height: 0,
-            ),
-          );
+          wallpapers.add(UniWallpaper(
+            id: url,
+            sourceId: rule.id,
+            thumbUrl: url,
+            fullUrl: url,
+            width: 0,
+            height: 0,
+          ));
         }
       }
     }
-
     _logger?.log('RESP ${rule.id} random_count=${wallpapers.length}');
     return wallpapers;
   }
 
-  // ---------- json 解析（稳定 id） ----------
-
   List<UniWallpaper> _parseJsonToWallpapers(SourceRule rule, dynamic jsonMap) {
     final listPath = JsonPath(rule.listPath);
     final match = listPath.read(jsonMap).firstOrNull;
-
     if (match == null || match.value is! List) return [];
     final List list = match.value as List;
     final out = <UniWallpaper>[];
     for (final item in list) {
       String thumb = _getValue<String>(rule.thumbPath, item) ?? '';
       String full = _getValue<String>(rule.fullPath, item) ?? thumb;
-
       if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
         if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
         if (!full.startsWith('http')) full = rule.imagePrefix! + full;
       }
-
       final id = _stableId(rule, item, thumb, full);
       if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
-
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
       final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
       final grade = _getValue<String>(rule.gradePath ?? '', item);
-
-      out.add(
-        UniWallpaper(
-          id: id,
-          sourceId: rule.id,
-          thumbUrl: thumb,
-          fullUrl: full,
-          width: width,
-          height: height,
-          grade: grade,
-        ),
-      );
+      out.add(UniWallpaper(
+        id: id,
+        sourceId: rule.id,
+        thumbUrl: thumb,
+        fullUrl: full,
+        width: width,
+        height: height,
+        grade: grade,
+      ));
     }
-
     return out;
   }
-
-  // ---------- json 单次请求（加日志 + 4xx body + cursor 记忆 + 定点 debug） ----------
 
   Future<List<UniWallpaper>> _fetchJsonMode(
     SourceRule rule,
@@ -491,10 +437,8 @@ class RuleEngine {
     required Map<String, dynamic>? filterParams,
   }) async {
     _logReq(rule, requestUrl, params, headers);
-    // ✅ 定点 debug（仅 debug 输出，避免刷屏）
     const String kDebugRuleId = 'smithsonian_open_access_images';
     final bool dbg = rule.id == kDebugRuleId;
-
     String safeJson(dynamic v, {int max = 600}) {
       try {
         final s = jsonEncode(v);
@@ -518,7 +462,6 @@ class RuleEngine {
         ),
       );
       _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
-
       final sc = response.statusCode ?? 0;
       if (sc >= 400) {
         throw DioException(
@@ -528,41 +471,14 @@ class RuleEngine {
           error: 'HTTP $sc',
         );
       }
-
-      // ✅ 定点 debug：只在 debug 模式下输出结构
       if (dbg) {
         try {
-          final media0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]')
-              .read(response.data)
-              .firstOrNull
-              ?.value;
+          final media0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]').read(response.data).firstOrNull?.value;
           _logger?.debug('DBG ${rule.id} media0=${safeJson(media0)}');
         } catch (e) {
           _logger?.debug('DBG ${rule.id} media0 ERR=$e');
         }
-
-        try {
-          final content0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].content')
-              .read(response.data)
-              .firstOrNull
-              ?.value;
-          _logger?.debug('DBG ${rule.id} media0.content=${safeJson(content0)}');
-        } catch (e) {
-          _logger?.debug('DBG ${rule.id} media0.content ERR=$e');
-        }
-
-        try {
-          final thumb0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0].thumbnail')
-              .read(response.data)
-              .firstOrNull
-              ?.value;
-          _logger?.debug('DBG ${rule.id} media0.thumbnail=${safeJson(thumb0)}');
-        } catch (e) {
-          _logger?.debug('DBG ${rule.id} media0.thumbnail ERR=$e');
-        }
       }
-
-      // ✅ cursor 分页：成功后写回 next cursor
       if (rule.pageMode == 'cursor' && rule.cursorPath != null && rule.cursorPath!.trim().isNotEmpty) {
         final nextCursor = _getValue(rule.cursorPath!, response.data);
         if (nextCursor != null) {
@@ -573,7 +489,6 @@ class RuleEngine {
           _logger?.debug('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
         }
       }
-
       return _parseJsonToWallpapers(rule, response.data);
     } on DioException catch (e) {
       _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
@@ -583,9 +498,6 @@ class RuleEngine {
       rethrow;
     }
   }
-
-  // ---------- json merge 多请求（加日志 + 4xx body） ----------
-  // merge 多请求一般不适合 cursor；cursor + merge 先别做。
 
   Future<List<UniWallpaper>> _fetchJsonModeMerge(
     SourceRule rule,
@@ -606,12 +518,9 @@ class RuleEngine {
       }
       paramSets = next;
     });
-    // ✅ 重要节点：merge 统计（单行）
     _logger?.log('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
-
     final List<UniWallpaper> merged = [];
     final Set<String> seen = {};
-
     for (final ps in paramSets) {
       _logReq(rule, requestUrl, ps, headers);
       try {
@@ -627,7 +536,6 @@ class RuleEngine {
           ),
         );
         _logResp(rule, resp.statusCode, resp.realUri.toString(), resp.data);
-
         final sc = resp.statusCode ?? 0;
         if (sc >= 400) {
           throw DioException(
@@ -637,7 +545,6 @@ class RuleEngine {
             error: 'HTTP $sc',
           );
         }
-
         final items = _parseJsonToWallpapers(rule, resp.data);
         for (final it in items) {
           if (seen.add(it.id)) merged.add(it);
@@ -650,7 +557,6 @@ class RuleEngine {
         rethrow;
       }
     }
-
     _logger?.log('MERGE ${rule.id} merged=${merged.length}');
     return merged;
   }
