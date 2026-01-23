@@ -280,7 +280,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
                 height: viewportH,
                 width: double.infinity,
                 child: Container(
-                  color: Colors.black, // ✅ 关键：letterbox 变黑，不再“上下白边”
+                  color: Colors.transparent, // ✅ 关键：letterbox 变黑，不再“上下白边”
                   child: Hero(
                     tag: heroTag,
                     child: ClipRect(
