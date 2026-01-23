@@ -256,35 +256,42 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       return;
     }
 
+    // ✅ 锁死图源，避免 user:xxx 串到别的 rule
+    final rule = context.read<SourceManager>().activeRule;
     showSearch(
       context: context,
-      delegate: WallpaperSearchDelegate(),
+      delegate: WallpaperSearchDelegate(
+        initialRule: rule,
+      ),
       query: 'user:$u',
     );
   }
 
   void _searchSimilar() {
-   final service = context.read<WallpaperService>();
-   final rule = context.read<SourceManager>().activeRule;
+    final service = context.read<WallpaperService>();
+    final rule = context.read<SourceManager>().activeRule;
 
-if (rule == null) {
-  _snack("当前没有可用的图源规则");
-  return;
-}
+    if (rule == null) {
+      _snack("当前没有可用的图源规则");
+      return;
+    }
 
-final query = service.buildSimilarQuery(_wallpaper).trim();
-if (query.isEmpty) {
-  _snack("未能生成相似搜索条件");
-  return;
-}
+    // ✅ 关键：用 rule 生成相似 query（Wallhaven => like:id）
+    final query = service.buildSimilarQuery(_wallpaper, rule: rule).trim();
+    if (query.isEmpty) {
+      _snack("未能生成相似搜索条件");
+      return;
+    }
 
-showSearch(
-  context: context,
-  delegate: WallpaperSearchDelegate(
-    initialRule: rule, // ⭐⭐⭐ 关键：锁死图源
-  ),
-  query: query,
-);
+    // ✅ 关键：锁死图源，避免 like:id 串到 Pixiv
+    showSearch(
+      context: context,
+      delegate: WallpaperSearchDelegate(
+        initialRule: rule,
+      ),
+      query: query,
+    );
+  }
 
   void _snack(String msg) {
     if (!mounted) return;
@@ -332,9 +339,9 @@ showSearch(
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
 
     final double viewportH = _imageViewportHeight(context, w);
-    
+
     // 使用 FoggyHelper 构造渐变
-    final gradientDeco = FoggyHelper.getDecoration(isBottom: false); 
+    final gradientDeco = FoggyHelper.getDecoration(isBottom: false);
 
     return Scaffold(
       backgroundColor: _bgColor,
@@ -764,9 +771,12 @@ showSearch(
   Widget _buildTag(String tag) {
     return InkWell(
       onTap: () {
+        final rule = context.read<SourceManager>().activeRule;
         showSearch(
           context: context,
-          delegate: WallpaperSearchDelegate(),
+          delegate: WallpaperSearchDelegate(
+            initialRule: rule, // ✅ 锁死图源，避免 tag 串源
+          ),
           query: tag,
         );
       },
