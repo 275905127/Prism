@@ -188,7 +188,10 @@ String buildSimilarQuery(
     }
 
     // 2) Fallback：query 搜索
-    final q = buildSimilarQuery(seed).trim();
+    final q = buildSimilarQuery(
+  seed,
+  rule: rule,
+).trim();
     if (q.isEmpty) return const [];
 
     return fetch(
