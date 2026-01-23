@@ -272,12 +272,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
      return;
   }
 
-   final query = service
-      .buildSimilarQuery(
-        _wallpaper,
-        rule: rule,
-      )
-      .trim();
+   final query = service.buildSimilarQuery(_wallpaper).trim();
 
    if (query.isEmpty) {
     _snack("未能生成相似搜索条件");
