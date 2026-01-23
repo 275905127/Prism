@@ -472,3 +472,41 @@ class PixivRepository implements BaseImageSource {
     }
   }
 }
+
+class PixivPagesConfig {
+  final int concurrency;
+  final Duration timeoutPerItem;
+  final int retryCount;
+  final Duration retryDelay;
+
+  const PixivPagesConfig({
+    this.concurrency = 4,
+    this.timeoutPerItem = const Duration(seconds: 8),
+    this.retryCount = 1,
+    this.retryDelay = const Duration(milliseconds: 280),
+  });
+}
+
+class _PixivEnriched {
+  final String id;
+  final String thumbUrl;
+  final String regularUrl;
+  final String originalUrl;
+  final int width;
+  final int height;
+  final String? grade;
+  final bool isUgoira;
+  final bool isAi;
+
+  const _PixivEnriched({
+    required this.id,
+    required this.thumbUrl,
+    required this.regularUrl,
+    required this.originalUrl,
+    required this.width,
+    required this.height,
+    required this.grade,
+    required this.isUgoira,
+    required this.isAi,
+  });
+}
