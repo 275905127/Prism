@@ -248,7 +248,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     final hasSize = w.width > 0 && w.height > 0;
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
 
-    final double viewportH = _imageViewportHeight(context);
+    final double viewportH = _imageViewportHeight(context, w);
 
     return Scaffold(
       backgroundColor: _bgColor,
