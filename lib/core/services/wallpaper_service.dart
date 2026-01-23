@@ -133,25 +133,64 @@ class WallpaperService {
     }
   }
 
-  /// ✅ 统一构造“相似搜索 query”
-  String buildSimilarQuery(UniWallpaper w) {
-    final validTags = w.tags
-        .map((t) => t.trim())
-        .where((t) => t.length >= 2)
-        .where((t) => !t.toLowerCase().startsWith('ai'))
-        .where((t) => !t.toLowerCase().startsWith('r-'))
-        .take(4)
-        .toList(growable: false);
+  /// ✅ 统一构造“相似搜索 query”（Final）
+///
+/// 优先级（与 Wallhaven 官方一致）：
+/// 1️⃣ Wallhaven 官方相似：like:<id>
+/// 2️⃣ tags（最多 4 个，过滤 AI / r-）
+/// 3️⃣ uploader（最后兜底）
+///
+/// 说明：
+/// - like:<id> 仅在 Wallhaven API 下启用
+/// - 不写入模型，不影响两阶段数据结构
+String buildSimilarQuery(
+  UniWallpaper w, {
+  required SourceRule rule,
+}) {
+  // ------------------------------------------------------------
+  // 1️⃣ Wallhaven 官方相似（严格限定）
+  // ------------------------------------------------------------
+  final isWallhaven =
+      rule.id == 'wallhaven_ultimate_v3' &&
+      rule.url.startsWith('https://wallhaven.cc/api/v1/');
 
-    if (validTags.isNotEmpty) return validTags.join(' ');
+  if (isWallhaven) {
+    final wid = w.id.trim();
 
-    final uploader = w.uploader.trim();
-    if (uploader.isNotEmpty && uploader.toLowerCase() != 'unknown user') {
-      return 'user:$uploader';
+    // Wallhaven id 通常为 6~8 位字母数字，如：1q1mq3
+    final looksLikeWallhavenId =
+        RegExp(r'^[a-z0-9]{6,8}$', caseSensitive: false).hasMatch(wid);
+
+    if (looksLikeWallhavenId) {
+      return 'like:$wid';
     }
-
-    return '';
   }
+
+  // ------------------------------------------------------------
+  // 2️⃣ tags fallback（跨图源通用）
+  // ------------------------------------------------------------
+  final validTags = w.tags
+      .map((t) => t.trim())
+      .where((t) => t.length >= 2)
+      .where((t) => !t.toLowerCase().startsWith('ai'))
+      .where((t) => !t.toLowerCase().startsWith('r-'))
+      .take(4)
+      .toList(growable: false);
+
+  if (validTags.isNotEmpty) {
+    return validTags.join(' ');
+  }
+
+  // ------------------------------------------------------------
+  // 3️⃣ uploader fallback（最后兜底）
+  // ------------------------------------------------------------
+  final uploader = w.uploader.trim();
+  if (uploader.isNotEmpty && uploader.toLowerCase() != 'unknown user') {
+    return 'user:$uploader';
+  }
+
+  return '';
+}
 
   /// ✅ 统一“相似作品”入口（Pixiv 优先官方推荐；失败回退 query 搜索）
   ///
@@ -182,7 +221,7 @@ class WallpaperService {
     }
 
     // 2) Fallback：query 搜索
-    final q = buildSimilarQuery(seed).trim();
+    final q = buildSimilarQuery(seed, rule: rule).trim();
     if (q.isEmpty) return const [];
 
     return fetch(
