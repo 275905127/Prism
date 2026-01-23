@@ -133,13 +133,42 @@ class WallpaperService {
     }
   }
 
-  /// Wallhaven 相似搜索：严格对齐官方行为
-/// 仅使用图片 ID：like:{id}
-String buildSimilarQuery(UniWallpaper w) {
-  final id = w.id.trim();
-  if (id.isEmpty) return '';
-  return 'like:$id';
-}
+  /// ✅ 统一构造“相似搜索 query”
+  ///
+  /// - Wallhaven：优先使用官方 like:<id>（最接近官方相似逻辑）
+  /// - 其他：优先 tags，其次 uploader fallback
+  String buildSimilarQuery(UniWallpaper w, {SourceRule? rule}) {
+    final rid = (rule?.id ?? '').toLowerCase();
+    final rname = (rule?.name ?? '').toLowerCase();
+
+    // ✅ Wallhaven 官方相似：like:<wallpaper_id>
+    if (rid.contains('wallhaven') || rname handlingContainsWallhaven(rname)) {
+      final id = w.id.trim();
+      if (id.isNotEmpty) return 'like:$id';
+    }
+
+    final validTags = w.tags
+        .map((t) => t.trim())
+        .where((t) => t.length >= 2)
+        .where((t) => !t.toLowerCase().startsWith('ai'))
+        .where((t) => !t.toLowerCase().startsWith('r-'))
+        .take(4)
+        .toList(growable: false);
+
+    if (validTags.isNotEmpty) return validTags.join(' ');
+
+    final uploader = w.uploader.trim();
+    if (uploader.isNotEmpty && uploader.toLowerCase() != 'unknown user') {
+      return 'user:$uploader';
+    }
+
+    return '';
+  }
+
+  bool handlingContainsWallhaven(String rname) {
+    // 防止 name 里出现各种写法
+    return rname.contains('wallhaven') || rname.contains('wall haven') || rname.contains('wall-haven');
+  }
 
   /// ✅ 统一“相似作品”入口（Pixiv 优先官方推荐；失败回退 query 搜索）
   ///
