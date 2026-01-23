@@ -133,37 +133,87 @@ class WallpaperService {
     }
   }
 
-  /// ✅ 统一构造“相似搜索 query”（Final）
-///
-/// 优先级（与 Wallhaven 官方一致）：
-/// 1️⃣ Wallhaven 官方相似：like:<id>
-/// 2️⃣ tags（最多 4 个，过滤 AI / r-）
-/// 3️⃣ uploader（最后兜底）
-///
-/// 说明：
-/// - like:<id> 仅在 Wallhaven API 下启用
-/// - 不写入模型，不影响两阶段数据结构
-String buildSimilarQuery(
-  UniWallpaper w, {
-  required SourceRule rule,
-}) {
-  // ------------------------------------------------------------
-  // 1️⃣ Wallhaven 官方相似（严格限定）
-  // ------------------------------------------------------------
-  final isWallhaven =
-      rule.id == 'wallhaven_ultimate_v3' &&
-      rule.url.startsWith('https://wallhaven.cc/api/v1/');
-
-  if (isWallhaven) {
-    final wid = w.id.trim();
-
-    // Wallhaven id 通常为 6~8 位字母数字，如：1q1mq3
-    final looksLikeWallhavenId =
-        RegExp(r'^[a-z0-9]{6,8}$', caseSensitive: false).hasMatch(wid);
-
-    if (looksLikeWallhavenId) {
-      return 'like:$wid';
+  /// ✅ 统一“相似作品”入口
+  ///
+  /// Wallhaven：
+  /// - 优先使用官方语法：q=like:<id>
+  /// - 默认跟随 seed 的 purity（nsfw/sketchy/sfw），避免 purity=111 导致结果与官方不一致
+  /// - 默认使用 sorting=relevance + order=desc（官方常见行为）
+  /// - 自动剔除 seed 自己（官方客户端常见行为）
+  ///
+  /// Pixiv：
+  /// - 维持你现有逻辑（推荐接口优先，失败回退 query）
+  Future<List<UniWallpaper>> fetchSimilar({
+    required UniWallpaper seed,
+    required SourceRule rule,
+    int page = 1,
+    Map<String, dynamic>? filterParams,
+  }) async {
+    // 1) Pixiv：保持你原先逻辑
+    if (isPixivRule(rule) && hasPixivCookie) {
+      final pixiv = await _tryFetchPixivRecommendSimilar(
+        seed: seed,
+        rule: rule,
+        page: page,
+      );
+      if (pixiv != null) {
+        return pixiv.where((e) => e.id != seed.id).toList(growable: false);
+      }
     }
+
+    // 2) Wallhaven：对齐官方策略（like:id + purity 跟随 + relevance + 去重）
+    final bool isWallhaven = rule.url.contains('wallhaven.cc/api/v1/');
+    if (isWallhaven && seed.id.trim().isNotEmpty) {
+      final String q = 'like:${seed.id.trim()}';
+
+      // ✅ 在相似搜索场景下：不要盲目 purity=111（会导致与官方不一致）
+      // 规则：
+      // - seed.grade 如果是 wallhaven 的 purity（sfw/sketchy/nsfw），则 purity 跟随 seed
+      // - 如果调用方 filterParams 已显式传 purity，则尊重调用方
+      final Map<String, dynamic> fp = <String, dynamic>{
+        ...?filterParams,
+      };
+
+      // ✅ 官方常见默认：relevance + desc
+      fp.putIfAbsent('sorting', () => 'relevance');
+      fp.putIfAbsent('order', () => 'desc');
+
+      // ✅ purity 跟随 seed（仅当调用方没传 purity）
+      if (!fp.containsKey('purity')) {
+        final g = seed.grade.trim().toLowerCase();
+        if (g == 'nsfw') {
+          fp['purity'] = '001';
+        } else if (g == 'sketchy') {
+          fp['purity'] = '010';
+        } else if (g == 'sfw') {
+          fp['purity'] = '100';
+        }
+        // 其它情况不强塞 purity，让 rule.fixed_params / 现有默认接管
+      }
+
+      final list = await fetch(
+        rule,
+        page: page,
+        query: q,
+        filterParams: fp,
+      );
+
+      // ✅ 剔除 seed 自己（官方客户端常见）
+      return list.where((e) => e.id != seed.id).toList(growable: false);
+    }
+
+    // 3) 其它图源：fallback 走 tags/uploader 的 query
+    final q = buildSimilarQuery(seed).trim();
+    if (q.isEmpty) return const [];
+
+    final list = await fetch(
+      rule,
+      page: page,
+      query: q,
+      filterParams: filterParams,
+    );
+
+    return list.where((e) => e.id != seed.id).toList(growable: false);
   }
 
   // ------------------------------------------------------------
