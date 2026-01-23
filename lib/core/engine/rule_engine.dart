@@ -73,7 +73,8 @@ class RuleEngine implements BaseImageSource {
     // apiKey
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
-      final keyName = (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
+      final keyName =
+          (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
       if (rule.apiKeyIn == 'header') {
         reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
       } else {
@@ -371,6 +372,13 @@ class RuleEngine implements BaseImageSource {
         return jp.read(source).firstOrNull?.value as T?;
       }
       final v = _readDotPath(source, path);
+
+      // ✅ FIX: 增强 String 类型转换的健壮性
+      // 如果期望是 String 但取到的是数字/对象，尝试 toString() 而非直接强转失败
+      if (T == String && v != null && v is! String) {
+        return v.toString() as T;
+      }
+
       return v as T?;
     } catch (_) {
       return null;
@@ -403,7 +411,12 @@ class RuleEngine implements BaseImageSource {
     return m.map((k, v) => MapEntry(k, safeVal(v)));
   }
 
-  void _logReq(SourceRule rule, String url, Map<String, dynamic> params, Map<String, String> headers) {
+  void _logReq(
+    SourceRule rule,
+    String url,
+    Map<String, dynamic> params,
+    Map<String, String> headers,
+  ) {
     _logger?.log('REQ ${rule.id} GET $url');
     _logger?.debug('    params=$params');
     _logger?.debug('    headers=${_maskHeaders(headers)}');
@@ -587,7 +600,16 @@ class RuleEngine implements BaseImageSource {
       String full = _resolveImageUrl(rawFull ?? rawThumb, rule);
 
       final id = _stableId(rule, item, thumb, full);
-      if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
+
+      // ✅ FIX: 添加 Debug 日志，说明为何跳过
+      if (thumb.trim().isEmpty && full.trim().isEmpty) {
+        _logger?.debug(
+          'Engine Skipped: ID=$id. Reason: Path not found. '
+          'thumbPath="${rule.thumbPath}"->"$rawThumb", '
+          'fullPath="${rule.fullPath}"->"$rawFull"',
+        );
+        continue;
+      }
 
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
       final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
@@ -645,7 +667,9 @@ class RuleEngine implements BaseImageSource {
         );
       }
 
-      if (rule.pageMode == 'cursor' && rule.cursorPath != null && rule.cursorPath!.trim().isNotEmpty) {
+      if (rule.pageMode == 'cursor' &&
+          rule.cursorPath != null &&
+          rule.cursorPath!.trim().isNotEmpty) {
         final nextCursor = _getValue(rule.cursorPath!, response.data);
         if (nextCursor != null) {
           final ck = _cursorKey(rule, finalQuery, filterParams);
