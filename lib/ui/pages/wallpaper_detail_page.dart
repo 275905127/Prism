@@ -581,7 +581,7 @@ class _FullImageOnlyState extends State<_FullImageOnly> {
     Widget fitted(Widget child) {
       return Center(
         child: FittedBox(
-          fit: BoxFit.contain,
+          fit: BoxFit.fitWidth,
           child: child,
         ),
       );
