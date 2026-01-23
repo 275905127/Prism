@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:gal/gal.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -15,9 +16,8 @@ import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
   final UniWallpaper wallpaper;
-
-  /// Compatibility: allow callers (e.g. SearchDelegate) to pass headers explicitly.
   final Map<String, String>? headers;
+
   const WallpaperDetailPage({
     super.key,
     required this.wallpaper,
@@ -28,24 +28,29 @@ class WallpaperDetailPage extends StatefulWidget {
   State<WallpaperDetailPage> createState() => _WallpaperDetailPageState();
 }
 
-class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTickerProviderStateMixin {
+class _WallpaperDetailPageState extends State<WallpaperDetailPage>
+    with SingleTickerProviderStateMixin {
   bool _isDownloading = false;
 
-  // ✅ 详情补全后的 wallpaper（两阶段模型 Stage 2）
+  // ===== 详情（两阶段） =====
   late UniWallpaper _wallpaper;
-
   bool _detailHydrating = false;
   bool _detailHydrated = false;
 
-  // 图片缩放控制
+  // ===== 相似列表 =====
+  bool _similarExpanded = false;
+  bool _similarLoading = false;
+  bool _similarHasMore = true;
+  int _similarPage = 1;
+  final List<UniWallpaper> _similarList = [];
+
+  // ===== 图片缩放 =====
   final TransformationController _transformController = TransformationController();
   late final AnimationController _animationController;
   Animation<Matrix4>? _animation;
 
-  // 缓存，避免 build 期间 provider lookup / 反复计算引发重建抖动
   Map<String, String>? _cachedHeaders;
 
-  // Wallhaven Light Theme Colors
   static const Color _bgColor = Colors.white;
   static const Color _textColor = Color(0xFF333333);
   static const Color _subTextColor = Color(0xFF777777);
@@ -62,9 +67,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       duration: const Duration(milliseconds: 200),
     )..addListener(() {
         final a = _animation;
-        if (a != null) {
-          _transformController.value = a.value;
-        }
+        if (a != null) _transformController.value = a.value;
       });
   }
 
@@ -73,7 +76,6 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     super.didChangeDependencies();
     _cachedHeaders ??= _resolveImageHeaders();
 
-    // ✅ 只触发一次详情补全
     if (!_detailHydrated && !_detailHydrating) {
       _detailHydrating = true;
       _hydrateDetailIfPossible();
@@ -84,12 +86,10 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     try {
       final rule = context.read<SourceManager>().activeRule;
       if (rule == null) {
-        if (!mounted) return;
         setState(() => _detailHydrated = true);
         return;
       }
 
-      // ✅ 新版 WallpaperService：fetchDetail({base, rule})
       final updated = await context.read<WallpaperService>().fetchDetail(
             base: _wallpaper,
             rule: rule,
@@ -101,9 +101,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
         _detailHydrated = true;
       });
     } catch (_) {
-      // 详情补全失败不影响页面展示（保持“列表数据”）
-      if (!mounted) return;
-      setState(() => _detailHydrated = true);
+      if (mounted) setState(() => _detailHydrated = true);
     } finally {
       _detailHydrating = false;
     }
@@ -116,22 +114,52 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
     super.dispose();
   }
 
-  void _onDoubleTap() {
-    final matrix = _transformController.value;
-    if (matrix.getMaxScaleOnAxis() > 1.0) {
-      _animation = Matrix4Tween(begin: matrix, end: Matrix4.identity()).animate(_animationController);
-      _animationController.forward(from: 0);
-    } else {
-      final zoomed = Matrix4.identity()..scale(2.0);
-      _animation = Matrix4Tween(begin: matrix, end: zoomed).animate(_animationController);
-      _animationController.forward(from: 0);
+  // ================= 相似加载 =================
+
+  void _toggleSimilar() {
+    setState(() => _similarExpanded = !_similarExpanded);
+    if (_similarExpanded && _similarList.isEmpty) {
+      _loadSimilar();
     }
   }
 
-  Map<String, String>? _resolveImageHeaders() {
-    final passed = widget.headers;
-    if (passed != null && passed.isNotEmpty) return passed;
+  Future<void> _loadSimilar() async {
+    if (_similarLoading || !_similarHasMore) return;
 
+    final rule = context.read<SourceManager>().activeRule;
+    if (rule == null) return;
+
+    setState(() => _similarLoading = true);
+
+    try {
+      final list = await context.read<WallpaperService>().fetchSimilar(
+            seed: _wallpaper,
+            rule: rule,
+            page: _similarPage,
+          );
+
+      if (!mounted) return;
+      setState(() {
+        if (list.isEmpty) {
+          _similarHasMore = false;
+        } else {
+          _similarList.addAll(
+            list.where((e) => e.id != _wallpaper.id),
+          );
+          _similarPage++;
+        }
+      });
+    } catch (_) {
+      if (mounted) _snack("加载相似作品失败");
+    } finally {
+      if (mounted) setState(() => _similarLoading = false);
+    }
+  }
+
+  // ================= 辅助 =================
+
+  Map<String, String>? _resolveImageHeaders() {
+    if (widget.headers != null && widget.headers!.isNotEmpty) return widget.headers;
     final rule = context.read<SourceManager>().activeRule;
     return context.read<WallpaperService>().imageHeadersFor(
           wallpaper: _wallpaper,
@@ -139,141 +167,27 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
         );
   }
 
-  String _detectExtension(Uint8List bytes) {
-    if (bytes.length < 12) return 'jpg';
-    if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return 'jpg';
-    if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) return 'png';
-    if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) return 'gif';
-    if (bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return 'webp';
-    return 'jpg';
-  }
-
-  Future<void> _saveImage() async {
-    if (_isDownloading) return;
-
-    try {
-      final hasAccess = await Gal.hasAccess();
-      if (!hasAccess) {
-        final granted = await Gal.requestAccess();
-        if (!granted) {
-          if (mounted) _snack("❌ 需要相册权限");
-          return;
-        }
-      }
-    } catch (_) {}
-
-    setState(() => _isDownloading = true);
-    if (mounted) _snack("正在下载原图...");
-
-    try {
-      final headers = _cachedHeaders ?? _resolveImageHeaders();
-
-      final Uint8List imageBytes = await context.read<WallpaperService>().downloadImageBytes(
-            url: _wallpaper.fullUrl,
-            headers: headers,
-          );
-
-      final String extension = _detectExtension(imageBytes);
-      final String fileName = "prism_${_wallpaper.sourceId}_${_wallpaper.id}.$extension";
-
-      await Gal.putImageBytes(
-        imageBytes,
-        album: 'Prism',
-        name: fileName,
-      );
-
-      if (mounted) _snack("✅ 已保存到相册");
-    } on GalException catch (e) {
-      if (mounted) _snack("❌ 保存失败: ${e.type.message}");
-    } catch (e) {
-      if (mounted) _snack("❌ 下载错误: $e");
-    } finally {
-      if (mounted) setState(() => _isDownloading = false);
-    }
-  }
-
-  void _shareImage() => Share.share(_wallpaper.fullUrl);
-
-  void _copyUrl() {
-    Clipboard.setData(ClipboardData(text: _wallpaper.fullUrl));
-    _snack("✅ 链接已复制");
-  }
-
-  void _searchUploader(String uploader) {
-    final u = uploader.trim();
-    if (u.isEmpty || u.toLowerCase() == 'unknown user') {
-      _snack("没有可用的上传者信息");
-      return;
-    }
-
-    showSearch(
-      context: context,
-      delegate: WallpaperSearchDelegate(),
-      query: 'user:$u',
-    );
-  }
-
-  void _searchSimilar() {
-    final service = context.read<WallpaperService>();
-    final query = service.buildSimilarQuery(_wallpaper).trim();
-
-    if (query.isEmpty) {
-      _snack("未能生成相似搜索条件");
-      return;
-    }
-
-    showSearch(
-      context: context,
-      delegate: WallpaperSearchDelegate(),
-      query: query,
-    );
+  void _onDoubleTap() {
+    final m = _transformController.value;
+    final end = m.getMaxScaleOnAxis() > 1
+        ? Matrix4.identity()
+        : (Matrix4.identity()..scale(2.0));
+    _animation = Matrix4Tween(begin: m, end: end).animate(_animationController);
+    _animationController.forward(from: 0);
   }
 
   void _snack(String msg) {
-    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg, style: const TextStyle(color: Colors.white)),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: Colors.black87,
-        duration: const Duration(milliseconds: 1500),
-      ),
+      SnackBar(content: Text(msg), duration: const Duration(milliseconds: 1400)),
     );
   }
 
-  double _imageViewportHeight(BuildContext context, UniWallpaper w) {
-    final screenW = MediaQuery.of(context).size.width;
-
-    if (w.width > 0 && w.height > 0) {
-      final ratio = w.width / w.height;
-      final h = screenW / ratio;
-      return h.clamp(220.0, 5000.0);
-    }
-
-    final screenH = MediaQuery.of(context).size.height;
-    final h = screenH * 0.85;
-    return h.clamp(320.0, 900.0);
-  }
+  // ================= Build =================
 
   @override
   Widget build(BuildContext context) {
     final w = _wallpaper;
-    final heroTag = '${w.sourceId}::${w.id}';
-
-    final resolvedHeaders = _cachedHeaders ?? _resolveImageHeaders();
-
-    final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown User";
-    final String viewsCount = w.views.isNotEmpty ? w.views : "-";
-    final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
-    final String fileSize = w.fileSize.isNotEmpty ? w.fileSize : "-";
-    final String uploadDate = w.createdAt.isNotEmpty ? w.createdAt : "-";
-    final String fileType = w.mimeType.isNotEmpty ? w.mimeType : "image/jpeg";
-    final String category = (w.grade != null && w.grade!.trim().isNotEmpty) ? w.grade!.trim() : "General";
-
-    final hasSize = w.width > 0 && w.height > 0;
-    final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
-
-    final double viewportH = _imageViewportHeight(context, w);
+    final headers = _cachedHeaders;
 
     return Scaffold(
       backgroundColor: _bgColor,
@@ -281,395 +195,101 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
         physics: const BouncingScrollPhysics(),
         slivers: [
           SliverToBoxAdapter(
-            child: SafeArea(
-              bottom: false,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 8, top: 6),
-                  child: IconButton(
-                    icon: const _BackButtonBadge(),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
             child: GestureDetector(
               onDoubleTap: _onDoubleTap,
-              child: SizedBox(
-                height: viewportH,
-                width: double.infinity,
-                child: Container(
-                  color: Colors.transparent,
-                  child: Hero(
-                    tag: heroTag,
-                    child: ClipRect(
-                      child: InteractiveViewer(
-                        transformationController: _transformController,
-                        minScale: 1.0,
-                        maxScale: 4.0,
-                        clipBehavior: Clip.hardEdge,
-                        child: SizedBox.expand(
-                          child: _FullImageOnly(
-                            url: w.fullUrl,
-                            headers: resolvedHeaders,
-                          ),
-                        ),
-                      ),
-                    ),
+              child: Hero(
+                tag: '${w.sourceId}::${w.id}',
+                child: InteractiveViewer(
+                  transformationController: _transformController,
+                  minScale: 1,
+                  maxScale: 4,
+                  child: CachedNetworkImage(
+                    imageUrl: w.fullUrl,
+                    httpHeaders: headers,
+                    fit: BoxFit.contain,
                   ),
                 ),
               ),
             ),
           ),
+
+          // ===== 相似入口按钮 =====
           SliverToBoxAdapter(
-            child: Container(
-              color: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 操作栏
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _buildSimpleAction(Icons.crop_free, "设为壁纸", () => _snack("暂未实现")),
-                      _buildSimpleAction(Icons.copy, "复制链接", _copyUrl),
-                      _buildSimpleAction(Icons.share, "分享", _shareImage),
-                      _buildSimpleAction(
-                        Icons.download,
-                        "下载原图",
-                        _isDownloading ? null : _saveImage,
-                        isProcessing: _isDownloading,
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  // ✅ 详情补全状态（轻提示，不打扰）
-                  if (!_detailHydrated)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: Text(
-                        '正在补全详情信息…',
-                        style: TextStyle(color: _subTextColor, fontSize: 12),
-                      ),
-                    ),
-
-                  const SizedBox(height: 24),
-                  const Divider(height: 1, color: Color(0xFFEEEEEE)),
-                  const SizedBox(height: 24),
-
-                  // 上传者
-                  InkWell(
-                    onTap: () => _searchUploader(uploaderName),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
-                      child: Row(
-                        children: [
-                          CircleAvatar(
-                            radius: 20,
-                            backgroundColor: _accentColor,
-                            child: Text(
-                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  "上传者: $uploaderName",
-                                  style: const TextStyle(
-                                    color: _textColor,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                const Text(
-                                  "查看该作者的更多作品",
-                                  style: TextStyle(color: _subTextColor, fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const Icon(Icons.chevron_right, color: Colors.grey),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // 详细参数
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF9F9F9),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      children: [
-                        _buildInfoRow(Icons.visibility, "$viewsCount 浏览", Icons.favorite, "$favsCount 收藏"),
-                        const SizedBox(height: 12),
-                        _buildInfoRow(Icons.aspect_ratio, resolution, Icons.sd_storage, fileSize),
-                        const SizedBox(height: 12),
-                        _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
-                        const SizedBox(height: 12),
-                        _buildInfoRow(
-                          Icons.image,
-                          fileType,
-                          Icons.link,
-                          "查看源地址",
-                          isLink: true,
-                          onTapLink: () {
-                            Clipboard.setData(ClipboardData(text: w.fullUrl));
-                            _snack("✅ 源地址已复制");
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // 相似搜索
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.auto_awesome, color: _textColor),
-                      label: const Text(
-                        "查看更多相似作品",
-                        style: TextStyle(color: _textColor),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        side: const BorderSide(color: Color(0xFFDDDDDD)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                      onPressed: _searchSimilar,
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  if (w.tags.isNotEmpty) ...[
-                    const Row(
-                      children: [
-                        Icon(Icons.label, size: 18, color: _subTextColor),
-                        SizedBox(width: 8),
-                        Text(
-                          "Tags",
-                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: w.tags.map((tag) => _buildTag(tag)).toList(),
-                    ),
-                  ],
-
-                  SizedBox(height: MediaQuery.of(context).padding.bottom + 40),
-                ],
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: OutlinedButton.icon(
+                icon: Icon(
+                  _similarExpanded ? Icons.expand_less : Icons.auto_awesome,
+                  color: _textColor,
+                ),
+                label: Text(
+                  _similarExpanded ? "收起相似作品" : "查看更多相似作品",
+                  style: const TextStyle(color: _textColor),
+                ),
+                onPressed: _toggleSimilar,
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
 
-  Widget _buildSimpleAction(IconData icon, String label, VoidCallback? onTap, {bool isProcessing = false}) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          children: [
-            isProcessing
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: _accentColor),
-                  )
-                : Icon(icon, color: _textColor, size: 26),
-            const SizedBox(height: 6),
-            Text(label, style: const TextStyle(color: _subTextColor, fontSize: 12)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInfoRow(
-    IconData i1,
-    String t1,
-    IconData i2,
-    String t2, {
-    bool isLink = false,
-    VoidCallback? onTapLink,
-  }) {
-    Widget item(IconData i, String t, bool link, {VoidCallback? onTap}) {
-      final text = Text(
-        t,
-        style: TextStyle(
-          color: link ? _accentColor : _textColor,
-          fontSize: 13,
-          fontWeight: FontWeight.w500,
-          decoration: link ? TextDecoration.underline : null,
-          decorationColor: _accentColor,
-        ),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      );
-
-      return Expanded(
-        child: Row(
-          children: [
-            Icon(i, size: 16, color: _accentColor),
-            const SizedBox(width: 8),
-            Expanded(
-              child: link
-                  ? InkWell(
-                      onTap: onTap,
-                      child: text,
-                    )
-                  : text,
+          // ===== 相似列表 =====
+          if (_similarExpanded)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: MasonryGridView.count(
+                  crossAxisCount: 2,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  itemCount: _similarList.length,
+                  itemBuilder: (context, index) {
+                    final item = _similarList[index];
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => WallpaperDetailPage(wallpaper: item),
+                          ),
+                        );
+                      },
+                      child: CachedNetworkImage(
+                        imageUrl: item.thumbUrl,
+                        httpHeaders: headers,
+                        fit: BoxFit.cover,
+                      ),
+                    );
+                  },
+                ),
+              ),
             ),
-          ],
-        ),
-      );
-    }
 
-    return Row(
-      children: [
-        item(i1, t1, false),
-        const SizedBox(width: 16),
-        item(i2, t2, isLink, onTap: onTapLink),
-      ],
-    );
-  }
+          if (_similarExpanded)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: _similarLoading
+                      ? const CircularProgressIndicator()
+                      : (_similarHasMore
+                          ? TextButton(
+                              onPressed: _loadSimilar,
+                              child: const Text("加载更多"),
+                            )
+                          : const Text(
+                              "没有更多了",
+                              style: TextStyle(color: _subTextColor),
+                            )),
+                ),
+              ),
+            ),
 
-  Widget _buildTag(String tag) {
-    return InkWell(
-      onTap: () {
-        showSearch(
-          context: context,
-          delegate: WallpaperSearchDelegate(),
-          query: tag,
-        );
-      },
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        decoration: BoxDecoration(
-          color: _tagBgColor,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: const Color(0xFFE0E0E0)),
-        ),
-        child: Text(
-          tag,
-          style: const TextStyle(color: _textColor, fontSize: 13),
-        ),
-      ),
-    );
-  }
-}
-
-class _BackButtonBadge extends StatelessWidget {
-  const _BackButtonBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.95),
-        borderRadius: BorderRadius.circular(999),
-        boxShadow: const [
-          BoxShadow(
-            blurRadius: 10,
-            offset: Offset(0, 4),
-            color: Color(0x1A000000),
+          SliverToBoxAdapter(
+            child: SizedBox(height: MediaQuery.of(context).padding.bottom + 32),
           ),
         ],
       ),
-      padding: const EdgeInsets.all(6),
-      child: const Icon(Icons.arrow_back, color: Colors.black),
-    );
-  }
-}
-
-class _FullImageOnly extends StatefulWidget {
-  final String url;
-  final Map<String, String>? headers;
-
-  const _FullImageOnly({
-    required this.url,
-    required this.headers,
-  });
-
-  @override
-  State<_FullImageOnly> createState() => _FullImageOnlyState();
-}
-
-class _FullImageOnlyState extends State<_FullImageOnly> {
-  bool _loaded = false;
-  bool _failed = false;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget fitted(Widget child) {
-      return Center(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: child,
-        ),
-      );
-    }
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: CachedNetworkImage(
-            imageUrl: widget.url,
-            httpHeaders: widget.headers,
-            fit: BoxFit.contain,
-            fadeInDuration: const Duration(milliseconds: 120),
-            placeholderFadeInDuration: const Duration(milliseconds: 60),
-            imageBuilder: (context, provider) {
-              if (!_loaded) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted) setState(() => _loaded = true);
-                });
-              }
-              return fitted(Image(image: provider));
-            },
-            placeholder: (context, url) => const SizedBox.shrink(),
-            errorWidget: (context, url, error) {
-              if (!_failed) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted) setState(() => _failed = true);
-                });
-              }
-              return const Center(child: Icon(Icons.broken_image_outlined, size: 46, color: Colors.grey));
-            },
-          ),
-        ),
-        if (!_loaded && !_failed)
-          const Positioned.fill(
-            child: Center(child: CircularProgressIndicator()),
-          ),
-      ],
     );
   }
 }
