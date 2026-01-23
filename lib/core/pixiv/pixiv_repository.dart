@@ -1,11 +1,12 @@
 // lib/core/pixiv/pixiv_repository.dart
 import 'dart:async';
 import 'package:dio/dio.dart';
+
+import '../engine/base_image_source.dart';
 import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
-import '../storage/preferences_store.dart'; // ✅
+import '../storage/preferences_store.dart';
 import '../utils/prism_logger.dart';
-import '../engine/base_image_source.dart'; // ✅
 import 'pixiv_client.dart';
 
 // PixivPreferences 类保持不变
@@ -13,8 +14,18 @@ class PixivPreferences {
   final String imageQuality;
   final List<String> mutedTags;
   final bool showAi;
-  const PixivPreferences({this.imageQuality = 'original', this.mutedTags = const [], this.showAi = true});
-  PixivPreferences copyWith({String? imageQuality, List<String>? mutedTags, bool? showAi}) {
+
+  const PixivPreferences({
+    this.imageQuality = 'original',
+    this.mutedTags = const [],
+    this.showAi = true,
+  });
+
+  PixivPreferences copyWith({
+    String? imageQuality,
+    List<String>? mutedTags,
+    bool? showAi,
+  }) {
     return PixivPreferences(
       imageQuality: imageQuality ?? this.imageQuality,
       mutedTags: mutedTags ?? this.mutedTags,
@@ -42,6 +53,7 @@ class PixivRepository implements BaseImageSource {
 
   final PixivClient _client;
   final PrismLogger? _logger;
+
   PixivPreferences _prefs = const PixivPreferences();
   PixivPagesConfig _pagesConfig;
 
@@ -55,6 +67,26 @@ class PixivRepository implements BaseImageSource {
 
   static const String kRuleId = 'pixiv_search_ajax';
   static const String kUserRuleId = 'pixiv_user';
+
+  // ==================== “阶段 2”缓存（详情补全） ====================
+
+  static const Duration _kDetailCacheTtl = Duration(minutes: 15);
+  final Map<String, _DetailCacheEntry> _detailCache = {};
+
+  PixivIllustDetail? _getDetailCache(String id) {
+    final e = _detailCache[id];
+    if (e == null) return null;
+    if (DateTime.now().difference(e.at) > _kDetailCacheTtl) {
+      _detailCache.remove(id);
+      return null;
+    }
+    return e.detail;
+  }
+
+  void _setDetailCache(PixivIllustDetail detail) {
+    if (detail.id.isEmpty) return;
+    _detailCache[detail.id] = _DetailCacheEntry(detail: detail, at: DateTime.now());
+  }
 
   // ==================== 接口实现 ====================
 
@@ -74,11 +106,11 @@ class PixivRepository implements BaseImageSource {
     required PreferencesStore prefs,
     required SourceRule rule,
   }) async {
-    // 1. 恢复 Cookie
+    // 1) Cookie
     String? cookieFromPrefs;
     try {
       cookieFromPrefs = await prefs.loadPixivCookie(rule.id);
-    } catch (e) {
+    } catch (_) {
       cookieFromPrefs = null;
     }
 
@@ -97,7 +129,7 @@ class PixivRepository implements BaseImageSource {
       setCookie(resolved);
     }
 
-    // 2. 恢复偏好
+    // 2) 偏好
     Map<String, dynamic>? raw;
     try {
       raw = await prefs.loadPixivPrefsRaw();
@@ -138,10 +170,9 @@ class PixivRepository implements BaseImageSource {
     String? query,
     Map<String, dynamic>? filterParams,
   }) async {
-    // 同步配置
     _syncConfigFromRule(rule);
 
-    // ✅ 空参数兜底逻辑 (下沉到这里)
+    // ✅ 空参数兜底
     String finalQuery = (query ?? '').trim();
     if (finalQuery.isEmpty) {
       finalQuery = (rule.defaultKeyword ?? '').trim();
@@ -158,6 +189,7 @@ class PixivRepository implements BaseImageSource {
     int minBookmarks = 0;
 
     final fp = filterParams ?? const <String, dynamic>{};
+
     String _pickStr(String k, String fallback) {
       final v = fp[k];
       final s = (v ?? '').toString().trim();
@@ -192,14 +224,22 @@ class PixivRepository implements BaseImageSource {
       if (mode.toLowerCase() == 'r18') mode = 'safe';
     }
 
-    // 构造查询
+    // ✅ user: 通配能力（用户名 / userId 都可）
+    // UI 详情页的“查看该作者更多作品”传的是 userName，因此必须在这里解析。
+    final bool isUserQuery = finalQuery.toLowerCase().startsWith('user:');
+    String userKey = '';
+    if (isUserQuery) {
+      userKey = finalQuery.substring('user:'.length).trim();
+    }
+
+    // 构造查询（非 user:）
     String apiQuery = finalQuery;
-    if (!isRanking && finalQuery.isNotEmpty && minBookmarks > 0) {
+    if (!isRanking && !isUserQuery && finalQuery.isNotEmpty && minBookmarks > 0) {
       apiQuery = '$finalQuery ${minBookmarks}users入り';
     }
 
     _logger?.log(
-      'REQ pixiv q="$apiQuery" page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0}',
+      'REQ pixiv q="$finalQuery"(api="$apiQuery") page=$page order=$order mode=$mode(rank=$isRanking) login=${loginOk ? 1 : 0}',
     );
 
     final ruleId = rule.id;
@@ -208,8 +248,11 @@ class PixivRepository implements BaseImageSource {
     try {
       if (isRanking) {
         briefs = await _client.getRanking(mode: rankingMode, page: page);
-      } else if (ruleId == kUserRuleId) {
-        briefs = await _client.getUserArtworks(userId: apiQuery, page: page);
+      } else if (ruleId == kUserRuleId || isUserQuery) {
+        // ✅ user: 分支
+        final resolvedUserId = await _resolveUserId(userKey.isNotEmpty ? userKey : apiQuery);
+        if (resolvedUserId.isEmpty) return const [];
+        briefs = await _client.getUserArtworks(userId: resolvedUserId, page: page);
       } else {
         if (apiQuery.isEmpty) return const [];
         briefs = await _client.searchArtworks(
@@ -225,7 +268,7 @@ class PixivRepository implements BaseImageSource {
       rethrow;
     }
 
-    // 过滤
+    // 过滤（AI & muted tags）
     briefs = briefs.where((b) {
       if (!_prefs.showAi && b.isAi) return false;
       if (_prefs.mutedTags.isNotEmpty) {
@@ -239,8 +282,10 @@ class PixivRepository implements BaseImageSource {
     _logger?.log('RESP pixiv count=${briefs.length}');
     if (briefs.isEmpty) return const [];
 
-    // 并发补全
-    final enriched = await _enrichWithPages(
+    // ✅ “两阶段优化”：
+    // 阶段 1：brief 已经有 tags/userName 的先用
+    // 阶段 2：并发补全 pages + detail（上传者/真实 tags/浏览收藏/创建时间）
+    final enriched = await _enrichWithPagesAndDetail(
       briefs,
       concurrency: _pagesConfig.concurrency,
       timeoutPerItem: _pagesConfig.timeoutPerItem,
@@ -250,6 +295,7 @@ class PixivRepository implements BaseImageSource {
     for (final e in enriched) {
       if (e.id.isEmpty) continue;
 
+      // 图片质量选择
       String bestUrl = e.thumbUrl;
       switch (_prefs.imageQuality) {
         case 'original':
@@ -264,20 +310,37 @@ class PixivRepository implements BaseImageSource {
           break;
       }
 
+      // mimeType：尽量从 bestUrl 推断
+      final mimeType = _guessMimeType(bestUrl);
+
+      // createdAt：尽量只取日期部分（UI 当前按字符串展示）
+      final createdAt = _formatDateOnly(e.createDate);
+
       out.add(
         UniWallpaper(
           id: e.id,
           sourceId: 'pixiv',
           thumbUrl: e.thumbUrl,
           fullUrl: bestUrl,
-          width: e.width.toDouble(),
-          height: e.height.toDouble(),
+          width: (e.width > 0 ? e.width : e.detailWidth).toDouble(),
+          height: (e.height > 0 ? e.height : e.detailHeight).toDouble(),
           grade: e.grade,
           isUgoira: e.isUgoira,
           isAi: e.isAi,
+          tags: e.tags,
+
+          // ✅ 详情页关键字段：修复“识别不准”
+          uploader: e.uploader.isNotEmpty ? e.uploader : 'Unknown User',
+          views: e.viewCount > 0 ? e.viewCount.toString() : '',
+          favorites: e.bookmarkCount > 0 ? e.bookmarkCount.toString() : '',
+          createdAt: createdAt,
+          mimeType: mimeType,
+          // fileSize pixiv ajax 不稳定/不可用：暂留空
+          fileSize: '',
         ),
       );
     }
+
     return out;
   }
 
@@ -300,8 +363,8 @@ class PixivRepository implements BaseImageSource {
   static const Duration _kLoginCacheTtl = Duration(minutes: 5);
   bool? _cachedLoginOk;
   DateTime? _cachedLoginAt;
-  
-  // ✅ Completer 并发锁
+
+  // ✅ 并发锁
   Future<bool>? _checkingLoginFuture;
 
   bool? get cachedLoginOk => _cachedLoginOk;
@@ -319,7 +382,6 @@ class PixivRepository implements BaseImageSource {
     }
 
     final now = DateTime.now();
-    // ✅ 局部捕获，防止 Race Condition
     final lastAt = _cachedLoginAt;
     final lastOk = _cachedLoginOk;
 
@@ -330,7 +392,6 @@ class PixivRepository implements BaseImageSource {
       }
     }
 
-    // ✅ Completer 逻辑
     final existingFuture = _checkingLoginFuture;
     if (existingFuture != null) {
       return existingFuture;
@@ -345,7 +406,7 @@ class PixivRepository implements BaseImageSource {
         _cachedLoginOk = ok;
         _cachedLoginAt = DateTime.now();
         if (!completer.isCompleted) completer.complete(ok);
-      } catch (e) {
+      } catch (_) {
         _cachedLoginOk = false;
         _cachedLoginAt = DateTime.now();
         if (!completer.isCompleted) completer.complete(false);
@@ -379,10 +440,10 @@ class PixivRepository implements BaseImageSource {
 
       if ((cookie != null && cookie.isNotEmpty) || (ua != null && ua.isNotEmpty)) {
         if (cookie != null && cookie.isNotEmpty && cookie != _client.buildImageHeaders()['Cookie']) {
-           _client.updateConfig(cookie: cookie, userAgent: ua);
-           _invalidateLoginCache();
+          _client.updateConfig(cookie: cookie, userAgent: ua);
+          _invalidateLoginCache();
         } else if (ua != null && ua.isNotEmpty) {
-           _client.updateConfig(userAgent: ua);
+          _client.updateConfig(userAgent: ua);
         }
       }
     } catch (e) {
@@ -390,14 +451,37 @@ class PixivRepository implements BaseImageSource {
     }
   }
 
-  Future<List<_PixivEnriched>> _enrichWithPages(
+  Future<String> _resolveUserId(String raw) async {
+    final q = raw.trim();
+    if (q.isEmpty) return '';
+
+    // 数字：直接当 userId
+    if (_isNumeric(q)) return q;
+
+    // 非数字：用 users 搜索解析
+    final resolved = await _client.resolveUserIdByName(q);
+    return (resolved ?? '').trim();
+  }
+
+  bool _isNumeric(String s) {
+    if (s.isEmpty) return false;
+    for (int i = 0; i < s.length; i++) {
+      final c = s.codeUnitAt(i);
+      if (c < 48 || c > 57) return false;
+    }
+    return true;
+  }
+
+  Future<List<_PixivEnriched>> _enrichWithPagesAndDetail(
     List<PixivIllustBrief> briefs, {
     int concurrency = 4,
     Duration timeoutPerItem = const Duration(seconds: 8),
   }) async {
     if (briefs.isEmpty) return const [];
+
     final List<_PixivEnriched?> results = List<_PixivEnriched?>.filled(briefs.length, null, growable: false);
     var nextIndex = 0;
+
     int takeIndex() {
       final v = nextIndex;
       nextIndex++;
@@ -408,13 +492,18 @@ class PixivRepository implements BaseImageSource {
       while (true) {
         final idx = takeIndex();
         if (idx >= briefs.length) return;
+
         final b = briefs[idx];
+
+        // 基础信息（阶段 1）
         String regular = '';
         String original = _deriveOriginalFromThumb(b.thumbUrl) ?? '';
         final grade = _gradeFromRestrict(b.xRestrict);
-        final bool needFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
 
-        if (needFetch) {
+        final bool needPagesFetch = (_prefs.imageQuality != 'small') && original.isEmpty;
+
+        // pages 补全（原图/常规图）
+        if (needPagesFetch) {
           try {
             final pages = await _client.getIllustPages(b.id).timeout(timeoutPerItem);
             if (pages.isNotEmpty) {
@@ -427,6 +516,32 @@ class PixivRepository implements BaseImageSource {
           if (regular.isEmpty) regular = original;
         }
 
+        // detail 补全（阶段 2）
+        PixivIllustDetail? detail = _getDetailCache(b.id);
+        if (detail == null) {
+          try {
+            detail = await _client.getIllustDetail(b.id).timeout(timeoutPerItem);
+            if (detail != null) {
+              _setDetailCache(detail);
+            }
+          } catch (_) {
+            detail = null;
+          }
+        }
+
+        final uploader = (b.userName.trim().isNotEmpty)
+            ? b.userName.trim()
+            : (detail?.userName.trim().isNotEmpty ?? false)
+                ? detail!.userName.trim()
+                : '';
+
+        final tags = _mergeTags(primary: detail?.tags ?? const [], secondary: b.tags);
+
+        final viewCount = (b.viewCount > 0) ? b.viewCount : (detail?.viewCount ?? 0);
+        final bookmarkCount = (b.bookmarkCount > 0) ? b.bookmarkCount : (detail?.bookmarkCount ?? 0);
+
+        final createDate = (b.createDate.trim().isNotEmpty) ? b.createDate.trim() : (detail?.createDate ?? '');
+
         results[idx] = _PixivEnriched(
           id: b.id,
           thumbUrl: b.thumbUrl,
@@ -434,20 +549,41 @@ class PixivRepository implements BaseImageSource {
           originalUrl: original,
           width: b.width,
           height: b.height,
+          detailWidth: detail?.width ?? 0,
+          detailHeight: detail?.height ?? 0,
           grade: grade,
-          isUgoira: b.isUgoira,
-          isAi: b.isAi,
+          isUgoira: b.isUgoira || (detail?.isUgoira ?? false),
+          isAi: b.isAi || (detail?.isAi ?? false),
+          uploader: uploader,
+          tags: tags,
+          viewCount: viewCount,
+          bookmarkCount: bookmarkCount,
+          createDate: createDate,
         );
       }
     }
 
     final workers = List.generate(concurrency, (_) => worker());
     await Future.wait(workers);
+
     final out = <_PixivEnriched>[];
     for (final e in results) {
       if (e != null && e.id.isNotEmpty) out.add(e);
     }
     return out;
+  }
+
+  List<String> _mergeTags({required List<String> primary, required List<String> secondary}) {
+    final set = <String>{};
+    for (final t in primary) {
+      final s = t.trim();
+      if (s.isNotEmpty) set.add(s);
+    }
+    for (final t in secondary) {
+      final s = t.trim();
+      if (s.isNotEmpty) set.add(s);
+    }
+    return set.toList(growable: false);
   }
 
   String? _gradeFromRestrict(int xRestrict) {
@@ -471,6 +607,27 @@ class PixivRepository implements BaseImageSource {
       return null;
     }
   }
+
+  String _guessMimeType(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('.png')) return 'image/png';
+    if (u.contains('.webp')) return 'image/webp';
+    if (u.contains('.gif')) return 'image/gif';
+    if (u.contains('.jpeg') || u.contains('.jpg')) return 'image/jpeg';
+    // pixiv 原图有时无后缀，保守返回 jpeg
+    return 'image/jpeg';
+  }
+
+  String _formatDateOnly(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return '';
+    // 常见：2024-01-02T12:34:56+09:00
+    final t = s.indexOf('T');
+    if (t > 0) return s.substring(0, t);
+    // 或已经是 YYYY-MM-DD
+    if (s.length >= 10) return s.substring(0, 10);
+    return s;
+  }
 }
 
 class PixivPagesConfig {
@@ -492,11 +649,24 @@ class _PixivEnriched {
   final String thumbUrl;
   final String regularUrl;
   final String originalUrl;
+
   final int width;
   final int height;
+
+  // detail fallback
+  final int detailWidth;
+  final int detailHeight;
+
   final String? grade;
   final bool isUgoira;
   final bool isAi;
+
+  // ✅ 详情页关键字段
+  final String uploader;
+  final List<String> tags;
+  final int viewCount;
+  final int bookmarkCount;
+  final String createDate;
 
   const _PixivEnriched({
     required this.id,
@@ -505,8 +675,21 @@ class _PixivEnriched {
     required this.originalUrl,
     required this.width,
     required this.height,
+    required this.detailWidth,
+    required this.detailHeight,
     required this.grade,
     required this.isUgoira,
     required this.isAi,
+    required this.uploader,
+    required this.tags,
+    required this.viewCount,
+    required this.bookmarkCount,
+    required this.createDate,
   });
+}
+
+class _DetailCacheEntry {
+  final PixivIllustDetail detail;
+  final DateTime at;
+  const _DetailCacheEntry({required this.detail, required this.at});
 }
