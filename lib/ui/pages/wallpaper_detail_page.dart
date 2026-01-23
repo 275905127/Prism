@@ -80,7 +80,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
       _animation = Matrix4Tween(begin: matrix, end: Matrix4.identity()).animate(_animationController);
       _animationController.forward(from: 0);
     } else {
-      // 可选：双击放大到 2x（体验更像相册）
+      // 双击放大到 2x（体验更像相册）
       final zoomed = Matrix4.identity()..scale(2.0);
       _animation = Matrix4Tween(begin: matrix, end: zoomed).animate(_animationController);
       _animationController.forward(from: 0);
@@ -171,33 +171,33 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
   }
 
   String _buildSimilarQuery(UniWallpaper w) {
-  final validTags = w.tags
-      .where((t) => t.length >= 2)
-      .where((t) => !t.startsWith('ai'))
-      .where((t) => !t.startsWith('r-'))
-      .take(4)
-      .toList();
+    final validTags = w.tags
+        .where((t) => t.trim().length >= 2)
+        .where((t) => !t.toLowerCase().startsWith('ai'))
+        .where((t) => !t.toLowerCase().startsWith('r-'))
+        .take(4)
+        .toList();
 
-  if (validTags.isNotEmpty) {
-    return validTags.join(' ');
+    if (validTags.isNotEmpty) {
+      return validTags.join(' ');
+    }
+
+    if (w.uploader.isNotEmpty) {
+      return 'user:${w.uploader}';
+    }
+
+    return '';
   }
 
-  if (w.uploader.isNotEmpty) {
-    return 'user:${w.uploader}';
+  void _searchSimilar() {
+    final query = _buildSimilarQuery(widget.wallpaper);
+
+    showSearch(
+      context: context,
+      delegate: WallpaperSearchDelegate(),
+      query: query,
+    );
   }
-
-  return '';
-}
-
-void _searchSimilar() {
-  final query = _buildSimilarQuery(widget.wallpaper);
-
-  showSearch(
-    context: context,
-    delegate: WallpaperSearchDelegate(),
-    query: query,
-  );
-}
 
   void _snack(String msg) {
     if (!mounted) return;
@@ -211,12 +211,10 @@ void _searchSimilar() {
     );
   }
 
-  // ✅ 关键：固定图片展示区高度，避免 Sliver child 因图片 decode 改变高度导致“跳一下”
+  // ✅ 关键：固定图片展示区高度，避免 decode/布局变化导致“跳一下”
   double _imageViewportHeight(BuildContext context) {
     final screenH = MediaQuery.of(context).size.height;
-    // 你原本 maxHeight=0.85，这里直接固定为同等上限：稳定、可预期
     final h = screenH * 0.85;
-    // 下限避免极小屏过小
     return h.clamp(320.0, 900.0);
   }
 
@@ -227,14 +225,14 @@ void _searchSimilar() {
 
     final resolvedHeaders = _cachedHeaders ?? _resolveImageHeaders();
 
-    // 数据占位
+    // 数据占位（全部兜底，避免 “不匹配/不显示”）
     final String uploaderName = w.uploader.isNotEmpty ? w.uploader : "Unknown_User";
     final String viewsCount = w.views.isNotEmpty ? w.views : "-";
     final String favsCount = w.favorites.isNotEmpty ? w.favorites : "-";
     final String fileSize = w.fileSize.isNotEmpty ? w.fileSize : "-";
     final String uploadDate = w.createdAt.isNotEmpty ? w.createdAt : "-";
     final String fileType = w.mimeType.isNotEmpty ? w.mimeType : "image/jpeg";
-    final String category = w.grade ?? "General";
+    final String category = (w.grade != null && w.grade!.trim().isNotEmpty) ? w.grade!.trim() : "General";
 
     final hasSize = w.width > 0 && w.height > 0;
     final String resolution = hasSize ? "${w.width.toInt()} x ${w.height.toInt()}" : "Unknown";
@@ -246,17 +244,24 @@ void _searchSimilar() {
       body: CustomScrollView(
         physics: const BouncingScrollPhysics(),
         slivers: [
-          SliverAppBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            floating: true,
-            leading: IconButton(
-              icon: const ContainerWithShadow(child: Icon(Icons.arrow_back, color: Colors.white)),
-              onPressed: () => Navigator.pop(context),
+          // 顶部返回：不占用图片区背景（避免白条视觉），固定显示在内容最上层
+          SliverToBoxAdapter(
+            child: SafeArea(
+              bottom: false,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 6),
+                  child: IconButton(
+                    icon: const _BackButtonBadge(),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ),
+              ),
             ),
           ),
 
-          // ✅ 图片区：固定高度 + 固定布局盒子 + 渐进式加载
+          // ✅ 图片区：固定高度 + 黑色底板（彻底干掉白边）+ 不加载 thumb（只上 full）
           SliverToBoxAdapter(
             child: GestureDetector(
               onDoubleTap: _onDoubleTap,
@@ -264,22 +269,18 @@ void _searchSimilar() {
                 height: viewportH,
                 width: double.infinity,
                 child: Container(
-                  color: Colors.transparent,
+                  color: Colors.black, // ✅ 关键：letterbox 变黑，不再“上下白边”
                   child: Hero(
                     tag: heroTag,
-                    // ✅ Hero 只包“固定尺寸的盒子”，避免 Hero 结束后又因图片尺寸变化二次跳动
                     child: ClipRect(
                       child: InteractiveViewer(
                         transformationController: _transformController,
                         minScale: 1.0,
                         maxScale: 4.0,
-                        // 可选：避免边缘溢出空白闪动
                         clipBehavior: Clip.hardEdge,
                         child: SizedBox.expand(
-                          // ✅ SizedBox.expand 锁定 child 的布局尺寸
-                          child: _ProgressiveImage(
-                            thumbUrl: w.thumbUrl,
-                            fullUrl: w.fullUrl,
+                          child: _FullImageOnly(
+                            url: w.fullUrl,
                             headers: resolvedHeaders,
                           ),
                         ),
@@ -299,6 +300,7 @@ void _searchSimilar() {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // 操作栏
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
@@ -317,49 +319,51 @@ void _searchSimilar() {
                   const Divider(height: 1, color: Color(0xFFEEEEEE)),
                   const SizedBox(height: 24),
 
+                  // 上传者（已去掉关注按钮）
                   InkWell(
-  onTap: () => _searchUploader(uploaderName),
-  borderRadius: BorderRadius.circular(8),
-  child: Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
-    child: Row(
-      children: [
-        CircleAvatar(
-          radius: 20,
-          backgroundColor: _accentColor,
-          child: Text(
-            uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                "上传者: $uploaderName",
-                style: const TextStyle(
-                  color: _textColor,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
-              ),
-              const Text(
-                "查看该作者的更多作品",
-                style: TextStyle(color: _subTextColor, fontSize: 12),
-              ),
-            ],
-          ),
-        ),
-        const Icon(Icons.chevron_right, color: Colors.grey),
-      ],
-    ),
-  ),
-),
+                    onTap: () => _searchUploader(uploaderName),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 20,
+                            backgroundColor: _accentColor,
+                            child: Text(
+                              uploaderName.isNotEmpty ? uploaderName[0].toUpperCase() : 'U',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "上传者: $uploaderName",
+                                  style: const TextStyle(
+                                    color: _textColor,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                                const Text(
+                                  "查看该作者的更多作品",
+                                  style: TextStyle(color: _subTextColor, fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, color: Colors.grey),
+                        ],
+                      ),
+                    ),
+                  ),
 
                   const SizedBox(height: 20),
 
+                  // 详细参数
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
@@ -374,32 +378,45 @@ void _searchSimilar() {
                         const SizedBox(height: 12),
                         _buildInfoRow(Icons.calendar_today, uploadDate, Icons.category, category),
                         const SizedBox(height: 12),
-                        _buildInfoRow(Icons.image, fileType, Icons.link, "查看源地址", isLink: true),
+                        _buildInfoRow(
+                          Icons.image,
+                          fileType,
+                          Icons.link,
+                          "查看源地址",
+                          isLink: true,
+                          onTapLink: () {
+                            // 没引入 url_launcher，先做“复制源地址”
+                            Clipboard.setData(ClipboardData(text: w.fullUrl));
+                            _snack("✅ 源地址已复制");
+                          },
+                        ),
                       ],
                     ),
                   ),
 
                   const SizedBox(height: 20),
 
+                  // 相似搜索（已优化）
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
-  icon: const Icon(Icons.auto_awesome, color: _textColor),
-  label: const Text(
-    "查看更多相似作品",
-    style: TextStyle(color: _textColor),
-  ),
-  style: OutlinedButton.styleFrom(
-    padding: const EdgeInsets.symmetric(vertical: 14),
-    side: const BorderSide(color: Color(0xFFDDDDDD)),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-  ),
-  onPressed: _searchSimilar,
-),
+                      icon: const Icon(Icons.auto_awesome, color: _textColor),
+                      label: const Text(
+                        "查看更多相似作品",
+                        style: TextStyle(color: _textColor),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: const BorderSide(color: Color(0xFFDDDDDD)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onPressed: _searchSimilar,
+                    ),
                   ),
 
                   const SizedBox(height: 24),
 
+                  // Tags
                   if (w.tags.isNotEmpty) ...[
                     const Row(
                       children: [
@@ -452,26 +469,40 @@ void _searchSimilar() {
     );
   }
 
-  Widget _buildInfoRow(IconData i1, String t1, IconData i2, String t2, {bool isLink = false}) {
-    Widget item(IconData i, String t, bool link) {
+  Widget _buildInfoRow(
+    IconData i1,
+    String t1,
+    IconData i2,
+    String t2, {
+    bool isLink = false,
+    VoidCallback? onTapLink,
+  }) {
+    Widget item(IconData i, String t, bool link, {VoidCallback? onTap}) {
+      final text = Text(
+        t,
+        style: TextStyle(
+          color: link ? _accentColor : _textColor,
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          decoration: link ? TextDecoration.underline : null,
+          decorationColor: _accentColor,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+
       return Expanded(
         child: Row(
           children: [
             Icon(i, size: 16, color: _accentColor),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                t,
-                style: TextStyle(
-                  color: link ? _accentColor : _textColor,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  decoration: link ? TextDecoration.underline : null,
-                  decorationColor: _accentColor,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+              child: link
+                  ? InkWell(
+                      onTap: onTap,
+                      child: text,
+                    )
+                  : text,
             ),
           ],
         ),
@@ -482,7 +513,7 @@ void _searchSimilar() {
       children: [
         item(i1, t1, false),
         const SizedBox(width: 16),
-        item(i2, t2, isLink),
+        item(i2, t2, isLink, onTap: onTapLink),
       ],
     );
   }
@@ -513,18 +544,26 @@ void _searchSimilar() {
   }
 }
 
-/// ✅ 渐进式图片：thumb 先出图，full 成功后淡入覆盖；
-/// 关键是：外层 SizedBox.expand 锁住布局尺寸，内部用 FittedBox(contain) 适配，避免任何“加载前后布局变化”。
-class _ProgressiveImage extends StatelessWidget {
-  final String thumbUrl;
-  final String fullUrl;
+/// ✅ 只加载 fullUrl（你要求：不要略缩图）
+/// - 布局固定：外层 SizedBox.expand 锁住
+/// - 适配方式：contain（完整显示）
+/// - loading：仅在未完成且未报错时显示，成功/失败都会消失
+class _FullImageOnly extends StatefulWidget {
+  final String url;
   final Map<String, String>? headers;
 
-  const _ProgressiveImage({
-    required this.thumbUrl,
-    required this.fullUrl,
+  const _FullImageOnly({
+    required this.url,
     required this.headers,
   });
+
+  @override
+  State<_FullImageOnly> createState() => _FullImageOnlyState();
+}
+
+class _FullImageOnlyState extends State<_FullImageOnly> {
+  bool _loaded = false;
+  bool _failed = false;
 
   @override
   Widget build(BuildContext context) {
@@ -537,70 +576,72 @@ class _ProgressiveImage extends StatelessWidget {
       );
     }
 
-    // 注意：FittedBox 需要 child 有“自身尺寸”，这里用 Image 组件提供 intrinsic；
-    // 外层布局已被 SizedBox.expand 锁死，不会反向影响 Sliver 高度。
-    final thumb = CachedNetworkImage(
-      imageUrl: thumbUrl,
-      httpHeaders: headers,
-      fadeInDuration: Duration.zero,
-      fadeOutDuration: Duration.zero,
-      errorWidget: (_, __, ___) => const SizedBox.shrink(),
-      // 让其尽快解码
-      placeholder: (_, __) => const SizedBox.shrink(),
-    );
-
-    final full = CachedNetworkImage(
-      imageUrl: fullUrl,
-      httpHeaders: headers,
+    final img = CachedNetworkImage(
+      imageUrl: widget.url,
+      httpHeaders: widget.headers,
       fadeInDuration: const Duration(milliseconds: 150),
       fadeOutDuration: Duration.zero,
       placeholder: (_, __) => const SizedBox.shrink(),
-      errorWidget: (_, __, ___) => const Center(
-        child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
-      ),
+      imageBuilder: (ctx, provider) {
+        if (!_loaded) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _loaded = true);
+          });
+        }
+        return fitted(Image(image: provider));
+      },
+      errorWidget: (_, __, ___) {
+        if (!_failed) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _failed = true);
+          });
+        }
+        return const Center(
+          child: Icon(Icons.broken_image, color: Colors.white70, size: 52),
+        );
+      },
     );
 
     return Stack(
       fit: StackFit.expand,
       children: [
-        // 背景：避免透明导致的视觉“闪一下”
-        Container(color: Colors.transparent),
+        // 背景已在父级设为黑色，这里直接铺图
+        img,
 
-        // thumb
-        fitted(thumb),
-
-        // full（淡入覆盖）
-        fitted(full),
-
-        // 中央 loading（只要 full 没出来，它也不会撑布局）
-        const Align(
-          alignment: Alignment.center,
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+        // ✅ loading：只在未成功且未失败时显示
+        if (!_loaded && !_failed)
+          const Align(
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            ),
           ),
-        ),
       ],
     );
   }
 }
 
-// 阴影容器，用于返回按钮
-class ContainerWithShadow extends StatelessWidget {
-  final Widget child;
-  const ContainerWithShadow({super.key, required this.child});
+/// 返回按钮：黑色箭头 + 白底圆形 + 阴影（任何背景都清楚）
+class _BackButtonBadge extends StatelessWidget {
+  const _BackButtonBadge();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
+      width: 38,
+      height: 38,
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.92),
         shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(color: Colors.black26, blurRadius: 8, spreadRadius: 1),
+        boxShadow: const [
+          BoxShadow(color: Colors.black26, blurRadius: 10, spreadRadius: 1),
         ],
       ),
-      child: child,
+      child: const Center(
+        child: Icon(Icons.arrow_back, color: Colors.black, size: 20),
+      ),
     );
   }
 }
