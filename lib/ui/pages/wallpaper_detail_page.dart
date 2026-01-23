@@ -265,7 +265,11 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
   void _searchSimilar() {
     final service = context.read<WallpaperService>();
-    final query = service.buildSimilarQuery(_wallpaper).trim();
+    final query =
+    service.buildSimilarQuery(
+      _wallpaper,
+      rule: _rule, // 或当前页面持有的 SourceRule
+    ).trim();
 
     if (query.isEmpty) {
       _snack("未能生成相似搜索条件");
