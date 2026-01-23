@@ -192,56 +192,74 @@ class RuleEngine implements BaseImageSource {
   // ✅ 新增：详情补全（供 WallpaperService / DetailPage 调用）
   // ============================================================
   Future<UniWallpaper> fetchDetail(
-    SourceRule rule,
-    UniWallpaper base, {
-    Map<String, String>? headers,
-  }) async {
-    final detailUrlTpl = rule.detailUrl?.trim() ?? '';
-    if (detailUrlTpl.isEmpty) return base;
+  SourceRule rule,
+  UniWallpaper base, {
+  Map<String, String>? headers,
+}) async {
+  final detailUrlTpl = rule.detailUrl?.trim() ?? '';
+  if (detailUrlTpl.isEmpty) return base;
 
-    final url = detailUrlTpl.replaceAll('{id}', Uri.encodeComponent(base.id));
-    final reqHeaders = <String, String>{
-      ..._defaultUA(),
-      ...?rule.headers,
-      ...?headers,
-    };
+  final url = detailUrlTpl.replaceAll('{id}', Uri.encodeComponent(base.id));
 
-    try {
-      _logReq(rule, url, const {}, reqHeaders);
+  // ✅ 详情请求也要带上 fixedParams + apiKey（否则 wallhaven /w/{id} 会 401）
+  final Map<String, dynamic> params = {};
+  if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
-      final response = await _dio.get(
-        url,
-        options: Options(
-          headers: reqHeaders,
-          responseType: ResponseType.json,
-          sendTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
-          validateStatus: (s) => s != null && s < 500,
-        ),
-      );
+  final Map<String, String> reqHeaders = {
+    ..._defaultUA(),
+    ...?rule.headers,
+    ...?headers,
+  };
 
-      _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
-
-      final sc = response.statusCode ?? 0;
-      if (sc >= 400) {
-        throw DioException(
-          requestOptions: response.requestOptions,
-          response: response,
-          type: DioExceptionType.badResponse,
-          error: 'HTTP $sc',
-        );
-      }
-
-      final root = _selectRoot(rule.detailRootPath, response.data);
-      return _applyMetaFromObject(rule, base, root);
-    } on DioException catch (e) {
-      _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
-      rethrow;
-    } catch (e) {
-      _logErr(rule, null, url, e, null);
-      rethrow;
+  // ✅ apiKey 注入（对齐 fetch() 的规则）
+  final apiKey = rule.apiKey;
+  if (apiKey != null && apiKey.isNotEmpty) {
+    final keyName = (rule.apiKeyName == null || rule.apiKeyName!.isEmpty) ? 'apikey' : rule.apiKeyName!;
+    if (rule.apiKeyIn == 'header') {
+      reqHeaders[keyName] = '${rule.apiKeyPrefix}$apiKey';
+    } else {
+      // query
+      _putParam(params, keyName, apiKey);
     }
   }
+
+  try {
+    _logReq(rule, url, params, reqHeaders);
+
+    final response = await _dio.get(
+      url,
+      queryParameters: params.isEmpty ? null : params, // ✅ 关键：带上 queryParameters
+      options: Options(
+        headers: reqHeaders,
+        responseType: ResponseType.json,
+        sendTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        validateStatus: (s) => s != null && s < 500,
+      ),
+    );
+
+    _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
+
+    final sc = response.statusCode ?? 0;
+    if (sc >= 400) {
+      throw DioException(
+        requestOptions: response.requestOptions,
+        response: response,
+        type: DioExceptionType.badResponse,
+        error: 'HTTP $sc',
+      );
+    }
+
+    final root = _selectRoot(rule.detailRootPath, response.data);
+    return _applyMetaFromObject(rule, base, root);
+  } on DioException catch (e) {
+    _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
+    rethrow;
+  } catch (e) {
+    _logErr(rule, null, url, e, null);
+    rethrow;
+  }
+}
 
   // ==================== Stage 2：归一化 & 赋值 ====================
 
