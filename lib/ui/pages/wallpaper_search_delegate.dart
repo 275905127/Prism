@@ -5,11 +5,17 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/manager/source_manager.dart';
+import '../../core/models/source_rule.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/services/wallpaper_service.dart'; // 引入 Service
 import 'wallpaper_detail_page.dart';
 
 class WallpaperSearchDelegate extends SearchDelegate {
+  /// ✅ 可选：锁死图源，避免“like:ID / user:xxx / tag”串到别的源
+  final SourceRule? initialRule;
+
+  WallpaperSearchDelegate({this.initialRule});
+
   // ... (appBarTheme, buildActions, buildLeading 保持不变)
   @override
   ThemeData appBarTheme(BuildContext context) {
@@ -47,8 +53,11 @@ class WallpaperSearchDelegate extends SearchDelegate {
 
   @override
   Widget buildResults(BuildContext context) {
-    if (query.trim().isEmpty) return const SizedBox();
-    return _SearchResults(query: query);
+    // ✅ 关键改动：允许空 query 展示默认列表（query 为空时传 null 给 service.fetch）
+    return _SearchResults(
+      query: query,
+      initialRule: initialRule,
+    );
   }
 
   @override
@@ -59,17 +68,18 @@ class WallpaperSearchDelegate extends SearchDelegate {
 
 class _SearchResults extends StatefulWidget {
   final String query;
-  const _SearchResults({required this.query});
+  final SourceRule? initialRule;
+
+  const _SearchResults({
+    required this.query,
+    required this.initialRule,
+  });
 
   @override
   State<_SearchResults> createState() => _SearchResultsState();
 }
 
 class _SearchResultsState extends State<_SearchResults> {
-  // 🔥 删除：不再直接持有 Engine/Repo
-  // final RuleEngine _engine = RuleEngine();
-  // final PixivRepository _pixivRepo = PixivRepository();
-
   final ScrollController _scrollController = ScrollController();
   List<UniWallpaper> _wallpapers = [];
   bool _loading = false;
@@ -81,6 +91,19 @@ class _SearchResultsState extends State<_SearchResults> {
     super.initState();
     _scrollController.addListener(_onScroll);
     _doSearch(refresh: true);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SearchResults oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // ✅ 搜索词变化：刷新
+    if (oldWidget.query.trim() != widget.query.trim()) {
+      _doSearch(refresh: true);
+    }
+    // ✅ 锁死 rule 变化：也刷新
+    if (oldWidget.initialRule?.id != widget.initialRule?.id) {
+      _doSearch(refresh: true);
+    }
   }
 
   @override
@@ -96,11 +119,16 @@ class _SearchResultsState extends State<_SearchResults> {
     }
   }
 
+  SourceRule? _resolveRule() {
+    // ✅ 优先使用锁死的 initialRule；否则用当前 activeRule
+    final manager = context.read<SourceManager>();
+    return widget.initialRule ?? manager.activeRule;
+  }
+
   Future<void> _doSearch({required bool refresh}) async {
     if (_loading) return;
 
-    final manager = context.read<SourceManager>();
-    final rule = manager.activeRule;
+    final rule = _resolveRule();
     if (rule == null) return;
 
     setState(() {
@@ -113,22 +141,15 @@ class _SearchResultsState extends State<_SearchResults> {
 
     try {
       final q = widget.query.trim();
-      if (q.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _wallpapers = [];
-          _loading = false;
-          _hasMore = false;
-        });
-        return;
-      }
 
-      // 🔥 核心修改：统一走 Service 调用
+      // ✅ 关键改动：空搜索词 => query 传 null，让后端走默认列表（而不是直接清空）
+      final String? actualQuery = q.isEmpty ? null : q;
+
       final List<UniWallpaper> data = await context.read<WallpaperService>().fetch(
-        rule,
-        page: _page,
-        query: q,
-      );
+            rule,
+            page: _page,
+            query: actualQuery,
+          );
 
       if (!mounted) return;
 
@@ -147,7 +168,7 @@ class _SearchResultsState extends State<_SearchResults> {
 
         _loading = false;
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
       setState(() {
         _loading = false;
@@ -158,11 +179,11 @@ class _SearchResultsState extends State<_SearchResults> {
 
   @override
   Widget build(BuildContext context) {
-    final manager = context.watch<SourceManager>();
-    final rule = manager.activeRule;
+    final rule = context.watch<SourceManager>().activeRule;
+    final lockedRule = widget.initialRule;
 
-    // 🔥 核心修改：统一走 Service 获取 Headers
-    final headers = context.read<WallpaperService>().getImageHeaders(rule);
+    // 这里展示用哪个规则：以实际请求规则为准
+    final usingRule = lockedRule ?? rule;
 
     return Stack(
       children: [
@@ -175,6 +196,13 @@ class _SearchResultsState extends State<_SearchResults> {
           itemCount: _wallpapers.length,
           itemBuilder: (context, index) {
             final paper = _wallpapers[index];
+
+            // ✅ 关键改动：每张图的 headers 走 imageHeadersFor（避免 Referer/Cookie 不一致）
+            final headers = context.read<WallpaperService>().imageHeadersFor(
+                  wallpaper: paper,
+                  rule: usingRule,
+                );
+
             return GestureDetector(
               onTap: () => Navigator.push(
                 context,
@@ -188,7 +216,7 @@ class _SearchResultsState extends State<_SearchResults> {
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: CachedNetworkImage(
-                  imageUrl: paper.thumbUrl,
+                  imageUrl: paper.thumbUrl.isNotEmpty ? paper.thumbUrl : paper.fullUrl,
                   httpHeaders: headers,
                   fit: BoxFit.cover,
                   placeholder: (c, u) => Container(color: Colors.grey[100], height: 160),
