@@ -11,7 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../core/models/uni_wallpaper.dart';
 import '../../core/manager/source_manager.dart';
 import '../../core/services/wallpaper_service.dart';
-import '../widgets/foggy_app_bar.dart'; [span_0](start_span)//[span_0](end_span) 引用 FoggyHelper
+import '../widgets/foggy_app_bar.dart'; // 确保引用了 FoggyHelper
 import 'wallpaper_search_delegate.dart';
 
 class WallpaperDetailPage extends StatefulWidget {
@@ -326,7 +326,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
 
     final double viewportH = _imageViewportHeight(context, w);
     
-    [span_1](start_span)//[span_1](end_span) 使用 FoggyHelper 构建渐变
+    // 使用 FoggyHelper 构造渐变
     final gradientDeco = FoggyHelper.getDecoration(isBottom: false); 
 
     return Scaffold(
@@ -532,7 +532,7 @@ class _WallpaperDetailPageState extends State<WallpaperDetailPage> with SingleTi
             ],
           ),
 
-          [span_2](start_span)// ✅[span_2](end_span) 顶部雾化渐变栏
+          // ✅ 顶部雾化渐变栏
           Positioned(
             top: 0,
             left: 0,
