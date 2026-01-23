@@ -9,11 +9,9 @@ import '../models/source_rule.dart';
 import '../models/uni_wallpaper.dart';
 import '../storage/preferences_store.dart';
 import '../utils/prism_logger.dart';
-import 'base_image_source.dart'; // ✅ 新增引入
+import 'base_image_source.dart';
 
 class RuleEngine implements BaseImageSource {
-  /// ✅ 允许注入 Dio：让 WallpaperService 统一网络出口
-  /// ✅ 允许注入 Logger：核心层不再直接依赖 AppLog
   RuleEngine({Dio? dio, PrismLogger? logger})
       : _dio = dio ?? Dio(),
         _logger = logger;
@@ -21,24 +19,23 @@ class RuleEngine implements BaseImageSource {
   final Dio _dio;
   final PrismLogger? _logger;
 
-  /// ✅ cursor 分页缓存：不同 query / filters 必须隔离
   final Map<String, dynamic> _cursorCache = {};
 
-  // ==================== 接口实现 ====================
+  // ==================== BaseImageSource ====================
 
   @override
-  bool supports(SourceRule rule) => true; // 通用引擎作为兜底，支持所有
+  bool supports(SourceRule rule) => true;
 
   @override
   Future<void> restoreSession({
     required PreferencesStore prefs,
     required SourceRule rule,
   }) async {
-    // 通用 JSON 规则通常无需会话恢复，未来可在此扩展 Token 读取逻辑
+    // 通用 JSON 规则通常无需会话恢复
   }
 
   @override
-  Future<bool> checkLoginStatus(SourceRule rule) async => true; // 默认视为无需登录
+  Future<bool> checkLoginStatus(SourceRule rule) async => true;
 
   @override
   Future<List<UniWallpaper>> fetch(
@@ -47,7 +44,6 @@ class RuleEngine implements BaseImageSource {
     String? query,
     Map<String, dynamic>? filterParams,
   }) async {
-    // ---------- 以下为原有 fetch 逻辑 ----------
     final Map<String, dynamic> params = {};
     if (rule.fixedParams != null) params.addAll(rule.fixedParams!);
 
@@ -55,7 +51,7 @@ class RuleEngine implements BaseImageSource {
       ..._defaultUA(),
       ...?rule.headers,
     };
-    
+
     // apiKey
     final apiKey = rule.apiKey;
     if (apiKey != null && apiKey.isNotEmpty) {
@@ -81,8 +77,11 @@ class RuleEngine implements BaseImageSource {
           }
 
           final encode = (filterRule?.encode ?? 'join').toLowerCase();
-          final cleaned =
-              value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+          final cleaned = value
+              .map((e) => e?.toString() ?? '')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .toList();
           if (cleaned.isEmpty) return;
 
           if (encode == 'merge') {
@@ -100,7 +99,7 @@ class RuleEngine implements BaseImageSource {
       });
     }
 
-    // ✅✅✅ 关键字策略
+    // keyword 策略
     String? finalQuery = query;
     if ((finalQuery == null || finalQuery.trim().isEmpty) &&
         rule.defaultKeyword != null &&
@@ -118,10 +117,9 @@ class RuleEngine implements BaseImageSource {
       }
     }
 
-    // ✅ URL 占位符
     final String requestUrl = _buildRequestUrl(rule, finalQuery);
-    
-    // ✅✅✅ 分页策略
+
+    // 分页策略
     if (rule.responseType != 'random') {
       if (rule.paramPage.isNotEmpty) {
         if (rule.pageMode == 'offset') {
@@ -171,7 +169,158 @@ class RuleEngine implements BaseImageSource {
     }
   }
 
-  // ==================== 基础工具 & 私有方法 (保持不变) ====================
+  // ============================================================
+  // ✅ 新增：详情补全（供 WallpaperService / DetailPage 调用）
+  // - 若 rule.detailUrl 未配置：直接返回原 wallpaper（只靠列表数据）
+  // - 若配置了：GET detailUrl（支持 {id}），按 detailRootPath 定位 root，再走同一套通配字段解析
+  // ============================================================
+  Future<UniWallpaper> fetchDetail(
+    SourceRule rule,
+    UniWallpaper base, {
+    Map<String, String>? headers,
+  }) async {
+    final detailUrlTpl = rule.detailUrl?.trim() ?? '';
+    if (detailUrlTpl.isEmpty) return base;
+
+    final url = detailUrlTpl.replaceAll('{id}', Uri.encodeComponent(base.id));
+    final reqHeaders = <String, String>{
+      ..._defaultUA(),
+      ...?rule.headers,
+      ...?headers,
+    };
+
+    try {
+      _logReq(rule, url, const {}, reqHeaders);
+
+      final response = await _dio.get(
+        url,
+        options: Options(
+          headers: reqHeaders,
+          responseType: ResponseType.json,
+          sendTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+
+      _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
+
+      final sc = response.statusCode ?? 0;
+      if (sc >= 400) {
+        throw DioException(
+          requestOptions: response.requestOptions,
+          response: response,
+          type: DioExceptionType.badResponse,
+          error: 'HTTP $sc',
+        );
+      }
+
+      final root = _selectRoot(rule.detailRootPath, response.data);
+      return _applyMetaFromObject(rule, base, root);
+    } on DioException catch (e) {
+      _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
+      rethrow;
+    } catch (e) {
+      _logErr(rule, null, url, e, null);
+      rethrow;
+    }
+  }
+
+  // ==================== Stage 2：归一化 & 赋值 ====================
+
+  UniWallpaper _applyMetaFromObject(SourceRule rule, UniWallpaper base, dynamic obj) {
+    // uploader
+    final uploader = _normalizeText(_pickFirstString(rule.uploaderPathCandidates, obj));
+    // views/favs/size/date/mime
+    final views = _normalizeText(_pickFirstString(rule.viewsPathCandidates, obj));
+    final favs = _normalizeText(_pickFirstString(rule.favoritesPathCandidates, obj));
+    final size = _normalizeText(_pickFirstString(rule.fileSizePathCandidates, obj));
+    final createdAt = _normalizeText(_pickFirstString(rule.createdAtPathCandidates, obj));
+    final mime = _normalizeText(_pickFirstString(rule.mimeTypePathCandidates, obj));
+
+    final tags = _normalizeTags(_pickFirstDynamic(rule.tagsPathCandidates, obj));
+
+    // ✅ 兜底策略：不覆盖已有的“更好值”
+    String keepBetter(String oldV, String newV, {String bad = ''}) {
+      final o = oldV.trim();
+      final n = newV.trim();
+      if (n.isEmpty) return o;
+      if (o.isEmpty || o == bad) return n;
+      return o;
+    }
+
+    final mergedUploader = keepBetter(base.uploader, uploader, bad: 'Unknown User');
+    final mergedViews = keepBetter(base.views, views);
+    final mergedFavs = keepBetter(base.favorites, favs);
+    final mergedSize = keepBetter(base.fileSize, size);
+    final mergedCreatedAt = keepBetter(base.createdAt, createdAt);
+    final mergedMime = keepBetter(base.mimeType, mime);
+
+    final mergedTags = (tags.isNotEmpty) ? tags : base.tags;
+
+    return base.copyWith(
+      uploader: mergedUploader,
+      views: mergedViews,
+      favorites: mergedFavs,
+      fileSize: mergedSize,
+      createdAt: mergedCreatedAt,
+      mimeType: mergedMime,
+      tags: mergedTags,
+    );
+  }
+
+  String _normalizeText(String? s) {
+    final v = (s ?? '').trim();
+    if (v.isEmpty) return '';
+    // 避免 "null"/"undefined" 之类污染 UI
+    final low = v.toLowerCase();
+    if (low == 'null' || low == 'undefined' || low == 'nan') return '';
+    return v;
+  }
+
+  List<String> _normalizeTags(dynamic raw) {
+    if (raw == null) return const [];
+    if (raw is List) {
+      final out = raw
+          .map((e) => (e?.toString() ?? '').trim())
+          .where((s) => s.isNotEmpty)
+          .toSet()
+          .toList();
+      return out;
+    }
+    final s = raw.toString().trim();
+    if (s.isEmpty) return const [];
+    // 常见分隔符：逗号/空格/分号/竖线
+    final parts = s.split(RegExp(r'[,;\| ]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toSet().toList();
+    return parts;
+  }
+
+  String? _pickFirstString(List<String> candidates, dynamic source) {
+    final v = _pickFirstDynamic(candidates, source);
+    if (v == null) return null;
+    return v.toString();
+  }
+
+  dynamic _pickFirstDynamic(List<String> candidates, dynamic source) {
+    if (candidates.isEmpty) return null;
+    for (final p in candidates) {
+      final v = _getValue<dynamic>(p, source);
+      if (v == null) continue;
+      if (v is String && v.trim().isEmpty) continue;
+      if (v is List && v.isEmpty) continue;
+      return v;
+    }
+    return null;
+  }
+
+  dynamic _selectRoot(String? rootPath, dynamic json) {
+    final p = (rootPath ?? '').trim();
+    if (p.isEmpty || p == '.' || p == r'$') return json;
+    // 允许 JsonPath 或 dotPath
+    return _getValue<dynamic>(p, json) ?? json;
+  }
+
+  // ==================== 原有逻辑（保持） ====================
 
   dynamic _readDotPath(dynamic source, String path) {
     if (path.isEmpty) return null;
@@ -294,7 +443,11 @@ class RuleEngine implements BaseImageSource {
       return;
     }
     if (value is List) {
-      final cleaned = value.map((e) => e?.toString() ?? '').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+      final cleaned = value
+          .map((e) => e?.toString() ?? '')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
       if (cleaned.isEmpty) return;
       params[key] = cleaned;
       return;
@@ -403,19 +556,25 @@ class RuleEngine implements BaseImageSource {
     if (match == null || match.value is! List) return [];
     final List list = match.value as List;
     final out = <UniWallpaper>[];
+
     for (final item in list) {
       String thumb = _getValue<String>(rule.thumbPath, item) ?? '';
       String full = _getValue<String>(rule.fullPath, item) ?? thumb;
+
       if (rule.imagePrefix != null && rule.imagePrefix!.isNotEmpty) {
         if (!thumb.startsWith('http')) thumb = rule.imagePrefix! + thumb;
         if (!full.startsWith('http')) full = rule.imagePrefix! + full;
       }
+
       final id = _stableId(rule, item, thumb, full);
       if (thumb.trim().isEmpty && full.trim().isEmpty) continue;
+
       final width = _toNum(_getValue(rule.widthPath ?? '', item)).toDouble();
       final height = _toNum(_getValue(rule.heightPath ?? '', item)).toDouble();
       final grade = _getValue<String>(rule.gradePath ?? '', item);
-      out.add(UniWallpaper(
+
+      // ✅ Stage 1+2：在列表解析阶段就尽量补齐元数据（通配候选路径）
+      final base = UniWallpaper(
         id: id,
         sourceId: rule.id,
         thumbUrl: thumb,
@@ -423,8 +582,12 @@ class RuleEngine implements BaseImageSource {
         width: width,
         height: height,
         grade: grade,
-      ));
+      );
+
+      final withMeta = _applyMetaFromObject(rule, base, item);
+      out.add(withMeta);
     }
+
     return out;
   }
 
@@ -437,17 +600,6 @@ class RuleEngine implements BaseImageSource {
     required Map<String, dynamic>? filterParams,
   }) async {
     _logReq(rule, requestUrl, params, headers);
-    const String kDebugRuleId = 'smithsonian_open_access_images';
-    final bool dbg = rule.id == kDebugRuleId;
-    String safeJson(dynamic v, {int max = 600}) {
-      try {
-        final s = jsonEncode(v);
-        return s.length > max ? '${s.substring(0, max)}...' : s;
-      } catch (_) {
-        final s = v?.toString() ?? '';
-        return s.length > max ? '${s.substring(0, max)}...' : s;
-      }
-    }
 
     try {
       final response = await _dio.get(
@@ -462,6 +614,7 @@ class RuleEngine implements BaseImageSource {
         ),
       );
       _logResp(rule, response.statusCode, response.realUri.toString(), response.data);
+
       final sc = response.statusCode ?? 0;
       if (sc >= 400) {
         throw DioException(
@@ -471,14 +624,7 @@ class RuleEngine implements BaseImageSource {
           error: 'HTTP $sc',
         );
       }
-      if (dbg) {
-        try {
-          final media0 = JsonPath(r'$.response.rows[0].content.descriptiveNonRepeating.online_media.media[0]').read(response.data).firstOrNull?.value;
-          _logger?.debug('DBG ${rule.id} media0=${safeJson(media0)}');
-        } catch (e) {
-          _logger?.debug('DBG ${rule.id} media0 ERR=$e');
-        }
-      }
+
       if (rule.pageMode == 'cursor' && rule.cursorPath != null && rule.cursorPath!.trim().isNotEmpty) {
         final nextCursor = _getValue(rule.cursorPath!, response.data);
         if (nextCursor != null) {
@@ -489,6 +635,7 @@ class RuleEngine implements BaseImageSource {
           _logger?.debug('CURSOR ${rule.id} missing (cursor_path=${rule.cursorPath})');
         }
       }
+
       return _parseJsonToWallpapers(rule, response.data);
     } on DioException catch (e) {
       _logErr(rule, e.response?.statusCode, e.requestOptions.uri.toString(), e, e.response?.data);
@@ -518,9 +665,11 @@ class RuleEngine implements BaseImageSource {
       }
       paramSets = next;
     });
+
     _logger?.log('MERGE ${rule.id} requests=${paramSets.length} keys=${mergeMulti.keys.toList()}');
     final List<UniWallpaper> merged = [];
     final Set<String> seen = {};
+
     for (final ps in paramSets) {
       _logReq(rule, requestUrl, ps, headers);
       try {
@@ -535,7 +684,9 @@ class RuleEngine implements BaseImageSource {
             validateStatus: (s) => s != null && s < 500,
           ),
         );
+
         _logResp(rule, resp.statusCode, resp.realUri.toString(), resp.data);
+
         final sc = resp.statusCode ?? 0;
         if (sc >= 400) {
           throw DioException(
@@ -545,6 +696,7 @@ class RuleEngine implements BaseImageSource {
             error: 'HTTP $sc',
           );
         }
+
         final items = _parseJsonToWallpapers(rule, resp.data);
         for (final it in items) {
           if (seen.add(it.id)) merged.add(it);
@@ -557,6 +709,7 @@ class RuleEngine implements BaseImageSource {
         rethrow;
       }
     }
+
     _logger?.log('MERGE ${rule.id} merged=${merged.length}');
     return merged;
   }
