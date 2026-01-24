@@ -24,6 +24,7 @@ dependencies:
   gal: ^2.3.0  # 保存图片到相册
   share_plus: ^9.0.0           # 系统分享
   flutter_inappwebview: ^6.0.0
+  path_provider: ^2.1.0
 
 dev_dependencies:
   flutter_test:
