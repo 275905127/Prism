@@ -2,130 +2,26 @@ name: Flutter CI
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - feat/engine-pack-poc
   pull_request:
-    branches: ["main"]
-  workflow_dispatch:
-    inputs:
-      build_apk:
-        description: "Also build release APK"
-        required: false
-        default: "true"
-      build_aab:
-        description: "Also build release AAB"
-        required: false
-        default: "false"
-      target_platform:
-        description: "APK target platform (android-arm64 / android-arm / android-x64)"
-        required: false
-        default: "android-arm64"
-      strict_analyze:
-        description: "Fail workflow on flutter analyze (true/false)"
-        required: false
-        default: "false"
-
-concurrency:
-  group: flutter-ci-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
-  flutter_ci:
+  analyze-and-build-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    env:
-      BUILD_APK: ${{ github.event_name == 'workflow_dispatch' && inputs.build_apk || 'false' }}
-      BUILD_AAB: ${{ github.event_name == 'workflow_dispatch' && inputs.build_aab || 'false' }}
-      TARGET_PLATFORM: ${{ github.event_name == 'workflow_dispatch' && inputs.target_platform || 'android-arm64' }}
-      STRICT_ANALYZE: ${{ github.event_name == 'workflow_dispatch' && inputs.strict_analyze || 'false' }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Java (Temurin 17)
-        uses: actions/setup-java@v4
+      - uses: subosito/flutter-action@v2
         with:
-          distribution: "temurin"
-          java-version: "17"
-          # 注意：这里已经启用了官方 gradle cache（够用且稳定）
-          cache: "gradle"
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          # 让 flutter-action 负责 pub/SDK cache，避免重复缓存与路径校验 warning
+          channel: stable
           cache: true
-
-      - name: Flutter version
-        run: flutter --version
-
-      - name: Debug inputs
-        run: |
-          echo "event='${{ github.event_name }}'"
-          echo "BUILD_APK='${{ env.BUILD_APK }}'"
-          echo "BUILD_AAB='${{ env.BUILD_AAB }}'"
-          echo "TARGET_PLATFORM='${{ env.TARGET_PLATFORM }}'"
-          echo "STRICT_ANALYZE='${{ env.STRICT_ANALYZE }}'"
 
       - name: Pub get
         run: flutter pub get
 
-      - name: Check format (non-blocking)
-        run: dart format . || true
-
-      - name: Analyze (non-blocking by default)
-        if: ${{ env.STRICT_ANALYZE != 'true' }}
-        run: flutter analyze || true
-
-      - name: Analyze (strict)
-        if: ${{ env.STRICT_ANALYZE == 'true' }}
+      - name: Analyze
         run: flutter analyze
 
-      # 只有在 workflow_dispatch 且需要构建 release（apk 或 aab）时才准备签名文件
-      - name: Decode keystore & write key.properties
-        if: ${{ github.event_name == 'workflow_dispatch' && (env.BUILD_AAB == 'true' || env.BUILD_APK == 'true') }}
-        shell: bash
-        run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > android/upload-keystore.jks
-          cat > android/key.properties <<'EOF'
-          storePassword=${{ secrets.KEYSTORE_STORE_PASSWORD }}
-          keyPassword=${{ secrets.KEYSTORE_KEY_PASSWORD }}
-          keyAlias=${{ secrets.KEYSTORE_KEY_ALIAS }}
-          storeFile=upload-keystore.jks
-          EOF
-
-      - name: Debug signing files
-        if: ${{ github.event_name == 'workflow_dispatch' && (env.BUILD_AAB == 'true' || env.BUILD_APK == 'true') }}
-        shell: bash
-        run: |
-          ls -la android || true
-          ls -la android/app || true
-          echo "---- android/key.properties ----"
-          cat android/key.properties || true
-
-      - name: Build APK (release)
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_APK == 'true' }}
-        run: flutter build apk --release --target-platform="${{ env.TARGET_PLATFORM }}"
-
-      - name: Build AAB (release)
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_AAB == 'true' }}
-        run: flutter build appbundle --release
-
-      - name: Upload AAB artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_AAB == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-aab
-          path: build/app/outputs/bundle/release/*.aab
-
-      - name: Upload APK artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && env.BUILD_APK == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: build/app/outputs/flutter-apk/*.apk
+      - name: Build Android (debug)
+        run: flutter build apk --debug
